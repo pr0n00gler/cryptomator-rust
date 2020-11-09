@@ -1,5 +1,5 @@
-use std::fs;
 use serde::{Deserialize, Serialize};
+use std::fs;
 
 use crate::error::MasterKeyError;
 
@@ -12,7 +12,7 @@ pub struct MasterKey {
     scryptBlockSize: u32,
     pub primaryMasterKey: String,
     hmacMasterKey: String,
-    versionMac: String
+    versionMac: String,
 }
 
 impl MasterKey {

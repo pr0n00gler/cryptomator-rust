@@ -10,3 +10,6 @@ edition = "2018"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 failure = "0.1"
+base64 = "0.13.0"
+scrypt = { version = "0.2", default-features = false }
+openssl = { version = "0.10", features = ["vendored"] }

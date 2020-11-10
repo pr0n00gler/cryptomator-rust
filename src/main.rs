@@ -1,9 +1,6 @@
 use cryptomator::masterkey::MasterKey;
 
 fn main() {
-    let mp: MasterKey = MasterKey::from_file(String::from(
-        "/Users/pr0n00gler/test_storage/masterkey.cryptomator",
-    ))
-    .unwrap();
-    println!("{}", mp.primaryMasterKey)
+    let _master_key = MasterKey::from_file("tests/test_storage/masterkey.cryptomator", "12345678").unwrap();
+    println!("done")
 }

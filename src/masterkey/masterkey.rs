@@ -1,27 +1,10 @@
-use std::fs;
-use std::io;
-
 use serde::{Deserialize, Serialize};
+use std::fs;
 
-#[derive(Debug)]
-pub enum MasterKeyError {
-    IO(io::Error),
-    JSON(serde_json::Error)
-}
-
-impl From<io::Error> for MasterKeyError {
-    fn from(err: io::Error) -> MasterKeyError {
-        MasterKeyError::IO(err)
-    }
-}
-
-impl From<serde_json::Error> for MasterKeyError {
-    fn from(err: serde_json::Error) -> MasterKeyError {
-        MasterKeyError::JSON(err)
-    }
-}
+use crate::error::MasterKeyError;
 
 #[derive(Deserialize, Serialize)]
+#[allow(non_snake_case)]
 pub struct MasterKey {
     version: u8,
     scryptSalt: String,
@@ -29,7 +12,7 @@ pub struct MasterKey {
     scryptBlockSize: u32,
     pub primaryMasterKey: String,
     hmacMasterKey: String,
-    versionMac: String
+    versionMac: String,
 }
 
 impl MasterKey {

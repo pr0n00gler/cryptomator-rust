@@ -56,3 +56,24 @@ impl From<openssl::aes::KeyError> for MasterKeyError {
         MasterKeyError::AESKeyError(err)
     }
 }
+
+#[derive(Debug, Fail)]
+pub enum CryptoError {
+    #[fail(display = "Base64 decode error")]
+    Base64DecodeError(base64::DecodeError),
+
+    #[fail(display = "Base64 decode error")]
+    AEADError(aes_siv::aead::Error)
+}
+
+impl From<base64::DecodeError> for CryptoError {
+    fn from(err: base64::DecodeError) -> CryptoError {
+        CryptoError::Base64DecodeError(err)
+    }
+}
+
+impl From<aes_siv::aead::Error> for CryptoError {
+    fn from(err: aes_siv::aead::Error) -> CryptoError {
+        CryptoError::AEADError(err)
+    }
+}

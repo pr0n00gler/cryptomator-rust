@@ -1,2 +1,1 @@
-pub mod error;
-pub mod masterkey;
+pub mod crypto;

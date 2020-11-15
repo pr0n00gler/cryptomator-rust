@@ -53,34 +53,29 @@ impl Cryptor {
         Ok(decrypted_filename)
     }
 
-    pub fn decrypt_file_header(&self, encrypted_header: Vec<u8>) -> Result<FileHeader, CryptoError> {
-        let nonce = &encrypted_header[..16];
-        let hmac_data = &encrypted_header[56..];
-
-        let mut cloned_header = encrypted_header.clone();
-
+    pub fn decrypt_file_header(&self, mut encrypted_header: Vec<u8>) -> Result<FileHeader, CryptoError> {
         //verify header payload
         let mut mac = HmacSha256::new_varkey(self.master_key.hmac_master_key.as_slice())?;
-        let mut payload_to_verify = vec![];
-        payload_to_verify.extend(nonce);
-        payload_to_verify.extend(&cloned_header[16..56]);
+        let mut payload_to_verify = vec![]; //nonce + ciphertext
+        payload_to_verify.extend(&encrypted_header[..16]); //nonce
+        payload_to_verify.extend(&encrypted_header[16..56]); //encrypted payload
         mac.update(payload_to_verify.as_slice());
-        mac.verify(hmac_data)?;
+        mac.verify(&encrypted_header[56..])?;
 
         //decrypt header payload
         let mut cipher = Aes256Ctr::new(GenericArray::from_slice(self.master_key.primary_master_key.as_slice()),
-                                    GenericArray::from_slice(nonce));
-        cipher.apply_keystream(& mut cloned_header[16..56]);
-        let decrypted_payload = &cloned_header[16..56];
+                                    GenericArray::from_slice(&encrypted_header[..16]));
+        cipher.apply_keystream(& mut encrypted_header[16..56]);
+        let decrypted_payload = &encrypted_header[16..56];
 
         let file_header_payload = FileHeaderPayload{
             reserved: clone_into_array(&decrypted_payload[..8]),
             content_key: clone_into_array(&decrypted_payload[8..])
         };
         let file_header = FileHeader{
-            nonce: clone_into_array(nonce),
+            nonce: clone_into_array(&encrypted_header[..16]),
             payload: file_header_payload,
-            mac: clone_into_array(hmac_data)
+            mac: clone_into_array(&encrypted_header[56..])
         };
 
         Ok(file_header)

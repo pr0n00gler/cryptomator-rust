@@ -1,10 +1,17 @@
 use cryptomator::crypto::{MasterKey, Cryptor};
+use std::fs;
 
 fn main() {
     let _master_key = MasterKey::from_file("tests/test_storage/masterkey.cryptomator", "12345678").unwrap();
 
     let cryptor = Cryptor::new(_master_key);
 
-    let decrypted_filename = cryptor.decrypt_filename("gBmHXW5KGoOJ2UgC-a9JbhdBiyTQJdRmmjEwm2nCDwmXuCnknFK1UYz_", "").unwrap();
+    let decrypted_filename = cryptor.decrypt_filename("gBmHXW5KGoOJ2UgC-a9JbhdBiyTQJdRmmjEwm2nCDwmXuCnknFK1UYz_", b"").unwrap();
     println!("{}", String::from_utf8(decrypted_filename).unwrap());
+
+    let file = fs::read("tests/test_storage/d/HI/RW3L6XRAPFC2UCK5QY37Q2U552IRPE/gBmHXW5KGoOJ2UgC-a9JbhdBiyTQJdRmmjEwm2nCDwmXuCnknFK1UYz_.c9r").unwrap();
+
+    let header = Vec::from(&file[..88]);
+    let file_header = cryptor.decrypt_file_header(header).unwrap();
+    println!("{:?}", file_header.payload.reserved);
 }

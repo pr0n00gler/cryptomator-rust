@@ -62,8 +62,14 @@ pub enum CryptoError {
     #[fail(display = "Base64 decode error")]
     Base64DecodeError(base64::DecodeError),
 
-    #[fail(display = "Base64 decode error")]
-    AEADError(aes_siv::aead::Error)
+    #[fail(display = "AEAD error")]
+    AEADError(aes_siv::aead::Error),
+
+    #[fail(display = "HMac error")]
+    HMacError(hmac::crypto_mac::MacError),
+
+    #[fail(display = "HMac invalid key length error")]
+    HMacInvalidKeyLengthError(hmac::crypto_mac::InvalidKeyLength)
 }
 
 impl From<base64::DecodeError> for CryptoError {
@@ -75,5 +81,17 @@ impl From<base64::DecodeError> for CryptoError {
 impl From<aes_siv::aead::Error> for CryptoError {
     fn from(err: aes_siv::aead::Error) -> CryptoError {
         CryptoError::AEADError(err)
+    }
+}
+
+impl From<hmac::crypto_mac::MacError> for CryptoError {
+    fn from(err: hmac::crypto_mac::MacError) -> CryptoError {
+        CryptoError::HMacError(err)
+    }
+}
+
+impl From<hmac::crypto_mac::InvalidKeyLength> for CryptoError {
+    fn from(err: hmac::crypto_mac::InvalidKeyLength) -> CryptoError {
+        CryptoError::HMacInvalidKeyLengthError(err)
     }
 }

@@ -72,7 +72,13 @@ pub enum CryptoError {
     HMacError(hmac::crypto_mac::MacError),
 
     #[fail(display = "HMac invalid key length error")]
-    HMacInvalidKeyLengthError(hmac::crypto_mac::InvalidKeyLength)
+    HMacInvalidKeyLengthError(hmac::crypto_mac::InvalidKeyLength),
+
+    #[fail(display = "Invalid file header length")]
+    InvalidFileHeaderLength(String),
+
+    #[fail(display = "Invalid file chunk length")]
+    InvalidFileChunkLength(String)
 }
 
 impl From<std::io::Error> for CryptoError {

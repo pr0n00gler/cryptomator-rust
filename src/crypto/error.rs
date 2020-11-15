@@ -59,6 +59,9 @@ impl From<openssl::aes::KeyError> for MasterKeyError {
 
 #[derive(Debug, Fail)]
 pub enum CryptoError {
+    #[fail(display = "Input/Output error")]
+    IOError(std::io::Error),
+
     #[fail(display = "Base64 decode error")]
     Base64DecodeError(base64::DecodeError),
 
@@ -70,6 +73,12 @@ pub enum CryptoError {
 
     #[fail(display = "HMac invalid key length error")]
     HMacInvalidKeyLengthError(hmac::crypto_mac::InvalidKeyLength)
+}
+
+impl From<std::io::Error> for CryptoError {
+    fn from(err: std::io::Error) -> CryptoError {
+        CryptoError::IOError(err)
+    }
 }
 
 impl From<base64::DecodeError> for CryptoError {

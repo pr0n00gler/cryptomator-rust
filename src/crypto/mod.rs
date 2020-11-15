@@ -1,7 +1,7 @@
-mod masterkey;
+mod common;
 mod cryptor;
 mod error;
-mod common;
+mod masterkey;
 
-pub use self::masterkey::MasterKey;
 pub use self::cryptor::Cryptor;
+pub use self::masterkey::MasterKey;

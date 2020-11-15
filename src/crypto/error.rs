@@ -78,7 +78,7 @@ pub enum CryptoError {
     InvalidFileHeaderLength(String),
 
     #[fail(display = "Invalid file chunk length")]
-    InvalidFileChunkLength(String)
+    InvalidFileChunkLength(String),
 }
 
 impl From<std::io::Error> for CryptoError {

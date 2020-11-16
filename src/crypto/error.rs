@@ -79,6 +79,9 @@ pub enum CryptoError {
 
     #[fail(display = "Invalid file chunk length")]
     InvalidFileChunkLength(String),
+
+    #[fail(display = "String from UTF-8 error")]
+    StringFromUTF8Error(std::string::FromUtf8Error),
 }
 
 impl From<std::io::Error> for CryptoError {
@@ -108,5 +111,11 @@ impl From<hmac::crypto_mac::MacError> for CryptoError {
 impl From<hmac::crypto_mac::InvalidKeyLength> for CryptoError {
     fn from(err: hmac::crypto_mac::InvalidKeyLength) -> CryptoError {
         CryptoError::HMacInvalidKeyLengthError(err)
+    }
+}
+
+impl From<std::string::FromUtf8Error> for CryptoError {
+    fn from(err: std::string::FromUtf8Error) -> CryptoError {
+        CryptoError::StringFromUTF8Error(err)
     }
 }

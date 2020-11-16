@@ -1,7 +1,7 @@
 use cryptomator::crypto;
 
-const PATH_TO_MASTER_KEY: &str = "tests/test_storage/masterkey.cryptomator";
-const DEFAULT_PASSWORD: &str = "12345678";
+pub const PATH_TO_MASTER_KEY: &str = "tests/test_storage/masterkey.cryptomator";
+pub const DEFAULT_PASSWORD: &str = "12345678";
 
 #[test]
 fn test_master_key_from_file() {

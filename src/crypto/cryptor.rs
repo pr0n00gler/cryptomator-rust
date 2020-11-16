@@ -2,6 +2,7 @@ use crate::crypto::error::CryptoError;
 use crate::crypto::MasterKey;
 
 use std::io::{Read, Write};
+use std::iter;
 
 use byteorder::{BigEndian, WriteBytesExt};
 
@@ -54,24 +55,61 @@ impl Cryptor {
         Cryptor { master_key }
     }
 
+    pub fn get_dir_id_hash(&self, dir_id: &[u8]) -> Result<String, CryptoError> {
+        let mut long_key: Vec<u8> = vec![];
+        long_key.extend(&self.master_key.hmac_master_key);
+        long_key.extend(&self.master_key.primary_master_key);
+        let aes_siv_key = GenericArray::clone_from_slice(long_key.as_slice());
+
+        let mut cipher = Aes256Siv::new(aes_siv_key);
+        let encrypted_dir_id = cipher.encrypt(iter::empty::<&[u8]>(), dir_id)?;
+
+        let mut sha1_hasher = sha1::Sha1::new();
+        sha1_hasher.update(encrypted_dir_id.as_slice());
+        let sha1_hash = sha1_hasher.digest().bytes();
+        let dir_id_hash_base32_encoded = base32::encode(
+            base32::Alphabet::RFC4648 { padding: false },
+            sha1_hash.as_ref(),
+        );
+        Ok(dir_id_hash_base32_encoded)
+    }
+
+    pub fn encrypt_filename(
+        &self,
+        cleartext_name: &str,
+        parent_dir_id: &[u8],
+    ) -> Result<String, CryptoError> {
+        let mut long_key: Vec<u8> = vec![];
+        long_key.extend(&self.master_key.hmac_master_key);
+        long_key.extend(&self.master_key.primary_master_key);
+        let aes_siv_key = GenericArray::clone_from_slice(long_key.as_slice());
+
+        let mut cipher = Aes256Siv::new(aes_siv_key);
+        let encrypted_filename = cipher.encrypt(&[parent_dir_id], cleartext_name.as_bytes())?;
+
+        let encoded_ciphertext = base64::encode_config(encrypted_filename, base64::URL_SAFE);
+        Ok(encoded_ciphertext)
+    }
+
     pub fn decrypt_filename(
         &self,
         encrypted_filename: &str,
         parent_dir_id: &[u8],
-    ) -> Result<Vec<u8>, CryptoError> {
+    ) -> Result<String, CryptoError> {
         let encrypted_filename_bytes = base64::decode_config(encrypted_filename, base64::URL_SAFE)?;
 
         let mut long_key: Vec<u8> = vec![];
         long_key.extend(&self.master_key.hmac_master_key);
         long_key.extend(&self.master_key.primary_master_key);
 
-        let aes_siv_key = GenericArray::from_slice(long_key.as_slice());
+        let aes_siv_key = GenericArray::clone_from_slice(long_key.as_slice());
 
-        let mut cipher = Aes256Siv::new(aes_siv_key.clone());
+        let mut cipher = Aes256Siv::new(aes_siv_key);
 
         let decrypted_filename =
             cipher.decrypt(&[parent_dir_id], encrypted_filename_bytes.as_slice())?;
-        Ok(decrypted_filename)
+
+        Ok(String::from_utf8(decrypted_filename)?)
     }
 
     pub fn decrypt_file_header(

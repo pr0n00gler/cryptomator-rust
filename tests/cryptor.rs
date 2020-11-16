@@ -1,0 +1,44 @@
+mod masterkey;
+
+use cryptomator::crypto;
+use cryptomator::crypto::{Cryptor, MasterKey};
+use masterkey::{DEFAULT_PASSWORD, PATH_TO_MASTER_KEY};
+
+const ROOT_DIR_ID_HASH: &str = "HIRW3L6XRAPFC2UCK5QY37Q2U552IRPE";
+const ROOT_DIR_ID: &[u8] = b"";
+
+const TEST_FILENAME: &str = "lorem-ipsum.pdf";
+const ENCRYPTED_TEST_FILENAME: &str = "fXQEfw6iSwP1esHbRznuVFZqv_LQFqNwC2r2LOQa-A==";
+
+fn get_test_master_key() -> MasterKey {
+    crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap()
+}
+
+fn get_test_cryptor() -> Cryptor {
+    Cryptor::new(get_test_master_key())
+}
+
+#[test]
+fn test_encrypt_dir_id() {
+    let cryptor = get_test_cryptor();
+    let dir_id_hash = cryptor.get_dir_id_hash(ROOT_DIR_ID).unwrap();
+    assert_eq!(ROOT_DIR_ID_HASH, dir_id_hash.as_str());
+}
+
+#[test]
+fn test_encrypt_filename() {
+    let cryptor = get_test_cryptor();
+    let encrypted_filename = cryptor
+        .encrypt_filename(TEST_FILENAME, ROOT_DIR_ID)
+        .unwrap();
+    assert_eq!(ENCRYPTED_TEST_FILENAME, encrypted_filename.as_str())
+}
+
+#[test]
+fn test_decrypt_filename() {
+    let cryptor = get_test_cryptor();
+    let decrypted_filename = cryptor
+        .decrypt_filename(ENCRYPTED_TEST_FILENAME, ROOT_DIR_ID)
+        .unwrap();
+    assert_eq!(TEST_FILENAME, decrypted_filename.as_str())
+}

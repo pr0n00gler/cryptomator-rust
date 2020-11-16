@@ -53,5 +53,35 @@ fn test_encrypt_decrypt_header() {
 
     assert_eq!(header.nonce, decrypted_header.nonce);
     assert_eq!(header.payload.reserved, decrypted_header.payload.reserved);
-    assert_eq!(header.payload.content_key, decrypted_header.payload.content_key);
+    assert_eq!(
+        header.payload.content_key,
+        decrypted_header.payload.content_key
+    );
+}
+
+#[test]
+fn test_encrypt_decrypt_chunk() {
+    let cryptor = get_test_cryptor();
+
+    let header = cryptor.create_file_header();
+    let chunk_data: Vec<u8> = (0..10).map(|_| rand::random::<u8>()).collect();
+
+    let encrypted_chunk = cryptor
+        .encrypt_chunk(
+            header.nonce.as_ref(),
+            header.payload.content_key.as_ref(),
+            0,
+            chunk_data.clone(),
+        )
+        .unwrap();
+    let decrypted_chunk = cryptor
+        .decrypt_chunk(
+            header.nonce.as_ref(),
+            header.payload.content_key.as_ref(),
+            0,
+            encrypted_chunk.clone(),
+        )
+        .unwrap();
+
+    assert_eq!(chunk_data, decrypted_chunk);
 }

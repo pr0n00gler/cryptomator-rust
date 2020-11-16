@@ -4,6 +4,8 @@ use cryptomator::crypto;
 use cryptomator::crypto::{Cryptor, MasterKey};
 use masterkey::{DEFAULT_PASSWORD, PATH_TO_MASTER_KEY};
 
+use std::io::Cursor;
+
 const ROOT_DIR_ID_HASH: &str = "HIRW3L6XRAPFC2UCK5QY37Q2U552IRPE";
 const ROOT_DIR_ID: &[u8] = b"";
 
@@ -64,7 +66,7 @@ fn test_encrypt_decrypt_chunk() {
     let cryptor = get_test_cryptor();
 
     let header = cryptor.create_file_header();
-    let chunk_data: Vec<u8> = (0..10).map(|_| rand::random::<u8>()).collect();
+    let chunk_data: Vec<u8> = (0..1024).map(|_| rand::random::<u8>()).collect();
 
     let encrypted_chunk = cryptor
         .encrypt_chunk(
@@ -84,4 +86,28 @@ fn test_encrypt_decrypt_chunk() {
         .unwrap();
 
     assert_eq!(chunk_data, decrypted_chunk);
+}
+
+#[test]
+fn test_encrypt_decrypt_content() {
+    let cryptor = get_test_cryptor();
+
+    let content_data: Vec<u8> = (0..10 * 1024 * 1024)
+        .map(|_| rand::random::<u8>())
+        .collect();
+    let mut raw_content_reader = Cursor::new(content_data);
+
+    let mut encrypted_content = Cursor::new(Vec::new());
+    let mut decrypted_content = Cursor::new(Vec::new());
+
+    cryptor
+        .encrypt_content(&mut raw_content_reader, &mut encrypted_content)
+        .unwrap();
+    encrypted_content.set_position(0);
+
+    cryptor
+        .decrypt_content(&mut encrypted_content, &mut decrypted_content)
+        .unwrap();
+
+    assert_eq!(raw_content_reader.get_ref(), decrypted_content.get_ref());
 }

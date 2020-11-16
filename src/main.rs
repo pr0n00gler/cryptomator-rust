@@ -11,9 +11,9 @@ fn main() {
         .decrypt_filename("fXQEfw6iSwP1esHbRznuVFZqv_LQFqNwC2r2LOQa-A==", b"")
         .unwrap();
 
-    let encrypted_file = fs::File::open("tests/test_storage/d/HI/RW3L6XRAPFC2UCK5QY37Q2U552IRPE/fXQEfw6iSwP1esHbRznuVFZqv_LQFqNwC2r2LOQa-A==.c9r").unwrap();
-    let decrypted_file = fs::File::create(decrypted_filename).unwrap();
+    let mut encrypted_file = fs::File::open("tests/test_storage/d/HI/RW3L6XRAPFC2UCK5QY37Q2U552IRPE/fXQEfw6iSwP1esHbRznuVFZqv_LQFqNwC2r2LOQa-A==.c9r").unwrap();
+    let mut decrypted_file = fs::File::create(decrypted_filename).unwrap();
     cryptor
-        .decrypt_content(encrypted_file, decrypted_file)
+        .decrypt_content(&mut encrypted_file, &mut decrypted_file)
         .unwrap();
 }

@@ -204,10 +204,38 @@ impl Cryptor {
         Ok(file_header)
     }
 
+    pub fn encrypt_content<R: Read, W: Write>(
+        &self,
+        input: &mut R,
+        output: &mut W,
+    ) -> Result<(), CryptoError> {
+        let file_header = self.create_file_header();
+        let encrypted_header = self.encrypt_file_header(&file_header)?;
+        output.write(encrypted_header.as_slice())?;
+
+        let mut file_chunk = [0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH];
+        let mut chunk_number: usize = 0;
+        loop {
+            let read_bytes = input.read(&mut file_chunk)?;
+            let encrypted_chunk = self.encrypt_chunk(
+                file_header.nonce.as_ref(),
+                file_header.payload.content_key.as_ref(),
+                chunk_number,
+                Vec::from(&file_chunk[..read_bytes]),
+            )?;
+            output.write(encrypted_chunk.as_slice())?;
+            if read_bytes < FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
+                break;
+            }
+            chunk_number += 1;
+        }
+        Ok(())
+    }
+
     pub fn decrypt_content<R: Read, W: Write>(
         &self,
-        mut input: R,
-        mut output: W,
+        input: &mut R,
+        output: &mut W,
     ) -> Result<(), CryptoError> {
         let mut header_bytes = [0u8; FILE_HEADER_LENGTH];
         input.read_exact(&mut header_bytes)?;

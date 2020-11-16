@@ -4,6 +4,8 @@ use crate::crypto::MasterKey;
 use std::io::{Read, Write};
 use std::iter;
 
+use rand::Rng;
+
 use byteorder::{BigEndian, WriteBytesExt};
 
 use aes_siv::aead::generic_array::GenericArray;
@@ -110,6 +112,44 @@ impl Cryptor {
             cipher.decrypt(&[parent_dir_id], encrypted_filename_bytes.as_slice())?;
 
         Ok(String::from_utf8(decrypted_filename)?)
+    }
+
+    pub fn create_file_header(&self) -> FileHeader {
+        FileHeader{
+            nonce: rand::thread_rng().gen::<[u8; 16]>(),
+            payload: FileHeaderPayload{
+                reserved: [0xFu8; 8],
+                content_key: rand::thread_rng().gen::<[u8; 32]>()
+            },
+            mac: [0u8; 32] //not calculated yet
+        }
+    }
+
+    pub fn encrypt_file_header(&self, file_header: &FileHeader) -> Result<Vec<u8>, CryptoError> {
+        let mut encrypted_header: Vec<u8> = vec![];
+
+        let mut payload: Vec<u8> = vec![];
+        payload.extend_from_slice(file_header.payload.reserved.as_ref());
+        payload.extend_from_slice(file_header.payload.content_key.as_ref());
+
+        let mut cipher = Aes256Ctr::new(
+            GenericArray::from_slice(self.master_key.primary_master_key.as_slice()),
+            GenericArray::from_slice(file_header.nonce.as_ref()),
+        );
+        cipher.apply_keystream(payload.as_mut_slice());
+
+        let mut mac_payload: Vec<u8> = vec![];
+        mac_payload.extend_from_slice(file_header.nonce.as_ref());
+        mac_payload.extend(&payload);
+        let mut mac = HmacSha256::new_varkey(self.master_key.hmac_master_key.as_slice())?;
+        mac.update(mac_payload.as_slice());
+        let mac_bytes = mac.finalize().into_bytes();
+
+        encrypted_header.extend_from_slice(file_header.nonce.as_ref());
+        encrypted_header.extend_from_slice(payload.as_slice());
+        encrypted_header.extend_from_slice(mac_bytes.as_slice());
+
+        Ok(encrypted_header)
     }
 
     pub fn decrypt_file_header(

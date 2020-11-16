@@ -42,3 +42,16 @@ fn test_decrypt_filename() {
         .unwrap();
     assert_eq!(TEST_FILENAME, decrypted_filename.as_str())
 }
+
+#[test]
+fn test_encrypt_decrypt_header() {
+    let cryptor = get_test_cryptor();
+
+    let header = cryptor.create_file_header();
+    let encrypted_header = cryptor.encrypt_file_header(&header).unwrap();
+    let decrypted_header = cryptor.decrypt_file_header(encrypted_header).unwrap();
+
+    assert_eq!(header.nonce, decrypted_header.nonce);
+    assert_eq!(header.payload.reserved, decrypted_header.payload.reserved);
+    assert_eq!(header.payload.content_key, decrypted_header.payload.content_key);
+}

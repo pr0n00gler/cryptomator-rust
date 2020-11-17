@@ -51,7 +51,9 @@ fn test_encrypt_decrypt_header() {
 
     let header = cryptor.create_file_header();
     let encrypted_header = cryptor.encrypt_file_header(&header).unwrap();
-    let decrypted_header = cryptor.decrypt_file_header(encrypted_header).unwrap();
+    let decrypted_header = cryptor
+        .decrypt_file_header(encrypted_header.as_slice())
+        .unwrap();
 
     assert_eq!(header.nonce, decrypted_header.nonce);
     assert_eq!(header.payload.reserved, decrypted_header.payload.reserved);
@@ -73,7 +75,7 @@ fn test_encrypt_decrypt_chunk() {
             header.nonce.as_ref(),
             header.payload.content_key.as_ref(),
             0,
-            chunk_data.clone(),
+            chunk_data.as_slice(),
         )
         .unwrap();
     let decrypted_chunk = cryptor
@@ -81,7 +83,7 @@ fn test_encrypt_decrypt_chunk() {
             header.nonce.as_ref(),
             header.payload.content_key.as_ref(),
             0,
-            encrypted_chunk.clone(),
+            encrypted_chunk.as_slice(),
         )
         .unwrap();
 

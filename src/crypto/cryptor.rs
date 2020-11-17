@@ -121,7 +121,7 @@ impl Cryptor {
                 reserved: [0xFu8; 8],
                 content_key: rand::thread_rng().gen::<[u8; 32]>(),
             },
-            mac: [0u8; 32], //not calculated yet
+            mac: [0u8; 32],
         }
     }
 
@@ -152,10 +152,7 @@ impl Cryptor {
         Ok(encrypted_header)
     }
 
-    pub fn decrypt_file_header(
-        &self,
-        mut encrypted_header: Vec<u8>,
-    ) -> Result<FileHeader, CryptoError> {
+    pub fn decrypt_file_header(&self, encrypted_header: &[u8]) -> Result<FileHeader, CryptoError> {
         if encrypted_header.len() < FILE_HEADER_LENGTH {
             return Err(InvalidFileHeaderLength(String::from(format!(
                 "file header must be exactly {} bytes length, got: {}",
@@ -180,12 +177,11 @@ impl Cryptor {
             GenericArray::from_slice(self.master_key.primary_master_key.as_slice()),
             GenericArray::from_slice(&encrypted_header[..FILE_HEADER_NONCE_LENGTH]),
         );
-        cipher.apply_keystream(
-            &mut encrypted_header
+        let mut decrypted_payload = Vec::from(
+            &encrypted_header
                 [FILE_HEADER_NONCE_LENGTH..FILE_HEADER_NONCE_LENGTH + FILE_HEADER_PAYLOAD_LENGTH],
         );
-        let decrypted_payload = &encrypted_header
-            [FILE_HEADER_NONCE_LENGTH..FILE_HEADER_NONCE_LENGTH + FILE_HEADER_PAYLOAD_LENGTH];
+        cipher.apply_keystream(&mut decrypted_payload);
 
         let file_header_payload = FileHeaderPayload {
             reserved: clone_into_array(&decrypted_payload[..FILE_HEADER_PAYLOAD_RESERVED_LENGTH]),
@@ -221,7 +217,7 @@ impl Cryptor {
                 file_header.nonce.as_ref(),
                 file_header.payload.content_key.as_ref(),
                 chunk_number,
-                Vec::from(&file_chunk[..read_bytes]),
+                &file_chunk[..read_bytes],
             )?;
             output.write(encrypted_chunk.as_slice())?;
             if read_bytes < FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
@@ -239,7 +235,7 @@ impl Cryptor {
     ) -> Result<(), CryptoError> {
         let mut header_bytes = [0u8; FILE_HEADER_LENGTH];
         input.read_exact(&mut header_bytes)?;
-        let file_header = self.decrypt_file_header(Vec::from(header_bytes))?;
+        let file_header = self.decrypt_file_header(&header_bytes)?;
 
         let mut file_chunk = [0u8; FILE_CHUNK_LENGTH];
         let mut chunk_number: usize = 0;
@@ -249,7 +245,7 @@ impl Cryptor {
                 file_header.nonce.as_ref(),
                 file_header.payload.content_key.as_ref(),
                 chunk_number,
-                Vec::from(&file_chunk[..read_bytes]),
+                &file_chunk[..read_bytes],
             )?;
             output.write(chunk_content.as_slice())?;
             if read_bytes < FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
@@ -265,7 +261,7 @@ impl Cryptor {
         header_nonce: &[u8],
         file_key: &[u8],
         chunk_number: usize,
-        mut chunk_data: Vec<u8>,
+        chunk_data: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
         let chunk_nonce = rand::thread_rng().gen::<[u8; 16]>();
 
@@ -273,7 +269,8 @@ impl Cryptor {
             GenericArray::from_slice(file_key),
             GenericArray::from_slice(chunk_nonce.as_ref()),
         );
-        cipher.apply_keystream(&mut chunk_data);
+        let mut encrypted_chunk_data = Vec::from(chunk_data);
+        cipher.apply_keystream(&mut encrypted_chunk_data);
 
         let mut chunk_number_big_endian = vec![];
         chunk_number_big_endian.write_u64::<BigEndian>(chunk_number as u64)?;
@@ -282,7 +279,7 @@ impl Cryptor {
         mac_payload.extend_from_slice(header_nonce.as_ref());
         mac_payload.extend(&chunk_number_big_endian);
         mac_payload.extend_from_slice(chunk_nonce.as_ref());
-        mac_payload.extend(&chunk_data);
+        mac_payload.extend(&encrypted_chunk_data);
 
         let mut mac = HmacSha256::new_varkey(self.master_key.hmac_master_key.as_slice())?;
         mac.update(mac_payload.as_slice());
@@ -290,7 +287,7 @@ impl Cryptor {
 
         let mut encrypted_chunk: Vec<u8> = vec![];
         encrypted_chunk.extend_from_slice(chunk_nonce.as_ref());
-        encrypted_chunk.extend(chunk_data);
+        encrypted_chunk.extend(encrypted_chunk_data);
         encrypted_chunk.extend(mac_bytes);
 
         Ok(encrypted_chunk)
@@ -301,7 +298,7 @@ impl Cryptor {
         header_nonce: &[u8],
         file_key: &[u8],
         chunk_number: usize,
-        mut encrypted_chunk: Vec<u8>,
+        encrypted_chunk: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
         if encrypted_chunk.len() < FILE_CHUNK_CONTENT_MAC_LENGTH + FILE_CHUNK_CONTENT_NONCE_LENGTH {
             return Err(InvalidFileChunkLength(String::from(format!(
@@ -331,9 +328,10 @@ impl Cryptor {
             GenericArray::from_slice(file_key),
             GenericArray::from_slice(&encrypted_chunk[..16]),
         );
-        cipher.apply_keystream(&mut encrypted_chunk[FILE_CHUNK_CONTENT_NONCE_LENGTH..begin_of_mac]);
-        let decrypted_content = &encrypted_chunk[FILE_CHUNK_CONTENT_NONCE_LENGTH..begin_of_mac];
+        let mut decrypted_content =
+            Vec::from(&encrypted_chunk[FILE_CHUNK_CONTENT_NONCE_LENGTH..begin_of_mac]);
+        cipher.apply_keystream(&mut decrypted_content);
 
-        Ok(Vec::from(decrypted_content))
+        Ok(decrypted_content)
     }
 }

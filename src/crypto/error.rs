@@ -119,3 +119,24 @@ impl From<std::string::FromUtf8Error> for CryptoError {
         CryptoError::StringFromUTF8Error(err)
     }
 }
+
+#[derive(Debug, Fail)]
+pub enum FileSystemError {
+    #[fail(display = "Crypto error")]
+    CryptoError(CryptoError),
+
+    #[fail(display = "Master key error")]
+    MasterKeyError(MasterKeyError),
+}
+
+impl From<CryptoError> for FileSystemError {
+    fn from(err: CryptoError) -> FileSystemError {
+        FileSystemError::CryptoError(err)
+    }
+}
+
+impl From<MasterKeyError> for FileSystemError {
+    fn from(err: MasterKeyError) -> FileSystemError {
+        FileSystemError::MasterKeyError(err)
+    }
+}

@@ -10,7 +10,9 @@ fn main() {
         local_fs,
     )
     .unwrap();
-    let files = crypto_fs.read_dir("/").unwrap();
+    let files = crypto_fs
+        .read_dir("/some_folder/another_sub_folder")
+        .unwrap();
     for f in files {
         println!("{}", f)
     }

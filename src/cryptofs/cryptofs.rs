@@ -31,7 +31,38 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
         for c in components {
             dir_id = match c {
                 std::path::Component::RootDir => vec![],
-                _ => vec![], //TODO
+                _ => {
+                    let dir_hash = self.cryptor.get_dir_id_hash(dir_id.as_slice())?;
+                    let real_path = Path::new(self.root_folder.as_str())
+                        .join(&dir_hash[..2])
+                        .join(&dir_hash[2..]);
+                    let files = self
+                        .file_system_provider
+                        .read_dir(real_path.to_str().unwrap_or_default())
+                        .unwrap();
+                    let mut dir_uuid = vec![];
+                    for f in files {
+                        let decrypted_name = self
+                            .cryptor
+                            .decrypt_filename(&f[..f.len() - 4], dir_id.as_slice())
+                            .unwrap();
+                        if decrypted_name == c.as_os_str().to_str().unwrap() {
+                            let mut reader = self
+                                .file_system_provider
+                                .open_file(
+                                    real_path
+                                        .join(f)
+                                        .join("dir.c9r")
+                                        .to_str()
+                                        .unwrap_or_default(),
+                                )
+                                .unwrap();
+                            reader.read_to_end(&mut dir_uuid).unwrap();
+                            break;
+                        }
+                    }
+                    dir_uuid
+                }
             };
         }
         Ok(dir_id)

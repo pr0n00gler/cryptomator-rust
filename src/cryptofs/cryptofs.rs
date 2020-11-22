@@ -38,26 +38,21 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
                         .join(&dir_hash[2..]);
                     let files = self
                         .file_system_provider
-                        .read_dir(real_path.to_str().unwrap_or_default())
-                        .unwrap();
+                        .read_dir(real_path.to_str().unwrap_or_default())?;
                     let mut dir_uuid = vec![];
                     for f in files {
                         let decrypted_name = self
                             .cryptor
-                            .decrypt_filename(&f[..f.len() - 4], dir_id.as_slice())
-                            .unwrap();
-                        if decrypted_name == c.as_os_str().to_str().unwrap() {
-                            let mut reader = self
-                                .file_system_provider
-                                .open_file(
-                                    real_path
-                                        .join(f)
-                                        .join("dir.c9r")
-                                        .to_str()
-                                        .unwrap_or_default(),
-                                )
-                                .unwrap();
-                            reader.read_to_end(&mut dir_uuid).unwrap();
+                            .decrypt_filename(&f[..f.len() - 4], dir_id.as_slice())?;
+                        if decrypted_name == c.as_os_str().to_str().unwrap_or_default() {
+                            let mut reader = self.file_system_provider.open_file(
+                                real_path
+                                    .join(f)
+                                    .join("dir.c9r")
+                                    .to_str()
+                                    .unwrap_or_default(),
+                            )?;
+                            reader.read_to_end(&mut dir_uuid)?;
                             break;
                         }
                     }

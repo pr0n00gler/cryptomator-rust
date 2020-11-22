@@ -11,7 +11,7 @@ fn main() {
     )
     .unwrap();
     let files = crypto_fs
-        .read_dir("/some_folder/another_sub_folder")
+        .read_dir("/kek/lol")
         .unwrap();
     for f in files {
         println!("{}", f)

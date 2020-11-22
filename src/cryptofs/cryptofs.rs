@@ -1,7 +1,7 @@
 use crate::crypto::{Cryptor, MasterKey};
 use crate::cryptofs::{FileSystem, FileSystemError, SeekAndRead};
 use std::path::Path;
-use crate::cryptofs::error::FileSystemError::UnknownError;
+use crate::cryptofs::error::FileSystemError::{UnknownError, InvalidPathError, PathIsNotExist};
 
 const ENCRYPTED_FILE_EXT: &str = ".c9r";
 
@@ -45,7 +45,7 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
         for c in components {
             dir_id = match c {
                 std::path::Component::RootDir => vec![],
-                _ => {
+                std::path::Component::Normal(p) => {
                     let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
                     let files = self
                         .file_system_provider
@@ -55,7 +55,7 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
                         let decrypted_name = self
                             .cryptor
                             .decrypt_filename(&f[..f.len() - ENCRYPTED_FILE_EXT.len()], dir_id.as_slice())?;
-                        if decrypted_name == c.as_os_str().to_str().unwrap_or_default() {
+                        if decrypted_name == p.to_str().unwrap_or_default() {
                             let mut reader = self.file_system_provider.open_file(
                                 Path::new(real_path.as_str())
                                     .join(f)
@@ -67,8 +67,12 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
                             break;
                         }
                     }
+                    if dir_uuid.len() == 0 {
+                        return Err(PathIsNotExist(String::from(c.as_os_str().to_str().unwrap_or_default())));
+                    }
                     dir_uuid
                 }
+                _ => return Err(InvalidPathError(String::from(c.as_os_str().to_str().unwrap_or_default())))
             };
         }
         Ok(dir_id)

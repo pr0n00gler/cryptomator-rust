@@ -14,6 +14,12 @@ pub enum FileSystemError {
 
     #[fail(display = "Unknown error")]
     UnknownError(String),
+
+    #[fail(display = "Invalid path error")]
+    InvalidPathError(String),
+
+    #[fail(display = "Path is not exist error")]
+    PathIsNotExist(String),
 }
 
 impl From<std::io::Error> for FileSystemError {

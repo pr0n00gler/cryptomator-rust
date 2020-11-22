@@ -1,6 +1,9 @@
 use crate::crypto::{Cryptor, MasterKey};
-use crate::cryptofs::{FileSystem, FileSystemError};
+use crate::cryptofs::{FileSystem, FileSystemError, SeekAndRead};
 use std::path::Path;
+use crate::cryptofs::error::FileSystemError::UnknownError;
+
+const ENCRYPTED_FILE_EXT: &str = ".c9r";
 
 pub struct CryptoFS<FSP: FileSystem> {
     cryptor: Cryptor,
@@ -25,6 +28,17 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
         Ok(crypto_fs)
     }
 
+    fn real_path_from_dir_id(&self, dir_id: &[u8]) -> Result<String, FileSystemError> {
+        let dir_hash = self.cryptor.get_dir_id_hash(dir_id)?;
+        let real_path = Path::new(self.root_folder.as_str())
+            .join(&dir_hash[..2])
+            .join(&dir_hash[2..]);
+        match real_path.to_str() {
+            Some(p) => Ok(String::from(p)),
+            None => Err(UnknownError(String::from("failed to convert PathBuf to str")))
+        }
+    }
+
     fn dir_id_from_path(&self, path: &str) -> Result<Vec<u8>, FileSystemError> {
         let mut dir_id: Vec<u8> = vec![];
         let components = std::path::Path::new(path).components().collect::<Vec<_>>();
@@ -32,21 +46,18 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
             dir_id = match c {
                 std::path::Component::RootDir => vec![],
                 _ => {
-                    let dir_hash = self.cryptor.get_dir_id_hash(dir_id.as_slice())?;
-                    let real_path = Path::new(self.root_folder.as_str())
-                        .join(&dir_hash[..2])
-                        .join(&dir_hash[2..]);
+                    let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
                     let files = self
                         .file_system_provider
-                        .read_dir(real_path.to_str().unwrap_or_default())?;
+                        .read_dir(real_path.as_str())?;
                     let mut dir_uuid = vec![];
                     for f in files {
                         let decrypted_name = self
                             .cryptor
-                            .decrypt_filename(&f[..f.len() - 4], dir_id.as_slice())?;
+                            .decrypt_filename(&f[..f.len() - ENCRYPTED_FILE_EXT.len()], dir_id.as_slice())?;
                         if decrypted_name == c.as_os_str().to_str().unwrap_or_default() {
                             let mut reader = self.file_system_provider.open_file(
-                                real_path
+                                Path::new(real_path.as_str())
                                     .join(f)
                                     .join("dir.c9r")
                                     .to_str()
@@ -68,16 +79,13 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
         path: &str,
     ) -> Result<Box<dyn Iterator<Item = String>>, FileSystemError> {
         let dir_id = self.dir_id_from_path(path)?;
-        let dir_hash = self.cryptor.get_dir_id_hash(dir_id.as_slice())?;
-        let real_path = Path::new(self.root_folder.as_str())
-            .join(&dir_hash[..2])
-            .join(&dir_hash[2..]);
+        let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
         let files = self
             .file_system_provider
-            .read_dir(real_path.to_str().unwrap_or_default())?
+            .read_dir(real_path.as_str())?
             .map(|f| {
                 self.cryptor
-                    .decrypt_filename(&f[..f.len() - 4], dir_id.as_slice())
+                    .decrypt_filename(&f[..f.len() - ENCRYPTED_FILE_EXT.len()], dir_id.as_slice())
                     .unwrap_or_default()
             })
             .collect::<Vec<String>>();

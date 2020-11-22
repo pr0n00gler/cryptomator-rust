@@ -11,6 +11,9 @@ pub enum FileSystemError {
 
     #[fail(display = "Master key error")]
     MasterKeyError(MasterKeyError),
+
+    #[fail(display = "Unknown error")]
+    UnknownError(String),
 }
 
 impl From<std::io::Error> for FileSystemError {

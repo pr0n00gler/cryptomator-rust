@@ -1,2 +1,3 @@
 pub mod crypto;
-pub mod filesystem;
+pub mod cryptofs;
+pub mod providers;

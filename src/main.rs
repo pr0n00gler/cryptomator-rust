@@ -1,19 +1,17 @@
-use cryptomator::crypto::{Cryptor, MasterKey};
-use std::fs;
+use cryptomator::cryptofs::CryptoFS;
+use cryptomator::providers::LocalFS;
 
 fn main() {
-    let _master_key =
-        MasterKey::from_file("tests/test_storage/masterkey.cryptomator", "12345678").unwrap();
-
-    let cryptor = Cryptor::new(_master_key);
-
-    let decrypted_filename = cryptor
-        .decrypt_filename("fXQEfw6iSwP1esHbRznuVFZqv_LQFqNwC2r2LOQa-A==", b"")
-        .unwrap();
-
-    let mut encrypted_file = fs::File::open("tests/test_storage/d/HI/RW3L6XRAPFC2UCK5QY37Q2U552IRPE/fXQEfw6iSwP1esHbRznuVFZqv_LQFqNwC2r2LOQa-A==.c9r").unwrap();
-    let mut decrypted_file = fs::File::create(decrypted_filename).unwrap();
-    cryptor
-        .decrypt_content(&mut encrypted_file, &mut decrypted_file)
-        .unwrap();
+    let local_fs = LocalFS::new();
+    let crypto_fs = CryptoFS::new(
+        "tests/test_storage/d",
+        "tests/test_storage/masterkey.cryptomator",
+        "12345678",
+        local_fs,
+    )
+    .unwrap();
+    let files = crypto_fs.read_dir("/").unwrap();
+    for f in files {
+        println!("{}", f)
+    }
 }

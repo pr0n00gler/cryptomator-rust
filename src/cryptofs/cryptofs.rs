@@ -1,7 +1,7 @@
 use crate::crypto::{Cryptor, MasterKey};
-use crate::cryptofs::{FileSystem, FileSystemError, SeekAndRead};
+use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist, UnknownError};
+use crate::cryptofs::{FileSystem, FileSystemError};
 use std::path::Path;
-use crate::cryptofs::error::FileSystemError::{UnknownError, InvalidPathError, PathIsNotExist};
 
 const ENCRYPTED_FILE_EXT: &str = ".c9r";
 
@@ -35,26 +35,27 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
             .join(&dir_hash[2..]);
         match real_path.to_str() {
             Some(p) => Ok(String::from(p)),
-            None => Err(UnknownError(String::from("failed to convert PathBuf to str")))
+            None => Err(UnknownError(String::from(
+                "failed to convert PathBuf to str",
+            ))),
         }
     }
 
     fn dir_id_from_path(&self, path: &str) -> Result<Vec<u8>, FileSystemError> {
         let mut dir_id: Vec<u8> = vec![];
-        let components = std::path::Path::new(path).components().collect::<Vec<_>>();
+        let components = std::path::Path::new(path).components();
         for c in components {
             dir_id = match c {
                 std::path::Component::RootDir => vec![],
                 std::path::Component::Normal(p) => {
                     let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
-                    let files = self
-                        .file_system_provider
-                        .read_dir(real_path.as_str())?;
+                    let files = self.file_system_provider.read_dir(real_path.as_str())?;
                     let mut dir_uuid = vec![];
                     for f in files {
-                        let decrypted_name = self
-                            .cryptor
-                            .decrypt_filename(&f[..f.len() - ENCRYPTED_FILE_EXT.len()], dir_id.as_slice())?;
+                        let decrypted_name = self.cryptor.decrypt_filename(
+                            &f[..f.len() - ENCRYPTED_FILE_EXT.len()],
+                            dir_id.as_slice(),
+                        )?;
                         if decrypted_name == p.to_str().unwrap_or_default() {
                             let mut reader = self.file_system_provider.open_file(
                                 Path::new(real_path.as_str())
@@ -68,11 +69,17 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
                         }
                     }
                     if dir_uuid.len() == 0 {
-                        return Err(PathIsNotExist(String::from(c.as_os_str().to_str().unwrap_or_default())));
+                        return Err(PathIsNotExist(String::from(
+                            c.as_os_str().to_str().unwrap_or_default(),
+                        )));
                     }
-                    dir_uuid
+                    Vec::from(uuid::Uuid::parse_str(String::from_utf8(dir_uuid)?.as_str())?.as_bytes().as_ref())
                 }
-                _ => return Err(InvalidPathError(String::from(c.as_os_str().to_str().unwrap_or_default())))
+                _ => {
+                    return Err(InvalidPathError(String::from(
+                        c.as_os_str().to_str().unwrap_or_default(),
+                    )))
+                }
             };
         }
         Ok(dir_id)
@@ -94,5 +101,56 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
             })
             .collect::<Vec<String>>();
         Ok(Box::new(files.into_iter()))
+    }
+
+    pub fn create_dir(&self, path: &str) -> Result<(), FileSystemError> {
+        let components = std::path::Path::new(path).components();
+        let mut parent_dir_id: Vec<u8> = vec![];
+        let mut path_buf = std::path::PathBuf::new();
+        for component in components {
+            let p = match component {
+                std::path::Component::RootDir => "/",
+                std::path::Component::Normal(os) => match os.to_str() {
+                    Some(s) => s,
+                    None => {
+                        return Err(UnknownError(String::from("failed to convert OsStr to str")))
+                    }
+                },
+                _ => {
+                    return Err(InvalidPathError(String::from(
+                        component.as_os_str().to_str().unwrap_or_default(),
+                    )))
+                }
+            };
+            path_buf = path_buf.join(std::path::Path::new(p));
+            let dir_id = self.dir_id_from_path(match path_buf.to_str() {
+                Some(s) => s,
+                None => return Err(UnknownError(String::from("failed to convert OsStr to str"))),
+            });
+            match dir_id {
+                Ok(id) => parent_dir_id = id,
+                Err(e) => match e {
+                    PathIsNotExist(_) => {
+                        let encrypted_folder_name =
+                            self.cryptor.encrypt_filename(p, parent_dir_id.as_slice())? + ".c9r";
+                        let parent_folder = self.real_path_from_dir_id(parent_dir_id.as_slice())?;
+                        let mut real_path = std::path::Path::new(parent_folder.as_str())
+                            .join(encrypted_folder_name.as_str());
+                        self.file_system_provider.create_dir(real_path.to_str().unwrap_or_default())?;
+                        real_path = real_path.join("dir.c9r");
+                        let mut writer = self.file_system_provider.create_file(real_path.to_str().unwrap_or_default())?;
+                        let dir_uuid = uuid::Uuid::new_v4();
+                        writer.write(dir_uuid.to_string().as_bytes())?;
+
+                        let dir_id_hash = self.cryptor.get_dir_id_hash(dir_uuid.to_string().as_bytes())?;
+                        let real_folder_path = std::path::Path::new(self.root_folder.as_str()).join(&dir_id_hash[..2])
+                            .join(&dir_id_hash[2..]);
+                        self.file_system_provider.create_dir_all(real_folder_path.as_os_str().to_str().unwrap_or_default())?;
+                    }
+                    _ => return Err(e),
+                },
+            }
+        }
+        Ok(())
     }
 }

@@ -20,6 +20,12 @@ pub enum FileSystemError {
 
     #[fail(display = "Path is not exist error")]
     PathIsNotExist(String),
+
+    #[fail(display = "String from UTF-8 error")]
+    StringConvertError(std::string::FromUtf8Error),
+
+    #[fail(display = "UUID parse error")]
+    UUIDParseError(uuid::Error),
 }
 
 impl From<std::io::Error> for FileSystemError {
@@ -37,5 +43,17 @@ impl From<CryptoError> for FileSystemError {
 impl From<MasterKeyError> for FileSystemError {
     fn from(err: MasterKeyError) -> FileSystemError {
         FileSystemError::MasterKeyError(err)
+    }
+}
+
+impl From<std::string::FromUtf8Error> for FileSystemError {
+    fn from(err: std::string::FromUtf8Error) -> FileSystemError {
+        FileSystemError::StringConvertError(err)
+    }
+}
+
+impl From<uuid::Error> for FileSystemError {
+    fn from(err: uuid::Error) -> FileSystemError {
+        FileSystemError::UUIDParseError(err)
     }
 }

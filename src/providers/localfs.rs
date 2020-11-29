@@ -27,6 +27,10 @@ impl FileSystem for LocalFS {
         Ok(fs::create_dir(path)?)
     }
 
+    fn create_dir_all(&self, path: &str) -> Result<(), FileSystemError> {
+        Ok(fs::create_dir_all(path)?)
+    }
+
     fn open_file(&self, path: &str) -> Result<Box<dyn SeekAndRead>, FileSystemError> {
         Ok(Box::new(fs::File::open(path)?) as Box<dyn SeekAndRead>)
     }

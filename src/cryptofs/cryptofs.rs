@@ -41,7 +41,7 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
         }
     }
 
-    fn dir_id_from_path(&self, path: &str) -> Result<Vec<u8>, FileSystemError> {
+    pub fn dir_id_from_path(&self, path: &str) -> Result<Vec<u8>, FileSystemError> {
         let mut dir_id: Vec<u8> = vec![];
         let components = std::path::Path::new(path).components();
         for c in components {
@@ -73,7 +73,7 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
                             c.as_os_str().to_str().unwrap_or_default(),
                         )));
                     }
-                    Vec::from(uuid::Uuid::parse_str(String::from_utf8(dir_uuid)?.as_str())?.as_bytes().as_ref())
+                    dir_uuid
                 }
                 _ => {
                     return Err(InvalidPathError(String::from(
@@ -136,7 +136,7 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
                         let parent_folder = self.real_path_from_dir_id(parent_dir_id.as_slice())?;
                         let mut real_path = std::path::Path::new(parent_folder.as_str())
                             .join(encrypted_folder_name.as_str());
-                        self.file_system_provider.create_dir(real_path.to_str().unwrap_or_default())?;
+                        self.file_system_provider.create_dir_all(real_path.to_str().unwrap_or_default())?;
                         real_path = real_path.join("dir.c9r");
                         let mut writer = self.file_system_provider.create_file(real_path.to_str().unwrap_or_default())?;
                         let dir_uuid = uuid::Uuid::new_v4();
@@ -146,6 +146,7 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
                         let real_folder_path = std::path::Path::new(self.root_folder.as_str()).join(&dir_id_hash[..2])
                             .join(&dir_id_hash[2..]);
                         self.file_system_provider.create_dir_all(real_folder_path.as_os_str().to_str().unwrap_or_default())?;
+                        parent_dir_id = Vec::from(dir_uuid.to_string().as_bytes());
                     }
                     _ => return Err(e),
                 },

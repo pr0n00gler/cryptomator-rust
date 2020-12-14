@@ -1,7 +1,8 @@
-use crate::crypto::{Cryptor};
+use crate::crypto::{Cryptor, FileHeader};
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist, UnknownError};
-use crate::cryptofs::{FileSystem, FileSystemError};
+use crate::cryptofs::{FileSystem, FileSystemError, SeekAndRead};
 use std::path::Path;
+use std::io::{Seek, SeekFrom, Write};
 
 const ENCRYPTED_FILE_EXT: &str = ".c9r";
 
@@ -158,5 +159,35 @@ impl<'gc, FSP: FileSystem> CryptoFS<'gc, FSP> {
             }
         }
         Ok(())
+    }
+}
+
+struct CryptoFSFile<'gc> {
+    cryptor: &'gc Cryptor<'gc>,
+    rfs_seeker_reader: Box<dyn SeekAndRead>,
+    rfs_writer: Box<dyn std::io::Write>,
+    current_pos: u64,
+    header: FileHeader
+}
+
+impl<'gc> CryptoFSFile<'gc> {
+    pub fn open(real_path: &str, cryptor: &'gc Cryptor, real_file_system_provider: &dyn FileSystem) -> Result<CryptoFSFile<'gc>, FileSystemError> {
+        let mut reader = real_file_system_provider.open_file(real_path)?;
+        let mut writer = real_file_system_provider.append_file(real_path)?;
+        let mut encrypted_header: [u8; 88] = [0; 88];
+        reader.read_exact(&mut encrypted_header)?;
+        let header = cryptor.decrypt_file_header(&encrypted_header)?;
+        Ok(CryptoFSFile{cryptor, rfs_seeker_reader: reader, rfs_writer: writer, current_pos: 0, header })
+    }
+}
+
+impl<> Seek for CryptoFSFile<'_> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        match pos {
+            SeekFrom::Start(p) => self.current_pos = p,
+            SeekFrom::Current(p) => self.current_pos = self.current_pos + p as u64,
+            SeekFrom::End(_) => self.current_pos = self.rfs_seeker_reader.seek(SeekFrom::End(0))?,
+        }
+        Ok(0)
     }
 }

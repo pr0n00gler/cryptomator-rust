@@ -48,12 +48,12 @@ pub struct FileHeader {
     pub mac: [u8; 32],
 }
 
-pub struct Cryptor {
-    master_key: MasterKey,
+pub struct Cryptor<'gc> {
+    master_key: &'gc MasterKey,
 }
 
-impl Cryptor {
-    pub fn new(master_key: MasterKey) -> Cryptor {
+impl<'gc> Cryptor<'gc> {
+    pub fn new(master_key: &'gc MasterKey) -> Cryptor {
         Cryptor { master_key }
     }
 

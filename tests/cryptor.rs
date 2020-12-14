@@ -16,20 +16,22 @@ fn get_test_master_key() -> MasterKey {
     crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap()
 }
 
-fn get_test_cryptor() -> Cryptor {
-    Cryptor::new(get_test_master_key())
+fn get_test_cryptor(mk: &MasterKey) -> Cryptor {
+    Cryptor::new(mk)
 }
 
 #[test]
 fn test_encrypt_dir_id() {
-    let cryptor = get_test_cryptor();
+    let mk = get_test_master_key();
+    let cryptor = get_test_cryptor(&mk);
     let dir_id_hash = cryptor.get_dir_id_hash(ROOT_DIR_ID).unwrap();
     assert_eq!(ROOT_DIR_ID_HASH, dir_id_hash.as_str());
 }
 
 #[test]
 fn test_encrypt_filename() {
-    let cryptor = get_test_cryptor();
+    let mk = get_test_master_key();
+    let cryptor = get_test_cryptor(&mk);
     let encrypted_filename = cryptor
         .encrypt_filename(TEST_FILENAME, ROOT_DIR_ID)
         .unwrap();
@@ -38,7 +40,8 @@ fn test_encrypt_filename() {
 
 #[test]
 fn test_decrypt_filename() {
-    let cryptor = get_test_cryptor();
+    let mk = get_test_master_key();
+    let cryptor = get_test_cryptor(&mk);
     let decrypted_filename = cryptor
         .decrypt_filename(ENCRYPTED_TEST_FILENAME, ROOT_DIR_ID)
         .unwrap();
@@ -47,7 +50,8 @@ fn test_decrypt_filename() {
 
 #[test]
 fn test_encrypt_decrypt_header() {
-    let cryptor = get_test_cryptor();
+    let mk = get_test_master_key();
+    let cryptor = get_test_cryptor(&mk);
 
     let header = cryptor.create_file_header();
     let encrypted_header = cryptor.encrypt_file_header(&header).unwrap();
@@ -65,7 +69,8 @@ fn test_encrypt_decrypt_header() {
 
 #[test]
 fn test_encrypt_decrypt_chunk() {
-    let cryptor = get_test_cryptor();
+    let mk = get_test_master_key();
+    let cryptor = get_test_cryptor(&mk);
 
     let header = cryptor.create_file_header();
     let chunk_data: Vec<u8> = (0..1024).map(|_| rand::random::<u8>()).collect();
@@ -92,7 +97,8 @@ fn test_encrypt_decrypt_chunk() {
 
 #[test]
 fn test_encrypt_decrypt_content() {
-    let cryptor = get_test_cryptor();
+    let mk = get_test_master_key();
+    let cryptor = get_test_cryptor(&mk);
 
     let content_data: Vec<u8> = (0..10 * 1024 * 1024)
         .map(|_| rand::random::<u8>())

@@ -1,25 +1,22 @@
-use crate::crypto::{Cryptor, MasterKey};
+use crate::crypto::{Cryptor};
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist, UnknownError};
 use crate::cryptofs::{FileSystem, FileSystemError};
 use std::path::Path;
 
 const ENCRYPTED_FILE_EXT: &str = ".c9r";
 
-pub struct CryptoFS<FSP: FileSystem> {
-    cryptor: Cryptor,
+pub struct CryptoFS<'gc, FSP: FileSystem> {
+    cryptor: &'gc Cryptor<'gc>,
     root_folder: String,
     file_system_provider: FSP,
 }
 
-impl<FSP: FileSystem> CryptoFS<FSP> {
+impl<'gc, FSP: FileSystem> CryptoFS<'gc, FSP> {
     pub fn new(
         folder: &str,
-        master_key_path: &str,
-        master_key_passphrase: &str,
+        cryptor: &'gc Cryptor,
         fs_provider: FSP,
-    ) -> Result<CryptoFS<FSP>, FileSystemError> {
-        let master_key = MasterKey::from_file(master_key_path, master_key_passphrase)?;
-        let cryptor = Cryptor::new(master_key);
+    ) -> Result<CryptoFS<'gc, FSP>, FileSystemError> {
         let crypto_fs = CryptoFS {
             cryptor,
             root_folder: String::from(folder),
@@ -136,16 +133,24 @@ impl<FSP: FileSystem> CryptoFS<FSP> {
                         let parent_folder = self.real_path_from_dir_id(parent_dir_id.as_slice())?;
                         let mut real_path = std::path::Path::new(parent_folder.as_str())
                             .join(encrypted_folder_name.as_str());
-                        self.file_system_provider.create_dir_all(real_path.to_str().unwrap_or_default())?;
+                        self.file_system_provider
+                            .create_dir_all(real_path.to_str().unwrap_or_default())?;
                         real_path = real_path.join("dir.c9r");
-                        let mut writer = self.file_system_provider.create_file(real_path.to_str().unwrap_or_default())?;
+                        let mut writer = self
+                            .file_system_provider
+                            .create_file(real_path.to_str().unwrap_or_default())?;
                         let dir_uuid = uuid::Uuid::new_v4();
                         writer.write(dir_uuid.to_string().as_bytes())?;
 
-                        let dir_id_hash = self.cryptor.get_dir_id_hash(dir_uuid.to_string().as_bytes())?;
-                        let real_folder_path = std::path::Path::new(self.root_folder.as_str()).join(&dir_id_hash[..2])
+                        let dir_id_hash = self
+                            .cryptor
+                            .get_dir_id_hash(dir_uuid.to_string().as_bytes())?;
+                        let real_folder_path = std::path::Path::new(self.root_folder.as_str())
+                            .join(&dir_id_hash[..2])
                             .join(&dir_id_hash[2..]);
-                        self.file_system_provider.create_dir_all(real_folder_path.as_os_str().to_str().unwrap_or_default())?;
+                        self.file_system_provider.create_dir_all(
+                            real_folder_path.as_os_str().to_str().unwrap_or_default(),
+                        )?;
                         parent_dir_id = Vec::from(dir_uuid.to_string().as_bytes());
                     }
                     _ => return Err(e),

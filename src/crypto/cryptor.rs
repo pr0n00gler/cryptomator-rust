@@ -22,20 +22,34 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const FILE_HEADER_NONCE_LENGTH: usize = 16;
-const FILE_HEADER_PAYLOAD_LENGTH: usize = 40;
-const FILE_HEADER_PAYLOAD_RESERVED_LENGTH: usize = 8;
-const FILE_HEADER_MAC_LENGTH: usize = 32;
-const FILE_HEADER_LENGTH: usize =
+pub const FILE_HEADER_NONCE_LENGTH: usize = 16;
+pub const FILE_HEADER_PAYLOAD_LENGTH: usize = 40;
+pub const FILE_HEADER_PAYLOAD_RESERVED_LENGTH: usize = 8;
+pub const FILE_HEADER_MAC_LENGTH: usize = 32;
+pub const FILE_HEADER_LENGTH: usize =
     FILE_HEADER_NONCE_LENGTH + FILE_HEADER_PAYLOAD_LENGTH + FILE_HEADER_MAC_LENGTH;
 
-const FILE_CHUNK_CONTENT_NONCE_LENGTH: usize = 16;
-const FILE_CHUNK_CONTENT_MAC_LENGTH: usize = 32;
-const FILE_CHUNK_CONTENT_PAYLOAD_LENGTH: usize = 32 * 1024;
+pub const FILE_CHUNK_CONTENT_NONCE_LENGTH: usize = 16;
+pub const FILE_CHUNK_CONTENT_MAC_LENGTH: usize = 32;
+pub const FILE_CHUNK_CONTENT_PAYLOAD_LENGTH: usize = 32 * 1024;
 
-const FILE_CHUNK_LENGTH: usize = FILE_CHUNK_CONTENT_NONCE_LENGTH
+pub const FILE_CHUNK_LENGTH: usize = FILE_CHUNK_CONTENT_NONCE_LENGTH
     + FILE_CHUNK_CONTENT_PAYLOAD_LENGTH
     + FILE_CHUNK_CONTENT_MAC_LENGTH;
+
+
+pub fn calculate_cleartext_size(ciphertext_size: u64) -> u64 {
+    let ciphertext_size = ciphertext_size - FILE_HEADER_LENGTH as u64;
+    let overhead_per_chunk = (FILE_CHUNK_CONTENT_MAC_LENGTH + FILE_CHUNK_CONTENT_NONCE_LENGTH) as u64;
+    let full_chunks_number = ciphertext_size / FILE_CHUNK_LENGTH as u64;
+    let additional_ciphertext_bytes = ciphertext_size % FILE_CHUNK_LENGTH as u64;
+    let additional_cleartext_bytes = if additional_ciphertext_bytes <= 0 {
+        0
+    } else {
+        additional_ciphertext_bytes - overhead_per_chunk
+    };
+    return FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64 * full_chunks_number + additional_cleartext_bytes;
+}
 
 pub struct FileHeaderPayload {
     pub reserved: [u8; 8],

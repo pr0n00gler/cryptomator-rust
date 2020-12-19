@@ -1,9 +1,12 @@
-use crate::crypto::{Cryptor, FileHeader, calculate_cleartext_size, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH};
+use crate::crypto::{
+    calculate_cleartext_size, Cryptor, FileHeader, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH,
+    FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH,
+};
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist, UnknownError};
 use crate::cryptofs::{FileSystem, FileSystemError, SeekAndRead};
-use std::path::Path;
-use std::io::{Seek, SeekFrom, Write, Read};
 use failure::{AsFail, Fail};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
 const ENCRYPTED_FILE_EXT: &str = ".c9r";
 
@@ -168,17 +171,27 @@ pub struct CryptoFSFile<'gc> {
     rfs_seeker_reader: Box<dyn SeekAndRead>,
     rfs_writer: Box<dyn std::io::Write>,
     current_pos: u64,
-    header: FileHeader
+    header: FileHeader,
 }
 
 impl<'gc> CryptoFSFile<'gc> {
-    pub fn open(real_path: &str, cryptor: &'gc Cryptor, real_file_system_provider: &dyn FileSystem) -> Result<CryptoFSFile<'gc>, FileSystemError> {
+    pub fn open(
+        real_path: &str,
+        cryptor: &'gc Cryptor,
+        real_file_system_provider: &dyn FileSystem,
+    ) -> Result<CryptoFSFile<'gc>, FileSystemError> {
         let mut reader = real_file_system_provider.open_file(real_path)?;
         let mut writer = real_file_system_provider.append_file(real_path)?;
         let mut encrypted_header: [u8; 88] = [0; 88];
         reader.read_exact(&mut encrypted_header)?;
         let header = cryptor.decrypt_file_header(&encrypted_header)?;
-        Ok(CryptoFSFile{cryptor, rfs_seeker_reader: reader, rfs_writer: writer, current_pos: 0, header })
+        Ok(CryptoFSFile {
+            cryptor,
+            rfs_seeker_reader: reader,
+            rfs_writer: writer,
+            current_pos: 0,
+            header,
+        })
     }
 
     pub fn get_file_size(&mut self) -> Result<u64, FileSystemError> {
@@ -189,23 +202,21 @@ impl<'gc> CryptoFSFile<'gc> {
     }
 }
 
-impl<> Seek for CryptoFSFile<'_> {
+impl Seek for CryptoFSFile<'_> {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
         match pos {
             SeekFrom::Start(p) => self.current_pos = p,
             SeekFrom::Current(p) => self.current_pos = (self.current_pos as i64 + p) as u64,
-            SeekFrom::End(p) => {
-                match self.get_file_size() {
-                    Ok(s) => self.current_pos = (s as i64 + p) as u64,
-                    Err(_) => {},
-                }
-            }
+            SeekFrom::End(p) => match self.get_file_size() {
+                Ok(s) => self.current_pos = (s as i64 + p) as u64,
+                Err(_) => return Err(std::io::Error::from(std::io::ErrorKind::Other))
+            },
         }
         Ok(self.current_pos)
     }
 }
 
-impl<> Read for CryptoFSFile<'_> {
+impl Read for CryptoFSFile<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let mut chunk_index = self.current_pos / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
         let mut n: usize = 0;
@@ -215,21 +226,26 @@ impl<> Read for CryptoFSFile<'_> {
             } else {
                 (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize
             };
-            self.rfs_seeker_reader.seek(SeekFrom::Start((chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64))?;
+            self.rfs_seeker_reader.seek(SeekFrom::Start(
+                (chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
+            ))?;
             let mut chunk = [0u8; FILE_CHUNK_LENGTH];
             let read_bytes = self.rfs_seeker_reader.read(&mut chunk)?;
             if read_bytes == 0 {
                 break;
             }
-            let decrypted_chunk = match self.cryptor.decrypt_chunk(&self.header.nonce, &self.header.payload.content_key, chunk_index as usize, &chunk[..read_bytes]) {
+            let decrypted_chunk = match self.cryptor.decrypt_chunk(
+                &self.header.nonce,
+                &self.header.payload.content_key,
+                chunk_index as usize,
+                &chunk[..read_bytes],
+            ) {
                 Ok(c) => c,
-                Err(e) => {
-                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidData))
-                }
+                Err(e) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
             };
             for byte in &decrypted_chunk[offset..] {
                 if n >= buf.len() {
-                    break
+                    break;
                 }
                 buf[n] = *byte;
                 n += 1;

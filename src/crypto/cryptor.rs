@@ -37,10 +37,10 @@ pub const FILE_CHUNK_LENGTH: usize = FILE_CHUNK_CONTENT_NONCE_LENGTH
     + FILE_CHUNK_CONTENT_PAYLOAD_LENGTH
     + FILE_CHUNK_CONTENT_MAC_LENGTH;
 
-
 pub fn calculate_cleartext_size(ciphertext_size: u64) -> u64 {
     let ciphertext_size = ciphertext_size - FILE_HEADER_LENGTH as u64;
-    let overhead_per_chunk = (FILE_CHUNK_CONTENT_MAC_LENGTH + FILE_CHUNK_CONTENT_NONCE_LENGTH) as u64;
+    let overhead_per_chunk =
+        (FILE_CHUNK_CONTENT_MAC_LENGTH + FILE_CHUNK_CONTENT_NONCE_LENGTH) as u64;
     let full_chunks_number = ciphertext_size / FILE_CHUNK_LENGTH as u64;
     let additional_ciphertext_bytes = ciphertext_size % FILE_CHUNK_LENGTH as u64;
     let additional_cleartext_bytes = if additional_ciphertext_bytes <= 0 {
@@ -48,7 +48,8 @@ pub fn calculate_cleartext_size(ciphertext_size: u64) -> u64 {
     } else {
         additional_ciphertext_bytes - overhead_per_chunk
     };
-    return FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64 * full_chunks_number + additional_cleartext_bytes;
+    return FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64 * full_chunks_number
+        + additional_cleartext_bytes;
 }
 
 pub struct FileHeaderPayload {

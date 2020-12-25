@@ -2,7 +2,7 @@ mod masterkey;
 
 use cryptomator::crypto;
 use cryptomator::crypto::{Cryptor, MasterKey};
-use masterkey::{DEFAULT_PASSWORD, PATH_TO_MASTER_KEY};
+use crate::masterkey::{DEFAULT_PASSWORD, PATH_TO_MASTER_KEY};
 
 use std::io::Cursor;
 
@@ -12,11 +12,11 @@ const ROOT_DIR_ID: &[u8] = b"";
 const TEST_FILENAME: &str = "lorem-ipsum.pdf";
 const ENCRYPTED_TEST_FILENAME: &str = "fXQEfw6iSwP1esHbRznuVFZqv_LQFqNwC2r2LOQa-A==";
 
-fn get_test_master_key() -> MasterKey {
+pub fn get_test_master_key() -> MasterKey {
     crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap()
 }
 
-fn get_test_cryptor(mk: &MasterKey) -> Cryptor {
+pub fn get_test_cryptor(mk: &MasterKey) -> Cryptor {
     Cryptor::new(mk)
 }
 

@@ -164,6 +164,41 @@ impl<'gc> CryptoFS<'gc> {
         }
         Ok(())
     }
+
+    pub fn open_file(&self, path: &str) -> Result<Box<dyn SeekAndRead + 'gc>, FileSystemError> {
+        let components = std::path::Path::new(path).components().collect::<Vec<std::path::Component>>();
+        let filename = match components.last() {
+            Some(c) => match c.as_os_str().to_str() {
+                Some(s) => s,
+                None => return Err(UnknownError(String::from("failed to convert OsStr to str")))
+            },
+            None => return Err(PathIsNotExist(String::from(format!("invalid path: {}", path))))
+        };
+        let mut dir_path = std::path::PathBuf::new();
+        for (i, c) in components.iter().enumerate() {
+            if i > components.len() - 1 {
+                break
+            }
+            dir_path = dir_path.join(c.as_ref() as &Path);
+        }
+        let dir_path_str = match dir_path.to_str() {
+            Some(s) => s,
+            None => return Err(UnknownError(String::from("failed to convert PathBuf to str")))
+        };
+        let dir_id = self.dir_id_from_path(dir_path_str)?;
+        let real_dir_path = self.real_path_from_dir_id(dir_id.as_slice())?;
+        let real_filename = self.cryptor.encrypt_filename(filename, dir_id.as_slice())?;
+        let temp = std::path::PathBuf::new();
+        let temp = temp.join(std::path::Path::new(real_dir_path.as_str()));
+        let temp = temp.join(std::path::Path::new(real_filename.as_str()));
+        let real_file_path = match temp.to_str() {
+            Some(s) => s,
+            None => return Err(UnknownError(String::from("failed to convert PathBuf to str"))),
+        };
+
+        let crypto_file = CryptoFSFile::open(real_file_path, self.cryptor, self.file_system_provider)?;
+        Ok(Box::new(crypto_file))
+    }
 }
 
 pub struct CryptoFSFile<'gc> {
@@ -256,3 +291,5 @@ impl Read for CryptoFSFile<'_> {
         Ok(n)
     }
 }
+
+impl SeekAndRead for CryptoFSFile<'_> {}

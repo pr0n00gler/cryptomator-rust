@@ -166,24 +166,35 @@ impl<'gc> CryptoFS<'gc> {
     }
 
     pub fn open_file(&self, path: &str) -> Result<Box<dyn SeekAndRead + 'gc>, FileSystemError> {
-        let components = std::path::Path::new(path).components().collect::<Vec<std::path::Component>>();
+        let components = std::path::Path::new(path)
+            .components()
+            .collect::<Vec<std::path::Component>>();
         let filename = match components.last() {
             Some(c) => match c.as_os_str().to_str() {
                 Some(s) => s,
-                None => return Err(UnknownError(String::from("failed to convert OsStr to str")))
+                None => return Err(UnknownError(String::from("failed to convert OsStr to str"))),
             },
-            None => return Err(PathIsNotExist(String::from(format!("invalid path: {}", path))))
+            None => {
+                return Err(PathIsNotExist(String::from(format!(
+                    "invalid path: {}",
+                    path
+                ))))
+            }
         };
         let mut dir_path = std::path::PathBuf::new();
         for (i, c) in components.iter().enumerate() {
             if i > components.len() - 1 {
-                break
+                break;
             }
             dir_path = dir_path.join(c.as_ref() as &Path);
         }
         let dir_path_str = match dir_path.to_str() {
             Some(s) => s,
-            None => return Err(UnknownError(String::from("failed to convert PathBuf to str")))
+            None => {
+                return Err(UnknownError(String::from(
+                    "failed to convert PathBuf to str",
+                )))
+            }
         };
         let dir_id = self.dir_id_from_path(dir_path_str)?;
         let real_dir_path = self.real_path_from_dir_id(dir_id.as_slice())?;
@@ -193,10 +204,15 @@ impl<'gc> CryptoFS<'gc> {
         let temp = temp.join(std::path::Path::new(real_filename.as_str()));
         let real_file_path = match temp.to_str() {
             Some(s) => s,
-            None => return Err(UnknownError(String::from("failed to convert PathBuf to str"))),
+            None => {
+                return Err(UnknownError(String::from(
+                    "failed to convert PathBuf to str",
+                )))
+            }
         };
 
-        let crypto_file = CryptoFSFile::open(real_file_path, self.cryptor, self.file_system_provider)?;
+        let crypto_file =
+            CryptoFSFile::open(real_file_path, self.cryptor, self.file_system_provider)?;
         Ok(Box::new(crypto_file))
     }
 }
@@ -244,7 +260,7 @@ impl Seek for CryptoFSFile<'_> {
             SeekFrom::Current(p) => self.current_pos = (self.current_pos as i64 + p) as u64,
             SeekFrom::End(p) => match self.get_file_size() {
                 Ok(s) => self.current_pos = (s as i64 + p) as u64,
-                Err(_) => return Err(std::io::Error::from(std::io::ErrorKind::Other))
+                Err(_) => return Err(std::io::Error::from(std::io::ErrorKind::Other)),
             },
         }
         Ok(self.current_pos)

@@ -1,7 +1,7 @@
 use cryptomator::crypto;
 use cryptomator::cryptofs::{CryptoFS, FileSystem};
 use cryptomator::providers::LocalFS;
-use std::io::Cursor;
+use std::io::Read;
 
 const TEST_STORAGE_PATH: &str = "tests/test_storage/d";
 const TEST_FILE_PATH: &str = "tests/lorem-ipsum.pdf";
@@ -23,6 +23,33 @@ fn test_crypto_fs_seek_and_read() {
     let ciphertext_file_size = ciphertext_test_file
         .seek(std::io::SeekFrom::End(0))
         .unwrap();
+    assert_eq!(cleartext_file_size, ciphertext_file_size);
 
-    println!("{}, {}", cleartext_file_size, ciphertext_file_size);
+    let mut cleartext_data: Vec<u8> = vec![];
+    let cleartext_read_count = cleartext_test_file
+        .read_to_end(&mut cleartext_data)
+        .unwrap();
+
+    let mut ciphertext_data: Vec<u8> = vec![];
+    let ciphertext_read_count = ciphertext_test_file
+        .read_to_end(&mut ciphertext_data)
+        .unwrap();
+    assert_eq!(cleartext_read_count, ciphertext_read_count);
+
+    cleartext_test_file
+        .seek(std::io::SeekFrom::Start(0))
+        .unwrap();
+    let mut cleartext_part_data: Vec<u8> = vec![];
+    let cleartext_read_count = cleartext_test_file
+        .read_to_end(&mut cleartext_part_data)
+        .unwrap();
+
+    ciphertext_test_file
+        .seek(std::io::SeekFrom::Start(0))
+        .unwrap();
+    let mut ciphertext_part_data: Vec<u8> = vec![];
+    let ciphertext_read_count = ciphertext_test_file
+        .read_to_end(&mut ciphertext_part_data)
+        .unwrap();
+    assert_eq!(cleartext_read_count, ciphertext_read_count);
 }

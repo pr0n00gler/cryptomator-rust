@@ -4,7 +4,6 @@ use crate::crypto::{
 };
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist, UnknownError};
 use crate::cryptofs::{FileSystem, FileSystemError, SeekAndRead};
-use failure::{AsFail, Fail};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -165,7 +164,7 @@ impl<'gc> CryptoFS<'gc> {
         Ok(())
     }
 
-    pub fn open_file(&self, path: &str) -> Result<Box<dyn SeekAndRead + 'gc>, FileSystemError> {
+    fn filepath_to_real_path(&self, path: &str) -> Result<String, FileSystemError> {
         let components = std::path::Path::new(path)
             .components()
             .collect::<Vec<std::path::Component>>();
@@ -183,7 +182,7 @@ impl<'gc> CryptoFS<'gc> {
         };
         let mut dir_path = std::path::PathBuf::new();
         for (i, c) in components.iter().enumerate() {
-            if i > components.len() - 1 {
+            if i > components.len() - 2 {
                 break;
             }
             dir_path = dir_path.join(c.as_ref() as &Path);
@@ -202,17 +201,21 @@ impl<'gc> CryptoFS<'gc> {
         let temp = std::path::PathBuf::new();
         let temp = temp.join(std::path::Path::new(real_dir_path.as_str()));
         let temp = temp.join(std::path::Path::new(real_filename.as_str()));
-        let real_file_path = match temp.to_str() {
-            Some(s) => s,
-            None => {
-                return Err(UnknownError(String::from(
-                    "failed to convert PathBuf to str",
-                )))
-            }
-        };
+        match temp.to_str() {
+            Some(s) => Ok(String::from(s)),
+            None => Err(UnknownError(String::from(
+                "failed to convert PathBuf to str",
+            ))),
+        }
+    }
 
-        let crypto_file =
-            CryptoFSFile::open(real_file_path, self.cryptor, self.file_system_provider)?;
+    pub fn open_file(&self, path: &str) -> Result<Box<dyn SeekAndRead + 'gc>, FileSystemError> {
+        let real_path = self.filepath_to_real_path(path)?;
+        let crypto_file = CryptoFSFile::open(
+            (String::from(real_path) + ".c9r").as_str(),
+            self.cryptor,
+            self.file_system_provider,
+        )?;
         Ok(Box::new(crypto_file))
     }
 }
@@ -292,7 +295,7 @@ impl Read for CryptoFSFile<'_> {
                 &chunk[..read_bytes],
             ) {
                 Ok(c) => c,
-                Err(e) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
+                Err(_) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
             };
             for byte in &decrypted_chunk[offset..] {
                 if n >= buf.len() {

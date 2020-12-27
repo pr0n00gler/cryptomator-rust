@@ -35,21 +35,23 @@ fn test_crypto_fs_seek_and_read() {
         .read_to_end(&mut ciphertext_data)
         .unwrap();
     assert_eq!(cleartext_read_count, ciphertext_read_count);
+    assert_eq!(cleartext_data, ciphertext_data);
 
+    const OFFSET: u64 = 4590;
+    const SIZE: usize = 33600;
     cleartext_test_file
-        .seek(std::io::SeekFrom::Start(0))
+        .seek(std::io::SeekFrom::Start(OFFSET))
         .unwrap();
-    let mut cleartext_part_data: Vec<u8> = vec![];
-    let cleartext_read_count = cleartext_test_file
-        .read_to_end(&mut cleartext_part_data)
-        .unwrap();
+    let mut cleartext_part_data: Vec<u8> = vec![0; SIZE];
+    let cleartext_read_count = cleartext_test_file.read(&mut cleartext_part_data).unwrap();
 
     ciphertext_test_file
-        .seek(std::io::SeekFrom::Start(0))
+        .seek(std::io::SeekFrom::Start(OFFSET))
         .unwrap();
-    let mut ciphertext_part_data: Vec<u8> = vec![];
+    let mut ciphertext_part_data: Vec<u8> = vec![0; SIZE];
     let ciphertext_read_count = ciphertext_test_file
-        .read_to_end(&mut ciphertext_part_data)
+        .read(&mut ciphertext_part_data)
         .unwrap();
     assert_eq!(cleartext_read_count, ciphertext_read_count);
+    assert_eq!(cleartext_part_data, ciphertext_part_data);
 }

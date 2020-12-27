@@ -3,7 +3,8 @@ use crate::crypto::{
     FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH,
 };
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist, UnknownError};
-use crate::cryptofs::{FileSystem, FileSystemError, SeekAndRead};
+use crate::cryptofs::{File, FileSystem, FileSystemError};
+use failure::AsFail;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -209,7 +210,7 @@ impl<'gc> CryptoFS<'gc> {
         }
     }
 
-    pub fn open_file(&self, path: &str) -> Result<Box<dyn SeekAndRead + 'gc>, FileSystemError> {
+    pub fn open_file(&self, path: &str) -> Result<Box<dyn File + 'gc>, FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
         let crypto_file = CryptoFSFile::open(
             (String::from(real_path) + ".c9r").as_str(),
@@ -218,12 +219,25 @@ impl<'gc> CryptoFS<'gc> {
         )?;
         Ok(Box::new(crypto_file))
     }
+
+    pub fn create_file(&self, path: &str) -> Result<Box<dyn File + 'gc>, FileSystemError> {
+        let real_path = self.filepath_to_real_path(path)?;
+        let real_name = String::from(real_path) + ".c9r";
+        let rfs_file = self.file_system_provider.create_file(real_name.as_str())?;
+        let crypto_file = CryptoFSFile::create_file(&self.cryptor, rfs_file)?;
+        Ok(Box::new(crypto_file))
+    }
+
+    pub fn remove_file(&self, path: &str) -> Result<(), FileSystemError> {
+        let real_path = self.filepath_to_real_path(path)?;
+        let real_name = String::from(real_path) + ".c9r";
+        Ok(self.file_system_provider.remove_file(real_name.as_str())?)
+    }
 }
 
 pub struct CryptoFSFile<'gc> {
     cryptor: &'gc Cryptor<'gc>,
-    rfs_seeker_reader: Box<dyn SeekAndRead>,
-    rfs_writer: Box<dyn std::io::Write>,
+    rfs_file: Box<dyn File>,
     current_pos: u64,
     header: FileHeader,
 }
@@ -235,32 +249,53 @@ impl<'gc> CryptoFSFile<'gc> {
         real_file_system_provider: &dyn FileSystem,
     ) -> Result<CryptoFSFile<'gc>, FileSystemError> {
         let mut reader = real_file_system_provider.open_file(real_path)?;
-        let mut writer = real_file_system_provider.append_file(real_path)?;
         let mut encrypted_header: [u8; 88] = [0; 88];
         reader.read_exact(&mut encrypted_header)?;
         let header = cryptor.decrypt_file_header(&encrypted_header)?;
         Ok(CryptoFSFile {
             cryptor,
-            rfs_seeker_reader: reader,
-            rfs_writer: writer,
+            rfs_file: reader,
+            current_pos: 0,
+            header,
+        })
+    }
+
+    pub fn create_file(
+        cryptor: &'gc Cryptor,
+        mut rfs_file: Box<dyn File>,
+    ) -> Result<CryptoFSFile<'gc>, FileSystemError> {
+        let header = cryptor.create_file_header();
+        let encrypted_header = cryptor.encrypt_file_header(&header)?;
+        rfs_file.write(encrypted_header.as_slice())?;
+        rfs_file.flush()?;
+        Ok(CryptoFSFile {
+            cryptor,
+            rfs_file,
             current_pos: 0,
             header,
         })
     }
 
     pub fn get_file_size(&mut self) -> Result<u64, FileSystemError> {
-        let current_pos = self.rfs_seeker_reader.seek(SeekFrom::Current(0))?;
-        let real_file_size = self.rfs_seeker_reader.seek(SeekFrom::End(0))?;
-        self.rfs_seeker_reader.seek(SeekFrom::Start(current_pos))?;
+        let current_pos = self.rfs_file.seek(SeekFrom::Current(0))?;
+        let real_file_size = self.rfs_file.seek(SeekFrom::End(0))?;
+        self.rfs_file.seek(SeekFrom::Start(current_pos))?;
         Ok(calculate_cleartext_size(real_file_size))
     }
 
+    pub fn get_real_file_size(&mut self) -> Result<u64, FileSystemError> {
+        let current_pos = self.rfs_file.seek(SeekFrom::Current(0))?;
+        let real_file_size = self.rfs_file.seek(SeekFrom::End(0))?;
+        self.rfs_file.seek(SeekFrom::Start(current_pos))?;
+        Ok(real_file_size)
+    }
+
     fn read_chunk(&mut self, chunk_index: u64) -> Result<Vec<u8>, FileSystemError> {
-        self.rfs_seeker_reader.seek(SeekFrom::Start(
+        self.rfs_file.seek(SeekFrom::Start(
             (chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
         ))?;
         let mut chunk = [0u8; FILE_CHUNK_LENGTH];
-        let read_bytes = self.rfs_seeker_reader.read(&mut chunk)?;
+        let read_bytes = self.rfs_file.read(&mut chunk)?;
         if read_bytes == 0 {
             return Ok(vec![0; 0]);
         }
@@ -299,7 +334,9 @@ impl Read for CryptoFSFile<'_> {
             };
             let chunk = match self.read_chunk(chunk_index) {
                 Ok(c) => c,
-                Err(_) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
+                Err(e) => {
+                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+                }
             };
             if chunk.len() == 0 {
                 break;
@@ -318,14 +355,78 @@ impl Read for CryptoFSFile<'_> {
     }
 }
 
-impl SeekAndRead for CryptoFSFile<'_> {}
-
 impl Write for CryptoFSFile<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        unimplemented!()
+        let mut encrypted_data: Vec<u8> = vec![];
+        let mut chunk_index = self.current_pos / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        let file_size = match self.get_real_file_size() {
+            Ok(s) => s,
+            Err(_) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
+        };
+        let chunks_count = file_size / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        let start_chunk_index = chunk_index;
+        let mut n: usize = 0;
+        while n < buf.len() {
+            let mut offset = if n > 0 {
+                0
+            } else {
+                (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize
+            };
+            let mut chunk: Vec<u8> = vec![];
+            if chunk_index > chunks_count || file_size == FILE_HEADER_LENGTH as u64 {
+                let mut c = 0;
+                while c < FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
+                    if n >= buf.len() {
+                        break;
+                    }
+                    chunk.extend_from_slice(&[buf[n]]);
+                    n += 1;
+                    c += 1;
+                }
+            } else {
+                let mut buf_chunk = match self.read_chunk(chunk_index) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        println!("{} {}", chunk_index, e.as_fail().find_root_cause());
+                        return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+                    }
+                };
+                if buf_chunk.len() == 0 {
+                    break;
+                }
+                while offset < chunk.len() {
+                    if n >= buf.len() {
+                        break;
+                    }
+                    buf_chunk[offset] = buf[n];
+                    offset += 1;
+                    n += 1;
+                }
+                chunk = buf_chunk;
+            }
+            let encrypted_chunk = match self.cryptor.encrypt_chunk(
+                &self.header.nonce,
+                &self.header.payload.content_key,
+                chunk_index as usize,
+                chunk.as_slice(),
+            ) {
+                Ok(c) => c,
+                Err(_) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
+            };
+            encrypted_data.extend(encrypted_chunk);
+            self.current_pos += n as u64;
+            chunk_index += 1;
+        }
+        self.rfs_file.seek(SeekFrom::Start(
+            (start_chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
+        ))?;
+        self.rfs_file.write_all(encrypted_data.as_ref())?;
+        Ok(n)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        unimplemented!()
+        Ok(self.rfs_file.flush()?)
     }
 }
+
+impl File for CryptoFSFile<'_> {}

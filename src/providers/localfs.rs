@@ -1,4 +1,4 @@
-use crate::cryptofs::{FileSystem, FileSystemError, SeekAndRead};
+use crate::cryptofs::{File, FileSystem, FileSystemError};
 use std::fs;
 
 pub struct LocalFS {}
@@ -9,7 +9,7 @@ impl LocalFS {
     }
 }
 
-impl SeekAndRead for fs::File {}
+impl File for fs::File {}
 
 impl FileSystem for LocalFS {
     fn read_dir(&self, path: &str) -> Result<Box<dyn Iterator<Item = String>>, FileSystemError> {
@@ -31,16 +31,28 @@ impl FileSystem for LocalFS {
         Ok(fs::create_dir_all(path)?)
     }
 
-    fn open_file(&self, path: &str) -> Result<Box<dyn SeekAndRead>, FileSystemError> {
-        Ok(Box::new(fs::File::open(path)?) as Box<dyn SeekAndRead>)
+    fn open_file(&self, path: &str) -> Result<Box<dyn File>, FileSystemError> {
+        Ok(Box::new(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .read(true)
+                .open(path)?,
+        ) as Box<dyn File>)
     }
 
-    fn create_file(&self, path: &str) -> Result<Box<dyn std::io::Write>, FileSystemError> {
+    fn create_file(&self, path: &str) -> Result<Box<dyn File>, FileSystemError> {
         Ok(Box::new(fs::File::create(path)?))
     }
 
     fn append_file(&self, path: &str) -> Result<Box<dyn std::io::Write>, FileSystemError> {
-        Ok(Box::new(fs::File::open(path)?))
+        Ok(Box::new(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .read(true)
+                .open(path)?,
+        ))
     }
 
     fn exists(&self, path: &str) -> bool {

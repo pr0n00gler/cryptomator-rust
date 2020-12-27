@@ -55,3 +55,42 @@ fn test_crypto_fs_seek_and_read() {
     assert_eq!(cleartext_read_count, ciphertext_read_count);
     assert_eq!(cleartext_part_data, ciphertext_part_data);
 }
+
+#[test]
+fn test_crypto_fs_write() {
+    let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(&mk);
+
+    let local_fs = LocalFS::new();
+    let crypto_fs = CryptoFS::new(TEST_STORAGE_PATH, &cryptor, &local_fs).unwrap();
+
+    let mut random_data: Vec<u8> = (0..32 * 1024 * 3 + 2465)
+        .map(|_| rand::random::<u8>())
+        .collect();
+
+    let mut test_file = crypto_fs.create_file("/test.dat").unwrap();
+    test_file.write_all(random_data.as_slice()).unwrap();
+    test_file.flush().unwrap();
+
+    let mut check_file = crypto_fs.open_file("/test.dat").unwrap();
+    let mut check_data: Vec<u8> = vec![];
+    let count = check_file.read_to_end(&mut check_data).unwrap();
+    assert_eq!(count, random_data.len());
+    assert_eq!(check_data, random_data);
+
+    let slice_offset = 10;
+    let random_slice: Vec<u8> = (0..100 * 15).map(|_| rand::random::<u8>()).collect();
+    for (i, b) in random_slice.iter().enumerate() {
+        random_data[i + slice_offset] = *b
+    }
+    let mut new_file = crypto_fs.open_file("/test.dat").unwrap();
+    new_file
+        .seek(std::io::SeekFrom::Start(slice_offset as u64))
+        .unwrap();
+    new_file.write_all(&random_slice).unwrap();
+    check_file.seek(std::io::SeekFrom::Start(0)).unwrap();
+    let mut check_data: Vec<u8> = vec![];
+    let count = check_file.read_to_end(&mut check_data).unwrap();
+    assert_eq!(count, random_data.len());
+    assert_eq!(check_data, random_data);
+}

@@ -254,6 +254,23 @@ impl<'gc> CryptoFSFile<'gc> {
         self.rfs_seeker_reader.seek(SeekFrom::Start(current_pos))?;
         Ok(calculate_cleartext_size(real_file_size))
     }
+
+    fn read_chunk(&mut self, chunk_index: u64) -> Result<Vec<u8>, FileSystemError> {
+        self.rfs_seeker_reader.seek(SeekFrom::Start(
+            (chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
+        ))?;
+        let mut chunk = [0u8; FILE_CHUNK_LENGTH];
+        let read_bytes = self.rfs_seeker_reader.read(&mut chunk)?;
+        if read_bytes == 0 {
+            return Ok(vec![0; 0]);
+        }
+        Ok(self.cryptor.decrypt_chunk(
+            &self.header.nonce,
+            &self.header.payload.content_key,
+            chunk_index as usize,
+            &chunk[..read_bytes],
+        )?)
+    }
 }
 
 impl Seek for CryptoFSFile<'_> {
@@ -280,24 +297,14 @@ impl Read for CryptoFSFile<'_> {
             } else {
                 (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize
             };
-            self.rfs_seeker_reader.seek(SeekFrom::Start(
-                (chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
-            ))?;
-            let mut chunk = [0u8; FILE_CHUNK_LENGTH];
-            let read_bytes = self.rfs_seeker_reader.read(&mut chunk)?;
-            if read_bytes == 0 {
-                break;
-            }
-            let decrypted_chunk = match self.cryptor.decrypt_chunk(
-                &self.header.nonce,
-                &self.header.payload.content_key,
-                chunk_index as usize,
-                &chunk[..read_bytes],
-            ) {
+            let chunk = match self.read_chunk(chunk_index) {
                 Ok(c) => c,
                 Err(_) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
             };
-            for byte in &decrypted_chunk[offset..] {
+            if chunk.len() == 0 {
+                break;
+            }
+            for byte in &chunk[offset..] {
                 if n >= buf.len() {
                     break;
                 }
@@ -312,3 +319,13 @@ impl Read for CryptoFSFile<'_> {
 }
 
 impl SeekAndRead for CryptoFSFile<'_> {}
+
+impl Write for CryptoFSFile<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        unimplemented!()
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        unimplemented!()
+    }
+}

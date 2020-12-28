@@ -209,7 +209,7 @@ impl<'gc> CryptoFS<'gc> {
         let temp = temp.join(std::path::Path::new(real_dir_path.as_str()));
         let temp = temp.join(std::path::Path::new(real_filename.as_str()));
         match temp.to_str() {
-            Some(s) => Ok(String::from(s)),
+            Some(s) => Ok(String::from(s) + ENCRYPTED_FILE_EXT),
             None => Err(UnknownError(String::from(
                 "failed to convert PathBuf to str",
             ))),
@@ -218,28 +218,21 @@ impl<'gc> CryptoFS<'gc> {
 
     pub fn open_file(&self, path: &str) -> Result<Box<dyn File + 'gc>, FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
-        let crypto_file = CryptoFSFile::open(
-            (String::from(real_path) + ENCRYPTED_FILE_EXT).as_str(),
-            self.cryptor,
-            self.file_system_provider,
-        )?;
+        let crypto_file =
+            CryptoFSFile::open(real_path.as_str(), self.cryptor, self.file_system_provider)?;
         Ok(Box::new(crypto_file))
     }
 
     pub fn create_file(&self, path: &str) -> Result<Box<dyn File + 'gc>, FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
-        let real_name = String::from(real_path) + ENCRYPTED_FILE_EXT;
-        let rfs_file = self.file_system_provider.create_file(real_name.as_str())?;
+        let rfs_file = self.file_system_provider.create_file(real_path.as_str())?;
         let crypto_file = CryptoFSFile::create_file(&self.cryptor, rfs_file)?;
         Ok(Box::new(crypto_file))
     }
 
     pub fn remove_file(&self, path: &str) -> Result<(), FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
-        let real_filepath = String::from(real_path) + ENCRYPTED_FILE_EXT;
-        Ok(self
-            .file_system_provider
-            .remove_file(real_filepath.as_str())?)
+        Ok(self.file_system_provider.remove_file(real_path.as_str())?)
     }
 
     pub fn exists(&self, path: &str) -> bool {
@@ -247,8 +240,7 @@ impl<'gc> CryptoFS<'gc> {
             Ok(p) => p,
             Err(_) => return false,
         };
-        let real_filepath = String::from(real_path) + ENCRYPTED_FILE_EXT;
-        self.file_system_provider.exists(real_filepath.as_str())
+        self.file_system_provider.exists(real_path.as_str())
     }
 }
 

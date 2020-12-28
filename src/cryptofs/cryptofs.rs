@@ -4,11 +4,11 @@ use crate::crypto::{
 };
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist, UnknownError};
 use crate::cryptofs::{File, FileSystem, FileSystemError};
-use failure::AsFail;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const ENCRYPTED_FILE_EXT: &str = ".c9r";
+const DIR_FILENAME: &str = "dir.c9r";
 
 pub struct CryptoFS<'gc> {
     cryptor: &'gc Cryptor<'gc>,
@@ -62,7 +62,7 @@ impl<'gc> CryptoFS<'gc> {
                             let mut reader = self.file_system_provider.open_file(
                                 Path::new(real_path.as_str())
                                     .join(f)
-                                    .join("dir.c9r")
+                                    .join(DIR_FILENAME)
                                     .to_str()
                                     .unwrap_or_default(),
                             )?;
@@ -111,7 +111,12 @@ impl<'gc> CryptoFS<'gc> {
         let mut path_buf = std::path::PathBuf::new();
         for component in components {
             let p = match component {
-                std::path::Component::RootDir => "/",
+                std::path::Component::RootDir => match component.as_os_str().to_str() {
+                    Some(s) => s,
+                    None => {
+                        return Err(UnknownError(String::from("failed to convert OsStr to str")))
+                    }
+                },
                 std::path::Component::Normal(os) => match os.to_str() {
                     Some(s) => s,
                     None => {
@@ -134,13 +139,14 @@ impl<'gc> CryptoFS<'gc> {
                 Err(e) => match e {
                     PathIsNotExist(_) => {
                         let encrypted_folder_name =
-                            self.cryptor.encrypt_filename(p, parent_dir_id.as_slice())? + ".c9r";
+                            self.cryptor.encrypt_filename(p, parent_dir_id.as_slice())?
+                                + ENCRYPTED_FILE_EXT;
                         let parent_folder = self.real_path_from_dir_id(parent_dir_id.as_slice())?;
                         let mut real_path = std::path::Path::new(parent_folder.as_str())
                             .join(encrypted_folder_name.as_str());
                         self.file_system_provider
                             .create_dir_all(real_path.to_str().unwrap_or_default())?;
-                        real_path = real_path.join("dir.c9r");
+                        real_path = real_path.join(DIR_FILENAME);
                         let mut writer = self
                             .file_system_provider
                             .create_file(real_path.to_str().unwrap_or_default())?;
@@ -181,7 +187,7 @@ impl<'gc> CryptoFS<'gc> {
                 ))))
             }
         };
-        let mut dir_path = std::path::PathBuf::new();
+        let mut dir_path = std::path::PathBuf::new(); //path without filename
         for (i, c) in components.iter().enumerate() {
             if i > components.len() - 2 {
                 break;
@@ -213,7 +219,7 @@ impl<'gc> CryptoFS<'gc> {
     pub fn open_file(&self, path: &str) -> Result<Box<dyn File + 'gc>, FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
         let crypto_file = CryptoFSFile::open(
-            (String::from(real_path) + ".c9r").as_str(),
+            (String::from(real_path) + ENCRYPTED_FILE_EXT).as_str(),
             self.cryptor,
             self.file_system_provider,
         )?;
@@ -222,7 +228,7 @@ impl<'gc> CryptoFS<'gc> {
 
     pub fn create_file(&self, path: &str) -> Result<Box<dyn File + 'gc>, FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
-        let real_name = String::from(real_path) + ".c9r";
+        let real_name = String::from(real_path) + ENCRYPTED_FILE_EXT;
         let rfs_file = self.file_system_provider.create_file(real_name.as_str())?;
         let crypto_file = CryptoFSFile::create_file(&self.cryptor, rfs_file)?;
         Ok(Box::new(crypto_file))
@@ -230,8 +236,19 @@ impl<'gc> CryptoFS<'gc> {
 
     pub fn remove_file(&self, path: &str) -> Result<(), FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
-        let real_name = String::from(real_path) + ".c9r";
-        Ok(self.file_system_provider.remove_file(real_name.as_str())?)
+        let real_filepath = String::from(real_path) + ENCRYPTED_FILE_EXT;
+        Ok(self
+            .file_system_provider
+            .remove_file(real_filepath.as_str())?)
+    }
+
+    pub fn exists(&self, path: &str) -> bool {
+        let real_path = match self.filepath_to_real_path(path) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let real_filepath = String::from(real_path) + ENCRYPTED_FILE_EXT;
+        self.file_system_provider.exists(real_filepath.as_str())
     }
 }
 
@@ -249,7 +266,7 @@ impl<'gc> CryptoFSFile<'gc> {
         real_file_system_provider: &dyn FileSystem,
     ) -> Result<CryptoFSFile<'gc>, FileSystemError> {
         let mut reader = real_file_system_provider.open_file(real_path)?;
-        let mut encrypted_header: [u8; 88] = [0; 88];
+        let mut encrypted_header: [u8; FILE_HEADER_LENGTH] = [0; FILE_HEADER_LENGTH];
         reader.read_exact(&mut encrypted_header)?;
         let header = cryptor.decrypt_file_header(&encrypted_header)?;
         Ok(CryptoFSFile {

@@ -58,6 +58,7 @@ fn test_crypto_fs_seek_and_read() {
 
 #[test]
 fn test_crypto_fs_write() {
+    let test_write_file: &str = "/test.dat";
     let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(&mk);
 
@@ -68,11 +69,11 @@ fn test_crypto_fs_write() {
         .map(|_| rand::random::<u8>())
         .collect();
 
-    let mut test_file = crypto_fs.create_file("/test.dat").unwrap();
+    let mut test_file = crypto_fs.create_file(test_write_file).unwrap();
     test_file.write_all(random_data.as_slice()).unwrap();
     test_file.flush().unwrap();
 
-    let mut check_file = crypto_fs.open_file("/test.dat").unwrap();
+    let mut check_file = crypto_fs.open_file(test_write_file).unwrap();
     let mut check_data: Vec<u8> = vec![];
     let count = check_file.read_to_end(&mut check_data).unwrap();
     assert_eq!(count, random_data.len());
@@ -83,7 +84,7 @@ fn test_crypto_fs_write() {
     for (i, b) in random_slice.iter().enumerate() {
         random_data[i + slice_offset] = *b
     }
-    let mut dat_file = crypto_fs.open_file("/test.dat").unwrap();
+    let mut dat_file = crypto_fs.open_file(test_write_file).unwrap();
     dat_file
         .seek(std::io::SeekFrom::Start(slice_offset as u64))
         .unwrap();
@@ -95,5 +96,17 @@ fn test_crypto_fs_write() {
     assert_eq!(count, random_data.len());
     assert_eq!(check_data, random_data);
 
-    crypto_fs.remove_file("/test.dat").unwrap();
+    crypto_fs.remove_file(test_write_file).unwrap();
+}
+
+#[test]
+fn test_crypto_fs_exists() {
+    let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(&mk);
+
+    let local_fs = LocalFS::new();
+    let crypto_fs = CryptoFS::new(TEST_STORAGE_PATH, &cryptor, &local_fs).unwrap();
+
+    assert_eq!(crypto_fs.exists("/lorem-ipsum.pdf"), true);
+    assert_eq!(crypto_fs.exists("/404.file"), false);
 }

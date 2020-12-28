@@ -334,7 +334,7 @@ impl Read for CryptoFSFile<'_> {
             };
             let chunk = match self.read_chunk(chunk_index) {
                 Ok(c) => c,
-                Err(e) => {
+                Err(_) => {
                     return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                 }
             };
@@ -386,15 +386,14 @@ impl Write for CryptoFSFile<'_> {
             } else {
                 let mut buf_chunk = match self.read_chunk(chunk_index) {
                     Ok(c) => c,
-                    Err(e) => {
-                        println!("{} {}", chunk_index, e.as_fail().find_root_cause());
+                    Err(_) => {
                         return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                     }
                 };
                 if buf_chunk.len() == 0 {
                     break;
                 }
-                while offset < chunk.len() {
+                while offset < buf_chunk.len() {
                     if n >= buf.len() {
                         break;
                     }

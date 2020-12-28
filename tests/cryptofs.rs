@@ -78,19 +78,22 @@ fn test_crypto_fs_write() {
     assert_eq!(count, random_data.len());
     assert_eq!(check_data, random_data);
 
-    let slice_offset = 10;
-    let random_slice: Vec<u8> = (0..100 * 15).map(|_| rand::random::<u8>()).collect();
+    let slice_offset = 33405;
+    let random_slice: Vec<u8> = (0..33415).map(|_| rand::random::<u8>()).collect();
     for (i, b) in random_slice.iter().enumerate() {
         random_data[i + slice_offset] = *b
     }
-    let mut new_file = crypto_fs.open_file("/test.dat").unwrap();
-    new_file
+    let mut dat_file = crypto_fs.open_file("/test.dat").unwrap();
+    dat_file
         .seek(std::io::SeekFrom::Start(slice_offset as u64))
         .unwrap();
-    new_file.write_all(&random_slice).unwrap();
+    dat_file.write_all(&random_slice).unwrap();
+
     check_file.seek(std::io::SeekFrom::Start(0)).unwrap();
     let mut check_data: Vec<u8> = vec![];
     let count = check_file.read_to_end(&mut check_data).unwrap();
     assert_eq!(count, random_data.len());
     assert_eq!(check_data, random_data);
+
+    crypto_fs.remove_file("/test.dat").unwrap();
 }

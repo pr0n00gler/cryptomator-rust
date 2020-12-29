@@ -78,7 +78,6 @@ impl FileSystem for LocalFS {
     }
 
     fn move_dir(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError> {
-        self.copy_file(_src, _dest)?;
-        Ok(self.remove_dir(_src)?)
+        unimplemented!();
     }
 }

@@ -110,3 +110,69 @@ fn test_crypto_fs_exists() {
     assert_eq!(crypto_fs.exists("/lorem-ipsum.pdf"), true);
     assert_eq!(crypto_fs.exists("/404.file"), false);
 }
+
+#[test]
+fn test_crypto_fs_remove_dir() {
+    //TODO: remake this test
+    let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(&mk);
+
+    let local_fs = LocalFS::new();
+    let crypto_fs = CryptoFS::new(TEST_STORAGE_PATH, &cryptor, &local_fs).unwrap();
+
+    let dir_to_remove = "/dirs/to/remove";
+    let files: [&str; 3] = [
+        "/dirs/to/remove/file1.dat",
+        "/dirs/to/remove/file2.dat",
+        "/dirs/to/remove/file3.dat",
+    ];
+
+    crypto_fs.create_dir(dir_to_remove).unwrap();
+    for f in files.iter() {
+        crypto_fs.create_file(*f).unwrap();
+    }
+    crypto_fs.remove_dir("/dirs").unwrap();
+
+    assert_eq!(crypto_fs.exists(dir_to_remove), false);
+    for f in files.iter() {
+        assert_eq!(crypto_fs.exists(*f), false);
+    }
+}
+
+#[test]
+fn test_crypto_fs_copy_file() {
+    let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(&mk);
+
+    let local_fs = LocalFS::new();
+    let crypto_fs = CryptoFS::new(TEST_STORAGE_PATH, &cryptor, &local_fs).unwrap();
+
+    let file_to_copy = "/lorem-ipsum.pdf";
+    let copied_file = "/lorem-ipsum-copy.pdf";
+    //test copy to the same folder
+    crypto_fs.copy_file(file_to_copy, copied_file).unwrap();
+
+    let mut file = crypto_fs.open_file(file_to_copy).unwrap();
+    let mut data: Vec<u8> = vec![];
+    file.read_to_end(&mut data).unwrap();
+
+    let mut file_copy = crypto_fs.open_file(copied_file).unwrap();
+    let mut data_copy: Vec<u8> = vec![];
+    file_copy.read_to_end(&mut data_copy).unwrap();
+    assert_eq!(data, data_copy);
+
+    //test copy to another folder
+    let dir_to_copy = "/dir-to-copy";
+    let copied_file_full_path = "/dir-to-copy/lorem-ipsum-copy.pdf";
+    crypto_fs.create_dir(dir_to_copy).unwrap();
+    crypto_fs
+        .copy_file(file_to_copy, copied_file_full_path)
+        .unwrap();
+    let mut file_copy2 = crypto_fs.open_file(copied_file_full_path).unwrap();
+    let mut data_copy2: Vec<u8> = vec![];
+    file_copy2.read_to_end(&mut data_copy2).unwrap();
+    assert_eq!(data, data_copy2);
+
+    crypto_fs.remove_dir(dir_to_copy).unwrap();
+    crypto_fs.remove_file(copied_file).unwrap();
+}

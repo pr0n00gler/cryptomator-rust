@@ -265,9 +265,17 @@ impl<'gc> CryptoFS<'gc> {
                 self.file_system_provider.remove_file(real_path.as_str())?;
             }
         }
-        self.file_system_provider
-            .remove_dir(real_dir_path.as_str())?;
-        Ok(())
+        Ok(self
+            .file_system_provider
+            .remove_dir(real_dir_path.as_str())?)
+    }
+
+    pub fn copy_file(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError> {
+        let src_real_path = self.filepath_to_real_path(_src)?;
+        let dst_real_path = self.filepath_to_real_path(_dest)?;
+        Ok(self
+            .file_system_provider
+            .copy_file(src_real_path.as_str(), dst_real_path.as_str())?)
     }
 }
 

@@ -64,7 +64,7 @@ impl FileSystem for LocalFS {
     }
 
     fn remove_dir(&self, path: &str) -> Result<(), FileSystemError> {
-        Ok(fs::remove_dir(path)?)
+        Ok(fs::remove_dir_all(path)?)
     }
 
     fn copy_file(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError> {

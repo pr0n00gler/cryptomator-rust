@@ -205,10 +205,10 @@ impl<'gc> CryptoFS<'gc> {
         let dir_id = self.dir_id_from_path(dir_path_str)?;
         let real_dir_path = self.real_path_from_dir_id(dir_id.as_slice())?;
         let real_filename = self.cryptor.encrypt_filename(filename, dir_id.as_slice())?;
-        let temp = std::path::PathBuf::new();
-        let temp = temp.join(std::path::Path::new(real_dir_path.as_str()));
-        let temp = temp.join(std::path::Path::new(real_filename.as_str()));
-        match temp.to_str() {
+        let full_path = std::path::PathBuf::new()
+            .join(real_dir_path.as_str())
+            .join(real_filename.as_str());
+        match full_path.to_str() {
             Some(s) => Ok(String::from(s) + ENCRYPTED_FILE_EXT),
             None => Err(UnknownError(String::from(
                 "failed to convert PathBuf to str",
@@ -241,6 +241,33 @@ impl<'gc> CryptoFS<'gc> {
             Err(_) => return false,
         };
         self.file_system_provider.exists(real_path.as_str())
+    }
+
+    pub fn remove_dir(&self, path: &str) -> Result<(), FileSystemError> {
+        let dir_entries = self.read_dir(path)?;
+        let real_dir_path = self.filepath_to_real_path(path)?;
+        for entry in dir_entries {
+            let full_path = std::path::PathBuf::new();
+            let full_path = full_path.join(path).join(entry.as_str());
+            let full_path = match full_path.as_os_str().to_str() {
+                Some(s) => s,
+                None => {
+                    return Err(UnknownError(String::from(
+                        "failed to convert PathBuf to str",
+                    )))
+                }
+            };
+            let real_path = self.filepath_to_real_path(full_path)?;
+            let file_metadata = std::fs::metadata(real_path.as_str())?;
+            if file_metadata.is_dir() {
+                self.remove_dir(full_path)?;
+            } else {
+                self.file_system_provider.remove_file(real_path.as_str())?;
+            }
+        }
+        self.file_system_provider
+            .remove_dir(real_dir_path.as_str())?;
+        Ok(())
     }
 }
 

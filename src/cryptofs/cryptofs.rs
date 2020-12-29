@@ -285,6 +285,78 @@ impl<'gc> CryptoFS<'gc> {
             .file_system_provider
             .move_file(src_real_path.as_str(), dst_real_path.as_str())?)
     }
+
+    fn last_path_component(&self, path: &str) -> Result<String, FileSystemError> {
+        let components = std::path::Path::new(path)
+            .components()
+            .collect::<Vec<std::path::Component>>();
+        Ok(match components.last() {
+            Some(c) => match c.as_os_str().to_str() {
+                Some(s) => String::from(s),
+                None => return Err(UnknownError(String::from("failed to convert OsStr to str"))),
+            },
+            None => {
+                return Err(PathIsNotExist(String::from(format!(
+                    "invalid path: {}",
+                    path
+                ))))
+            }
+        })
+    }
+
+    pub fn move_dir(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError> {
+        let src_dir_entries = self.read_dir(_src)?;
+
+        let mut dst_path = _dest;
+        let mut dst_path_builder = std::path::PathBuf::new();
+        if !self.exists(_dest) {
+            self.create_dir(_dest)?;
+        } else {
+            let src_dir_name = self.last_path_component(_src)?;
+            dst_path_builder = dst_path_builder.join(_dest).join(src_dir_name);
+            dst_path = match dst_path_builder.as_os_str().to_str() {
+                Some(s) => s,
+                None => {
+                    return Err(UnknownError(String::from(
+                        "failed to convert PathBuf to str",
+                    )))
+                }
+            };
+            self.create_dir(dst_path)?;
+        }
+
+        for entry in src_dir_entries {
+            let dst_full_path = std::path::PathBuf::new();
+            let dst_full_path = dst_full_path.join(dst_path).join(entry.as_str());
+            let dst_full_path = match dst_full_path.as_os_str().to_str() {
+                Some(s) => s,
+                None => {
+                    return Err(UnknownError(String::from(
+                        "failed to convert PathBuf to str",
+                    )))
+                }
+            };
+
+            let src_full_path = std::path::PathBuf::new();
+            let src_full_path = src_full_path.join(_src).join(entry.as_str());
+            let src_full_path = match src_full_path.as_os_str().to_str() {
+                Some(s) => s,
+                None => {
+                    return Err(UnknownError(String::from(
+                        "failed to convert PathBuf to str",
+                    )))
+                }
+            };
+            let src_real_path = self.filepath_to_real_path(src_full_path)?;
+            let file_metadata = std::fs::metadata(src_real_path.as_str())?;
+            if file_metadata.is_dir() {
+                self.move_dir(src_full_path, dst_full_path)?;
+            } else {
+                self.move_file(src_full_path, dst_full_path)?;
+            }
+        }
+        Ok(self.remove_dir(_src)?)
+    }
 }
 
 pub struct CryptoFSFile<'gc> {

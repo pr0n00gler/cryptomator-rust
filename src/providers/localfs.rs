@@ -9,6 +9,12 @@ impl LocalFS {
     }
 }
 
+impl Default for LocalFS {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl File for fs::File {}
 
 impl FileSystem for LocalFS {

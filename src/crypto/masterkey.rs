@@ -70,10 +70,10 @@ impl MasterKey {
         )?;
 
         Ok(MasterKey {
-            version: version,
-            scrypt_salt: scrypt_salt,
-            scrypt_cost_param: scrypt_cost_param,
-            scrypt_block_size: scrypt_block_size,
+            version,
+            scrypt_salt,
+            scrypt_cost_param,
+            scrypt_block_size,
             primary_master_key: Vec::from(unwrapped_master_key),
             hmac_master_key: Vec::from(unwrapped_hmac_master_key),
             filename: String::from(filename),

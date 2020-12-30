@@ -70,7 +70,7 @@ impl<'gc> CryptoFS<'gc> {
                             break;
                         }
                     }
-                    if dir_uuid.len() == 0 {
+                    if dir_uuid.is_empty() {
                         return Err(PathIsNotExist(String::from(
                             c.as_os_str().to_str().unwrap_or_default(),
                         )));
@@ -88,21 +88,23 @@ impl<'gc> CryptoFS<'gc> {
     }
 
     pub fn read_dir(
-        &self,
+        &'gc self,
         path: &str,
-    ) -> Result<Box<dyn Iterator<Item = String>>, FileSystemError> {
+    ) -> Result<Box<dyn Iterator<Item = String> + 'gc>, FileSystemError> {
         let dir_id = self.dir_id_from_path(path)?;
         let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
-        let files = self
-            .file_system_provider
-            .read_dir(real_path.as_str())?
-            .map(|f| {
-                self.cryptor
-                    .decrypt_filename(&f[..f.len() - ENCRYPTED_FILE_EXT.len()], dir_id.as_slice())
-                    .unwrap_or_default()
-            })
-            .collect::<Vec<String>>();
-        Ok(Box::new(files.into_iter()))
+        Ok(Box::new(
+            self.file_system_provider
+                .read_dir(real_path.as_str())?
+                .map(move |f| {
+                    self.cryptor
+                        .decrypt_filename(
+                            &f[..f.len() - ENCRYPTED_FILE_EXT.len()],
+                            dir_id.as_slice(),
+                        )
+                        .unwrap_or_default()
+                }),
+        ))
     }
 
     pub fn create_dir(&self, path: &str) -> Result<(), FileSystemError> {
@@ -151,7 +153,7 @@ impl<'gc> CryptoFS<'gc> {
                             .file_system_provider
                             .create_file(real_path.to_str().unwrap_or_default())?;
                         let dir_uuid = uuid::Uuid::new_v4();
-                        writer.write(dir_uuid.to_string().as_bytes())?;
+                        writer.write_all(dir_uuid.to_string().as_bytes())?;
 
                         let dir_id_hash = self
                             .cryptor
@@ -172,21 +174,11 @@ impl<'gc> CryptoFS<'gc> {
     }
 
     fn filepath_to_real_path(&self, path: &str) -> Result<String, FileSystemError> {
+        let filename = self.last_path_component(path)?;
+
         let components = std::path::Path::new(path)
             .components()
             .collect::<Vec<std::path::Component>>();
-        let filename = match components.last() {
-            Some(c) => match c.as_os_str().to_str() {
-                Some(s) => s,
-                None => return Err(UnknownError(String::from("failed to convert OsStr to str"))),
-            },
-            None => {
-                return Err(PathIsNotExist(String::from(format!(
-                    "invalid path: {}",
-                    path
-                ))))
-            }
-        };
         let mut dir_path = std::path::PathBuf::new(); //path without filename
         for (i, c) in components.iter().enumerate() {
             if i > components.len() - 2 {
@@ -204,7 +196,9 @@ impl<'gc> CryptoFS<'gc> {
         };
         let dir_id = self.dir_id_from_path(dir_path_str)?;
         let real_dir_path = self.real_path_from_dir_id(dir_id.as_slice())?;
-        let real_filename = self.cryptor.encrypt_filename(filename, dir_id.as_slice())?;
+        let real_filename = self
+            .cryptor
+            .encrypt_filename(filename.as_str(), dir_id.as_slice())?;
         let full_path = std::path::PathBuf::new()
             .join(real_dir_path.as_str())
             .join(real_filename.as_str());
@@ -295,12 +289,7 @@ impl<'gc> CryptoFS<'gc> {
                 Some(s) => String::from(s),
                 None => return Err(UnknownError(String::from("failed to convert OsStr to str"))),
             },
-            None => {
-                return Err(PathIsNotExist(String::from(format!(
-                    "invalid path: {}",
-                    path
-                ))))
-            }
+            None => return Err(PathIsNotExist(format!("invalid path: {}", path))),
         })
     }
 
@@ -390,7 +379,7 @@ impl<'gc> CryptoFSFile<'gc> {
     ) -> Result<CryptoFSFile<'gc>, FileSystemError> {
         let header = cryptor.create_file_header();
         let encrypted_header = cryptor.encrypt_file_header(&header)?;
-        rfs_file.write(encrypted_header.as_slice())?;
+        rfs_file.write_all(encrypted_header.as_slice())?;
         rfs_file.flush()?;
         Ok(CryptoFSFile {
             cryptor,
@@ -462,7 +451,7 @@ impl Read for CryptoFSFile<'_> {
                     return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                 }
             };
-            if chunk.len() == 0 {
+            if chunk.is_empty() {
                 break;
             }
             for byte in &chunk[offset..] {
@@ -514,7 +503,7 @@ impl Write for CryptoFSFile<'_> {
                         return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                     }
                 };
-                if buf_chunk.len() == 0 {
+                if buf_chunk.is_empty() {
                     break;
                 }
                 while offset < buf_chunk.len() {

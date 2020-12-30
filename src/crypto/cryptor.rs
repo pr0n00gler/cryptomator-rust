@@ -43,13 +43,12 @@ pub fn calculate_cleartext_size(ciphertext_size: u64) -> u64 {
         (FILE_CHUNK_CONTENT_MAC_LENGTH + FILE_CHUNK_CONTENT_NONCE_LENGTH) as u64;
     let full_chunks_number = ciphertext_size / FILE_CHUNK_LENGTH as u64;
     let additional_ciphertext_bytes = ciphertext_size % FILE_CHUNK_LENGTH as u64;
-    let additional_cleartext_bytes = if additional_ciphertext_bytes <= 0 {
+    let additional_cleartext_bytes = if additional_ciphertext_bytes == 0 {
         0
     } else {
         additional_ciphertext_bytes - overhead_per_chunk
     };
-    return FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64 * full_chunks_number
-        + additional_cleartext_bytes;
+    FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64 * full_chunks_number + additional_cleartext_bytes
 }
 
 pub struct FileHeaderPayload {
@@ -169,11 +168,11 @@ impl<'gc> Cryptor<'gc> {
 
     pub fn decrypt_file_header(&self, encrypted_header: &[u8]) -> Result<FileHeader, CryptoError> {
         if encrypted_header.len() < FILE_HEADER_LENGTH {
-            return Err(InvalidFileHeaderLength(String::from(format!(
+            return Err(InvalidFileHeaderLength(format!(
                 "file header must be exactly {} bytes length, got: {}",
                 FILE_HEADER_LENGTH,
                 encrypted_header.len()
-            ))));
+            )));
         }
 
         //verify header payload
@@ -222,7 +221,7 @@ impl<'gc> Cryptor<'gc> {
     ) -> Result<(), CryptoError> {
         let file_header = self.create_file_header();
         let encrypted_header = self.encrypt_file_header(&file_header)?;
-        output.write(encrypted_header.as_slice())?;
+        output.write_all(encrypted_header.as_slice())?;
 
         let mut file_chunk = [0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH];
         let mut chunk_number: usize = 0;
@@ -234,7 +233,7 @@ impl<'gc> Cryptor<'gc> {
                 chunk_number,
                 &file_chunk[..read_bytes],
             )?;
-            output.write(encrypted_chunk.as_slice())?;
+            output.write_all(encrypted_chunk.as_slice())?;
             if read_bytes < FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
                 break;
             }
@@ -262,7 +261,7 @@ impl<'gc> Cryptor<'gc> {
                 chunk_number,
                 &file_chunk[..read_bytes],
             )?;
-            output.write(chunk_content.as_slice())?;
+            output.write_all(chunk_content.as_slice())?;
             if read_bytes < FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
                 break;
             }
@@ -316,11 +315,11 @@ impl<'gc> Cryptor<'gc> {
         encrypted_chunk: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
         if encrypted_chunk.len() < FILE_CHUNK_CONTENT_MAC_LENGTH + FILE_CHUNK_CONTENT_NONCE_LENGTH {
-            return Err(InvalidFileChunkLength(String::from(format!(
+            return Err(InvalidFileChunkLength(format!(
                 "file chunk must be more than {} bytes length, got: {}",
                 FILE_CHUNK_CONTENT_MAC_LENGTH + FILE_CHUNK_CONTENT_NONCE_LENGTH,
                 encrypted_chunk.len()
-            ))));
+            )));
         }
 
         let begin_of_mac = encrypted_chunk.len() - FILE_CHUNK_CONTENT_MAC_LENGTH;

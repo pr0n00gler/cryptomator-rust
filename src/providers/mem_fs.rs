@@ -13,6 +13,12 @@ pub struct MemoryFS {
     fs: FS,
 }
 
+impl Default for MemoryFS {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct VirtualFile<F: rsfs::File> {
     f: F,
 }

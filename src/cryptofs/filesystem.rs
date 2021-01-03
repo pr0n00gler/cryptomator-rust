@@ -76,9 +76,9 @@ impl DirEntry {
     pub fn filename_string(&self) -> Result<String, FileSystemError> {
         match self.file_name.to_str() {
             Some(s) => Ok(s.to_string()),
-            None => Err(FileSystemError::UnknownError(format!(
-                "failed to convert OsString to String"
-            ))),
+            None => Err(FileSystemError::UnknownError(
+                "failed to convert OsString to String".to_string(),
+            )),
         }
     }
 

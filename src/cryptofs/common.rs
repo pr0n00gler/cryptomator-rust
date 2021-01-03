@@ -44,6 +44,6 @@ pub fn parent_path(path: &str) -> String {
     }
     match dir_path.to_str() {
         Some(s) => String::from(s),
-        None => return String::new(),
+        None => String::new(),
     }
 }

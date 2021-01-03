@@ -112,7 +112,7 @@ impl FileSystem for MemoryFS {
                 return true;
             }
         }
-        return false;
+        false
     }
 
     fn remove_file(&self, path: &str) -> Result<(), FileSystemError> {

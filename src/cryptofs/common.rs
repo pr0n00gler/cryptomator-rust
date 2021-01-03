@@ -1,6 +1,6 @@
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist, UnknownError};
 use crate::cryptofs::FileSystemError;
-use std::path::Component;
+use std::path::{Component, Path};
 
 pub fn component_to_string(c: Component) -> Result<String, FileSystemError> {
     match c {
@@ -29,4 +29,21 @@ pub fn last_path_component(path: &str) -> Result<String, FileSystemError> {
         },
         None => return Err(PathIsNotExist(format!("invalid path: {}", path))),
     })
+}
+
+pub fn parent_path(path: &str) -> String {
+    let components = std::path::Path::new(path)
+        .components()
+        .collect::<Vec<std::path::Component>>();
+    let mut dir_path = std::path::PathBuf::new(); //path without filename
+    for (i, c) in components.iter().enumerate() {
+        if i > components.len() - 2 {
+            break;
+        }
+        dir_path = dir_path.join(c.as_ref() as &Path);
+    }
+    match dir_path.to_str() {
+        Some(s) => String::from(s),
+        None => return String::new(),
+    }
 }

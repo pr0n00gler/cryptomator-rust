@@ -1,4 +1,4 @@
-use crate::cryptofs::{File, FileSystem, FileSystemError};
+use crate::cryptofs::{DirEntry, File, FileSystem, FileSystemError, Metadata};
 use std::fs;
 
 pub struct LocalFS {}
@@ -15,18 +15,25 @@ impl Default for LocalFS {
     }
 }
 
-impl File for fs::File {}
+impl File for std::fs::File {
+    fn metadata(&self) -> Result<Metadata, FileSystemError> {
+        Ok(Metadata::from(self.metadata()?))
+    }
+}
 
 impl FileSystem for LocalFS {
-    fn read_dir(&self, path: &str) -> Result<Box<dyn Iterator<Item = String>>, FileSystemError> {
-        let mut filenames: Vec<String> = vec![];
-        let entries = fs::read_dir(path)?.map(|rd| rd.map(|e| e.file_name()));
-        for entry in entries {
-            let e = entry?;
-            let filename = e.to_str().unwrap_or_default();
-            filenames.extend(vec![String::from(filename)]);
-        }
-        Ok(Box::new(filenames.into_iter()))
+    fn read_dir(&self, path: &str) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError> {
+        Ok(Box::new(fs::read_dir(path)?.map(|rd| match rd {
+            Ok(de) => DirEntry {
+                path: de.path(),
+                metadata: match de.metadata() {
+                    Ok(m) => Metadata::from(m),
+                    Err(_) => Metadata::default(),
+                },
+                file_name: de.file_name(),
+            },
+            Err(_) => DirEntry::default(),
+        })))
     }
 
     fn create_dir(&self, path: &str) -> Result<(), FileSystemError> {
@@ -44,21 +51,11 @@ impl FileSystem for LocalFS {
                 .write(true)
                 .read(true)
                 .open(path)?,
-        ) as Box<dyn File>)
+        ))
     }
 
     fn create_file(&self, path: &str) -> Result<Box<dyn File>, FileSystemError> {
         Ok(Box::new(fs::File::create(path)?))
-    }
-
-    fn append_file(&self, path: &str) -> Result<Box<dyn std::io::Write>, FileSystemError> {
-        Ok(Box::new(
-            std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .read(true)
-                .open(path)?,
-        ))
     }
 
     fn exists(&self, path: &str) -> bool {

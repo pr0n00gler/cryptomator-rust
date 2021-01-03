@@ -5,7 +5,7 @@ clippy:
 	cargo clippy --all-targets --all-features --workspace -- -D warnings
 
 test:
-	cargo test -- --test-threads 1
+	cargo test
 
 build: clippy test
 	cargo build

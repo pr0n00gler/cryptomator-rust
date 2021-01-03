@@ -8,14 +8,11 @@ pub trait File: Seek + Read + Write {
 }
 
 pub trait FileSystem {
-    fn read_dir(
-        &self,
-        path: &str,
-    ) -> Result<Box<dyn Iterator<Item = DirEntry> + '_>, FileSystemError>;
+    fn read_dir(&self, path: &str) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError>;
     fn create_dir(&self, path: &str) -> Result<(), FileSystemError>;
     fn create_dir_all(&self, path: &str) -> Result<(), FileSystemError>;
-    fn open_file(&self, path: &str) -> Result<Box<dyn File + '_>, FileSystemError>;
-    fn create_file(&self, path: &str) -> Result<Box<dyn File + '_>, FileSystemError>;
+    fn open_file(&self, path: &str) -> Result<Box<dyn File>, FileSystemError>;
+    fn create_file(&self, path: &str) -> Result<Box<dyn File>, FileSystemError>;
     fn exists(&self, path: &str) -> bool;
     fn remove_file(&self, path: &str) -> Result<(), FileSystemError>;
     fn remove_dir(&self, path: &str) -> Result<(), FileSystemError>;
@@ -24,6 +21,7 @@ pub trait FileSystem {
     fn move_dir(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError>;
 }
 
+#[derive(Copy, Clone)]
 pub struct Metadata {
     pub is_dir: bool,
     pub is_file: bool,

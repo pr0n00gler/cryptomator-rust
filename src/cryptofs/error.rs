@@ -1,5 +1,6 @@
 use crate::crypto::{CryptoError, MasterKeyError};
 use failure::Fail;
+use failure::_core::fmt::Debug;
 
 #[derive(Debug, Fail)]
 pub enum FileSystemError {

@@ -44,7 +44,7 @@ impl FileSystem for LocalFS {
         Ok(fs::create_dir_all(path)?)
     }
 
-    fn open_file(&self, path: &str) -> Result<Box<dyn File + '_>, FileSystemError> {
+    fn open_file(&self, path: &str) -> Result<Box<dyn File>, FileSystemError> {
         Ok(Box::new(
             std::fs::OpenOptions::new()
                 .create(true)
@@ -54,7 +54,7 @@ impl FileSystem for LocalFS {
         ))
     }
 
-    fn create_file(&self, path: &str) -> Result<Box<dyn File + '_>, FileSystemError> {
+    fn create_file(&self, path: &str) -> Result<Box<dyn File>, FileSystemError> {
         Ok(Box::new(fs::File::create(path)?))
     }
 

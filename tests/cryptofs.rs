@@ -1,12 +1,13 @@
 use cryptomator::crypto;
 use cryptomator::cryptofs::{CryptoFS, FileSystem};
-use cryptomator::providers::LocalFS;
+use cryptomator::providers::{LocalFS, MemoryFS};
 use std::io::Read;
 
 const TEST_STORAGE_PATH: &str = "tests/test_storage/d";
 const TEST_FILE_PATH: &str = "tests/lorem-ipsum.pdf";
 const PATH_TO_MASTER_KEY: &str = "tests/test_storage/masterkey.cryptomator";
 const DEFAULT_PASSWORD: &str = "12345678";
+const VFS_STORAGE_PATH: &str = "/";
 
 #[test]
 fn test_crypto_fs_seek_and_read() {
@@ -62,8 +63,8 @@ fn test_crypto_fs_write() {
     let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(&mk);
 
-    let local_fs = LocalFS::new();
-    let crypto_fs = CryptoFS::new(TEST_STORAGE_PATH, &cryptor, &local_fs).unwrap();
+    let local_fs = MemoryFS::new();
+    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, &cryptor, &local_fs).unwrap();
 
     let mut random_data: Vec<u8> = (0..32 * 1024 * 3 + 2465)
         .map(|_| rand::random::<u8>())
@@ -104,10 +105,12 @@ fn test_crypto_fs_exists() {
     let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(&mk);
 
-    let local_fs = LocalFS::new();
-    let crypto_fs = CryptoFS::new(TEST_STORAGE_PATH, &cryptor, &local_fs).unwrap();
+    let local_fs = MemoryFS::new();
+    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, &cryptor, &local_fs).unwrap();
 
-    assert_eq!(crypto_fs.exists("/lorem-ipsum.pdf"), true);
+    crypto_fs.create_file("/test.txt").unwrap();
+
+    assert_eq!(crypto_fs.exists("/test.txt"), true);
     assert_eq!(crypto_fs.exists("/404.file"), false);
 }
 
@@ -117,8 +120,8 @@ fn test_crypto_fs_remove_dir() {
     let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(&mk);
 
-    let local_fs = LocalFS::new();
-    let crypto_fs = CryptoFS::new(TEST_STORAGE_PATH, &cryptor, &local_fs).unwrap();
+    let local_fs = MemoryFS::new();
+    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, &cryptor, &local_fs).unwrap();
 
     let dir_to_remove = "/dirs/to/remove";
     let files: [&str; 3] = [
@@ -144,11 +147,19 @@ fn test_crypto_fs_copy_file() {
     let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(&mk);
 
-    let local_fs = LocalFS::new();
-    let crypto_fs = CryptoFS::new(TEST_STORAGE_PATH, &cryptor, &local_fs).unwrap();
+    let local_fs = MemoryFS::new();
+    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, &cryptor, &local_fs).unwrap();
 
-    let file_to_copy = "/lorem-ipsum.pdf";
-    let copied_file = "/lorem-ipsum-copy.pdf";
+    let file_to_copy = "/test.pdf";
+    let copied_file = "/test-copy.pdf";
+
+    let data: Vec<u8> = (0..32 * 1024 * 3 + 2465)
+        .map(|_| rand::random::<u8>())
+        .collect();
+
+    let mut f = crypto_fs.create_file(file_to_copy).unwrap();
+    f.write_all(data.as_slice()).unwrap();
+
     //test copy to the same folder
     crypto_fs.copy_file(file_to_copy, copied_file).unwrap();
 
@@ -163,7 +174,7 @@ fn test_crypto_fs_copy_file() {
 
     //test copy to another folder
     let dir_to_copy = "/dir-to-copy";
-    let copied_file_full_path = "/dir-to-copy/lorem-ipsum-copy.pdf";
+    let copied_file_full_path = "/dir-to-copy/test-copy.pdf";
     crypto_fs.create_dir(dir_to_copy).unwrap();
     crypto_fs
         .copy_file(file_to_copy, copied_file_full_path)
@@ -182,8 +193,8 @@ fn test_crypto_fs_move_file() {
     let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(&mk);
 
-    let local_fs = LocalFS::new();
-    let crypto_fs = CryptoFS::new(TEST_STORAGE_PATH, &cryptor, &local_fs).unwrap();
+    let local_fs = MemoryFS::new();
+    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, &cryptor, &local_fs).unwrap();
 
     let file_to_move = "/test.dat";
     let moved_file = "/test_moved.dat";
@@ -221,8 +232,8 @@ fn test_crypto_fs_move_dir() {
     let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(&mk);
 
-    let local_fs = LocalFS::new();
-    let crypto_fs = CryptoFS::new(TEST_STORAGE_PATH, &cryptor, &local_fs).unwrap();
+    let local_fs = MemoryFS::new();
+    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, &cryptor, &local_fs).unwrap();
 
     let dir_to_move = "/dir1";
     let dirs_to_move = "/dir1/dir2";

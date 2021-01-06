@@ -8,6 +8,7 @@ use crate::cryptofs::{
     component_to_string, last_path_component, parent_path, DirEntry, File, FileSystem,
     FileSystemError,
 };
+use std::cmp::Ordering;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -440,17 +441,22 @@ impl Read for CryptoFSFile<'_> {
                     return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                 }
             };
+
             if chunk.is_empty() {
                 break;
             }
-
-            for byte in &chunk[offset..] {
-                if n >= buf.len() {
-                    break;
-                }
-                buf[n] = *byte;
-                n += 1;
+            if offset == chunk.len() {
+                break;
             }
+
+            let slice_len = match (buf.len() - n).cmp(&(chunk.len() - offset)) {
+                Ordering::Less => buf.len() - n,
+                Ordering::Greater => chunk.len() - offset,
+                Ordering::Equal => buf.len() - n,
+            };
+            buf[n..n + slice_len].copy_from_slice(&chunk[offset..offset + slice_len]);
+            n += slice_len;
+
             self.current_pos += n as u64;
             chunk_index += 1;
         }
@@ -471,7 +477,7 @@ impl Write for CryptoFSFile<'_> {
         let start_chunk_index = chunk_index;
         let mut n: usize = 0;
         while n < buf.len() {
-            let mut offset = if n > 0 {
+            let offset = if n > 0 {
                 0
             } else {
                 (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize
@@ -479,15 +485,13 @@ impl Write for CryptoFSFile<'_> {
 
             let mut chunk: Vec<u8> = vec![];
             if chunk_index > chunks_count || file_size == FILE_HEADER_LENGTH as u64 {
-                let mut c = 0;
-                while c < FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
-                    if n >= buf.len() {
-                        break;
-                    }
-                    chunk.extend_from_slice(&[buf[n]]);
-                    n += 1;
-                    c += 1;
-                }
+                let slice_len = if FILE_CHUNK_CONTENT_PAYLOAD_LENGTH <= buf.len() - n {
+                    FILE_CHUNK_CONTENT_PAYLOAD_LENGTH
+                } else {
+                    buf.len() - n
+                };
+                chunk.extend_from_slice(&buf[n..n + slice_len]);
+                n += slice_len;
             } else {
                 let mut buf_chunk = match self.read_chunk(chunk_index) {
                     Ok(c) => c,
@@ -498,14 +502,16 @@ impl Write for CryptoFSFile<'_> {
                 if buf_chunk.is_empty() {
                     break;
                 }
-                while offset < buf_chunk.len() {
-                    if n >= buf.len() {
-                        break;
-                    }
-                    buf_chunk[offset] = buf[n];
-                    offset += 1;
-                    n += 1;
-                }
+
+                let slice_len = match (buf.len() - n).cmp(&(buf_chunk.len() - offset)) {
+                    Ordering::Less => buf.len() - n,
+                    Ordering::Greater => buf_chunk.len() - offset,
+                    Ordering::Equal => buf.len() - n,
+                };
+
+                buf_chunk[offset..offset + slice_len].copy_from_slice(&buf[n..n + slice_len]);
+                n += slice_len;
+
                 chunk = buf_chunk;
             }
 

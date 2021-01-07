@@ -22,41 +22,77 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const FILE_HEADER_NONCE_LENGTH: usize = 16;
-const FILE_HEADER_PAYLOAD_LENGTH: usize = 40;
-const FILE_HEADER_PAYLOAD_RESERVED_LENGTH: usize = 8;
-const FILE_HEADER_MAC_LENGTH: usize = 32;
-const FILE_HEADER_LENGTH: usize =
+/// File header nonce used during header payload encryption
+pub const FILE_HEADER_NONCE_LENGTH: usize = 16;
+
+/// AES-CTR encrypted payload length
+pub const FILE_HEADER_PAYLOAD_LENGTH: usize = 40;
+
+/// Length of reserved bytes in payload
+pub const FILE_HEADER_PAYLOAD_RESERVED_LENGTH: usize = 8;
+
+/// Length of a file content key in the payload
+pub const FILE_HEADER_MAC_LENGTH: usize = 32;
+
+/// Total file header length
+pub const FILE_HEADER_LENGTH: usize =
     FILE_HEADER_NONCE_LENGTH + FILE_HEADER_PAYLOAD_LENGTH + FILE_HEADER_MAC_LENGTH;
 
-const FILE_CHUNK_CONTENT_NONCE_LENGTH: usize = 16;
-const FILE_CHUNK_CONTENT_MAC_LENGTH: usize = 32;
-const FILE_CHUNK_CONTENT_PAYLOAD_LENGTH: usize = 32 * 1024;
+/// File chunk's nonce length
+pub const FILE_CHUNK_CONTENT_NONCE_LENGTH: usize = 16;
 
-const FILE_CHUNK_LENGTH: usize = FILE_CHUNK_CONTENT_NONCE_LENGTH
+/// File chunk's mac length
+pub const FILE_CHUNK_CONTENT_MAC_LENGTH: usize = 32;
+
+/// Max length of file chunk's payload
+pub const FILE_CHUNK_CONTENT_PAYLOAD_LENGTH: usize = 32 * 1024;
+
+/// Total length of a file chunk
+pub const FILE_CHUNK_LENGTH: usize = FILE_CHUNK_CONTENT_NONCE_LENGTH
     + FILE_CHUNK_CONTENT_PAYLOAD_LENGTH
     + FILE_CHUNK_CONTENT_MAC_LENGTH;
 
+/// Calculates the size of the cleartext payload by ciphertext
+pub fn calculate_cleartext_size(ciphertext_size: u64) -> u64 {
+    let ciphertext_size = ciphertext_size - FILE_HEADER_LENGTH as u64;
+    let overhead_per_chunk =
+        (FILE_CHUNK_CONTENT_MAC_LENGTH + FILE_CHUNK_CONTENT_NONCE_LENGTH) as u64;
+    let full_chunks_number = ciphertext_size / FILE_CHUNK_LENGTH as u64;
+    let additional_ciphertext_bytes = ciphertext_size % FILE_CHUNK_LENGTH as u64;
+    let additional_cleartext_bytes = if additional_ciphertext_bytes == 0 {
+        0
+    } else {
+        additional_ciphertext_bytes - overhead_per_chunk
+    };
+    FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64 * full_chunks_number + additional_cleartext_bytes
+}
+
+/// Contains reserved bytes and content key
 pub struct FileHeaderPayload {
     pub reserved: [u8; 8],
     pub content_key: [u8; 32],
 }
 
+/// Contains nonce, payload and mac
 pub struct FileHeader {
     pub nonce: [u8; 16],
     pub payload: FileHeaderPayload,
     pub mac: [u8; 32],
 }
 
-pub struct Cryptor {
-    master_key: MasterKey,
+/// The core crypto instance to encrypt/decrypt data
+pub struct Cryptor<'gc> {
+    master_key: &'gc MasterKey,
 }
 
-impl Cryptor {
-    pub fn new(master_key: MasterKey) -> Cryptor {
+impl<'gc> Cryptor<'gc> {
+    /// Creates a new cryptor instance
+    pub fn new(master_key: &'gc MasterKey) -> Cryptor {
         Cryptor { master_key }
     }
 
+    /// Returns hash of the directory by a provided unique dir_id
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#directory-ids
     pub fn get_dir_id_hash(&self, dir_id: &[u8]) -> Result<String, CryptoError> {
         let mut long_key: Vec<u8> = vec![];
         long_key.extend(&self.master_key.hmac_master_key);
@@ -76,6 +112,8 @@ impl Cryptor {
         Ok(dir_id_hash_base32_encoded)
     }
 
+    /// Encrypts a filename using a parent dir_id
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#filename-encryption
     pub fn encrypt_filename(
         &self,
         cleartext_name: &str,
@@ -93,6 +131,8 @@ impl Cryptor {
         Ok(encoded_ciphertext)
     }
 
+    /// Decrypts a ciphertext filename using a parent dir_id
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#filename-encryption
     pub fn decrypt_filename(
         &self,
         encrypted_filename: &str,
@@ -114,6 +154,7 @@ impl Cryptor {
         Ok(String::from_utf8(decrypted_filename)?)
     }
 
+    /// Returns a new FileHeader
     pub fn create_file_header(&self) -> FileHeader {
         FileHeader {
             nonce: rand::thread_rng().gen::<[u8; 16]>(),
@@ -125,6 +166,8 @@ impl Cryptor {
         }
     }
 
+    /// Encrypts a FileHeader
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-header-encryption
     pub fn encrypt_file_header(&self, file_header: &FileHeader) -> Result<Vec<u8>, CryptoError> {
         let mut encrypted_header: Vec<u8> = vec![];
 
@@ -152,13 +195,15 @@ impl Cryptor {
         Ok(encrypted_header)
     }
 
+    /// Decrypts a FileHeader
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-header-encryption
     pub fn decrypt_file_header(&self, encrypted_header: &[u8]) -> Result<FileHeader, CryptoError> {
         if encrypted_header.len() < FILE_HEADER_LENGTH {
-            return Err(InvalidFileHeaderLength(String::from(format!(
+            return Err(InvalidFileHeaderLength(format!(
                 "file header must be exactly {} bytes length, got: {}",
                 FILE_HEADER_LENGTH,
                 encrypted_header.len()
-            ))));
+            )));
         }
 
         //verify header payload
@@ -200,6 +245,9 @@ impl Cryptor {
         Ok(file_header)
     }
 
+    /// Encrypts a data
+    /// Encrypted data will be written to a output
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-content-encryption
     pub fn encrypt_content<R: Read, W: Write>(
         &self,
         input: &mut R,
@@ -207,7 +255,7 @@ impl Cryptor {
     ) -> Result<(), CryptoError> {
         let file_header = self.create_file_header();
         let encrypted_header = self.encrypt_file_header(&file_header)?;
-        output.write(encrypted_header.as_slice())?;
+        output.write_all(encrypted_header.as_slice())?;
 
         let mut file_chunk = [0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH];
         let mut chunk_number: usize = 0;
@@ -219,7 +267,7 @@ impl Cryptor {
                 chunk_number,
                 &file_chunk[..read_bytes],
             )?;
-            output.write(encrypted_chunk.as_slice())?;
+            output.write_all(encrypted_chunk.as_slice())?;
             if read_bytes < FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
                 break;
             }
@@ -228,6 +276,9 @@ impl Cryptor {
         Ok(())
     }
 
+    /// Decrypts a data
+    /// Decrypted data will be written to a output
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-content-encryption
     pub fn decrypt_content<R: Read, W: Write>(
         &self,
         input: &mut R,
@@ -247,7 +298,7 @@ impl Cryptor {
                 chunk_number,
                 &file_chunk[..read_bytes],
             )?;
-            output.write(chunk_content.as_slice())?;
+            output.write_all(chunk_content.as_slice())?;
             if read_bytes < FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
                 break;
             }
@@ -256,6 +307,8 @@ impl Cryptor {
         Ok(())
     }
 
+    /// Encrypts a chunk of data using a header's nonce, a file_key and chunk_number
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-content-encryption
     pub fn encrypt_chunk(
         &self,
         header_nonce: &[u8],
@@ -293,6 +346,8 @@ impl Cryptor {
         Ok(encrypted_chunk)
     }
 
+    /// Decrypts a ciphered chunk of data using a header's nonce, a file_key and chunk_number
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-content-encryption
     pub fn decrypt_chunk(
         &self,
         header_nonce: &[u8],
@@ -301,11 +356,11 @@ impl Cryptor {
         encrypted_chunk: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
         if encrypted_chunk.len() < FILE_CHUNK_CONTENT_MAC_LENGTH + FILE_CHUNK_CONTENT_NONCE_LENGTH {
-            return Err(InvalidFileChunkLength(String::from(format!(
+            return Err(InvalidFileChunkLength(format!(
                 "file chunk must be more than {} bytes length, got: {}",
                 FILE_CHUNK_CONTENT_MAC_LENGTH + FILE_CHUNK_CONTENT_NONCE_LENGTH,
                 encrypted_chunk.len()
-            ))));
+            )));
         }
 
         let begin_of_mac = encrypted_chunk.len() - FILE_CHUNK_CONTENT_MAC_LENGTH;
@@ -333,5 +388,119 @@ impl Cryptor {
         cipher.apply_keystream(&mut decrypted_content);
 
         Ok(decrypted_content)
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use crate::crypto;
+    use std::io::Cursor;
+    const PATH_TO_MASTER_KEY: &str = "tests/test_storage/masterkey.cryptomator";
+    const DEFAULT_PASSWORD: &str = "12345678";
+
+    const ROOT_DIR_ID_HASH: &str = "HIRW3L6XRAPFC2UCK5QY37Q2U552IRPE";
+    const ROOT_DIR_ID: &[u8] = b"";
+
+    const TEST_FILENAME: &str = "lorem-ipsum.pdf";
+    const ENCRYPTED_TEST_FILENAME: &str = "fXQEfw6iSwP1esHbRznuVFZqv_LQFqNwC2r2LOQa-A==";
+
+    #[test]
+    fn test_encrypt_dir_id() {
+        let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+        let cryptor = crypto::Cryptor::new(&mk);
+        let dir_id_hash = cryptor.get_dir_id_hash(ROOT_DIR_ID).unwrap();
+        assert_eq!(ROOT_DIR_ID_HASH, dir_id_hash.as_str());
+    }
+
+    #[test]
+    fn test_encrypt_filename() {
+        let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+        let cryptor = crypto::Cryptor::new(&mk);
+        let encrypted_filename = cryptor
+            .encrypt_filename(TEST_FILENAME, ROOT_DIR_ID)
+            .unwrap();
+        assert_eq!(ENCRYPTED_TEST_FILENAME, encrypted_filename.as_str())
+    }
+
+    #[test]
+    fn test_decrypt_filename() {
+        let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+        let cryptor = crypto::Cryptor::new(&mk);
+        let decrypted_filename = cryptor
+            .decrypt_filename(ENCRYPTED_TEST_FILENAME, ROOT_DIR_ID)
+            .unwrap();
+        assert_eq!(TEST_FILENAME, decrypted_filename.as_str())
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_header() {
+        let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+        let cryptor = crypto::Cryptor::new(&mk);
+
+        let header = cryptor.create_file_header();
+        let encrypted_header = cryptor.encrypt_file_header(&header).unwrap();
+        let decrypted_header = cryptor
+            .decrypt_file_header(encrypted_header.as_slice())
+            .unwrap();
+
+        assert_eq!(header.nonce, decrypted_header.nonce);
+        assert_eq!(header.payload.reserved, decrypted_header.payload.reserved);
+        assert_eq!(
+            header.payload.content_key,
+            decrypted_header.payload.content_key
+        );
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_chunk() {
+        let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+        let cryptor = crypto::Cryptor::new(&mk);
+
+        let header = cryptor.create_file_header();
+        let chunk_data: Vec<u8> = (0..1024).map(|_| rand::random::<u8>()).collect();
+
+        let encrypted_chunk = cryptor
+            .encrypt_chunk(
+                header.nonce.as_ref(),
+                header.payload.content_key.as_ref(),
+                0,
+                chunk_data.as_slice(),
+            )
+            .unwrap();
+        let decrypted_chunk = cryptor
+            .decrypt_chunk(
+                header.nonce.as_ref(),
+                header.payload.content_key.as_ref(),
+                0,
+                encrypted_chunk.as_slice(),
+            )
+            .unwrap();
+
+        assert_eq!(chunk_data, decrypted_chunk);
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_content() {
+        let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+        let cryptor = crypto::Cryptor::new(&mk);
+
+        let content_data: Vec<u8> = (0..10 * 1024 * 1024)
+            .map(|_| rand::random::<u8>())
+            .collect();
+        let mut raw_content_reader = Cursor::new(content_data);
+
+        let mut encrypted_content = Cursor::new(Vec::new());
+        let mut decrypted_content = Cursor::new(Vec::new());
+
+        cryptor
+            .encrypt_content(&mut raw_content_reader, &mut encrypted_content)
+            .unwrap();
+        encrypted_content.set_position(0);
+
+        cryptor
+            .decrypt_content(&mut encrypted_content, &mut decrypted_content)
+            .unwrap();
+
+        assert_eq!(raw_content_reader.get_ref(), decrypted_content.get_ref());
     }
 }

@@ -22,21 +22,37 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// File header nonce used during header payload encryption
 pub const FILE_HEADER_NONCE_LENGTH: usize = 16;
+
+/// AES-CTR encrypted payload length
 pub const FILE_HEADER_PAYLOAD_LENGTH: usize = 40;
+
+/// Length of reserved bytes in payload
 pub const FILE_HEADER_PAYLOAD_RESERVED_LENGTH: usize = 8;
+
+/// Length of a file content key in the payload
 pub const FILE_HEADER_MAC_LENGTH: usize = 32;
+
+/// Total file header length
 pub const FILE_HEADER_LENGTH: usize =
     FILE_HEADER_NONCE_LENGTH + FILE_HEADER_PAYLOAD_LENGTH + FILE_HEADER_MAC_LENGTH;
 
+/// File chunk's nonce length
 pub const FILE_CHUNK_CONTENT_NONCE_LENGTH: usize = 16;
+
+/// File chunk's mac length
 pub const FILE_CHUNK_CONTENT_MAC_LENGTH: usize = 32;
+
+/// Max length of file chunk's payload
 pub const FILE_CHUNK_CONTENT_PAYLOAD_LENGTH: usize = 32 * 1024;
 
+/// Total length of a file chunk
 pub const FILE_CHUNK_LENGTH: usize = FILE_CHUNK_CONTENT_NONCE_LENGTH
     + FILE_CHUNK_CONTENT_PAYLOAD_LENGTH
     + FILE_CHUNK_CONTENT_MAC_LENGTH;
 
+/// Calculates the size of the cleartext payload by ciphertext
 pub fn calculate_cleartext_size(ciphertext_size: u64) -> u64 {
     let ciphertext_size = ciphertext_size - FILE_HEADER_LENGTH as u64;
     let overhead_per_chunk =
@@ -51,26 +67,32 @@ pub fn calculate_cleartext_size(ciphertext_size: u64) -> u64 {
     FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64 * full_chunks_number + additional_cleartext_bytes
 }
 
+/// Contains reserved bytes and content key
 pub struct FileHeaderPayload {
     pub reserved: [u8; 8],
     pub content_key: [u8; 32],
 }
 
+/// Contains nonce, payload and mac
 pub struct FileHeader {
     pub nonce: [u8; 16],
     pub payload: FileHeaderPayload,
     pub mac: [u8; 32],
 }
 
+/// The core crypto instance to encrypt/decrypt data
 pub struct Cryptor<'gc> {
     master_key: &'gc MasterKey,
 }
 
 impl<'gc> Cryptor<'gc> {
+    /// Creates a new cryptor instance
     pub fn new(master_key: &'gc MasterKey) -> Cryptor {
         Cryptor { master_key }
     }
 
+    /// Returns hash of the directory by a provided unique dir_id
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#directory-ids
     pub fn get_dir_id_hash(&self, dir_id: &[u8]) -> Result<String, CryptoError> {
         let mut long_key: Vec<u8> = vec![];
         long_key.extend(&self.master_key.hmac_master_key);
@@ -90,6 +112,8 @@ impl<'gc> Cryptor<'gc> {
         Ok(dir_id_hash_base32_encoded)
     }
 
+    /// Encrypts a filename using a parent dir_id
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#filename-encryption
     pub fn encrypt_filename(
         &self,
         cleartext_name: &str,
@@ -107,6 +131,8 @@ impl<'gc> Cryptor<'gc> {
         Ok(encoded_ciphertext)
     }
 
+    /// Decrypts a ciphertext filename using a parent dir_id
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#filename-encryption
     pub fn decrypt_filename(
         &self,
         encrypted_filename: &str,
@@ -128,6 +154,7 @@ impl<'gc> Cryptor<'gc> {
         Ok(String::from_utf8(decrypted_filename)?)
     }
 
+    /// Returns a new FileHeader
     pub fn create_file_header(&self) -> FileHeader {
         FileHeader {
             nonce: rand::thread_rng().gen::<[u8; 16]>(),
@@ -139,6 +166,8 @@ impl<'gc> Cryptor<'gc> {
         }
     }
 
+    /// Encrypts a FileHeader
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-header-encryption
     pub fn encrypt_file_header(&self, file_header: &FileHeader) -> Result<Vec<u8>, CryptoError> {
         let mut encrypted_header: Vec<u8> = vec![];
 
@@ -166,6 +195,8 @@ impl<'gc> Cryptor<'gc> {
         Ok(encrypted_header)
     }
 
+    /// Decrypts a FileHeader
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-header-encryption
     pub fn decrypt_file_header(&self, encrypted_header: &[u8]) -> Result<FileHeader, CryptoError> {
         if encrypted_header.len() < FILE_HEADER_LENGTH {
             return Err(InvalidFileHeaderLength(format!(
@@ -214,6 +245,9 @@ impl<'gc> Cryptor<'gc> {
         Ok(file_header)
     }
 
+    /// Encrypts a data
+    /// Encrypted data will be written to a output
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-content-encryption
     pub fn encrypt_content<R: Read, W: Write>(
         &self,
         input: &mut R,
@@ -242,6 +276,9 @@ impl<'gc> Cryptor<'gc> {
         Ok(())
     }
 
+    /// Decrypts a data
+    /// Decrypted data will be written to a output
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-content-encryption
     pub fn decrypt_content<R: Read, W: Write>(
         &self,
         input: &mut R,
@@ -270,6 +307,8 @@ impl<'gc> Cryptor<'gc> {
         Ok(())
     }
 
+    /// Encrypts a chunk of data using a header's nonce, a file_key and chunk_number
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-content-encryption
     pub fn encrypt_chunk(
         &self,
         header_nonce: &[u8],
@@ -307,6 +346,8 @@ impl<'gc> Cryptor<'gc> {
         Ok(encrypted_chunk)
     }
 
+    /// Decrypts a ciphered chunk of data using a header's nonce, a file_key and chunk_number
+    /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-content-encryption
     pub fn decrypt_chunk(
         &self,
         header_nonce: &[u8],

@@ -1,6 +1,7 @@
 use crate::cryptofs::{DirEntry, File, FileSystem, FileSystemError, Metadata};
 use std::fs;
 
+/// Provides access to a local filesystem
 pub struct LocalFS {}
 
 impl LocalFS {
@@ -81,6 +82,9 @@ impl FileSystem for LocalFS {
     }
 
     fn move_dir(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError> {
+        // well, there is no call of this method from CryptoFS at this moment and i'm too lazy to
+        // implement the method for no reason.
+        //TODO: implement this method
         unimplemented!();
     }
 }

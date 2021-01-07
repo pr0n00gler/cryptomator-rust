@@ -7,8 +7,8 @@ use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::SystemTime;
 
-// Simple implementation of in-memory filesystem
-// Only for testing purposes
+/// Simple implementation of in-memory filesystem
+/// Only for testing purposes
 pub struct MemoryFS {
     fs: FS,
 }
@@ -140,6 +140,9 @@ impl FileSystem for MemoryFS {
     }
 
     fn move_dir(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError> {
+        // well, there is no call of this method from CryptoFS at this moment and i'm too lazy to
+        // implement the method for no reason.
+        //TODO: implement this method
         unimplemented!()
     }
 }

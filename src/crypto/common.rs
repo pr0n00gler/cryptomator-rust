@@ -1,5 +1,6 @@
 use std::convert::AsMut;
 
+/// Creates an array from a slice
 pub fn clone_into_array<A, T>(slice: &[T]) -> A
 where
     A: Default + AsMut<[T]>,

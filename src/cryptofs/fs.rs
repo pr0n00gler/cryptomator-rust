@@ -12,16 +12,29 @@ use std::cmp::Ordering;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+/// Extension of encrypted filename
 const ENCRYPTED_FILE_EXT: &str = ".c9r";
+
+/// Name of a file that contains dir_id
 const DIR_FILENAME: &str = "dir.c9r";
 
+// TODO: CryptoFS must implement Filesystem trait
+/// Provides an access to an encrypted storage
+/// In a nutshell, translates all the 'virtual' paths, like '/some_folder/file.txt', to real paths,
+/// like /d/DR/RW3L6XRAPFC2UCK5QY37Q2U552IRPE/eZdOa_B9fRqncpYjZmKXfJEz81LgRUbT0yWdE0wyNTMd.c9r
 pub struct CryptoFS<'gc> {
+    /// Instance of the Cryptor - does all work with cryptography
     cryptor: &'gc Cryptor<'gc>,
+
+    /// path to an encrypted storage
     root_folder: String,
+
+    /// Instance of the FileSystem. Should provide access to a real files.
     file_system_provider: &'gc dyn FileSystem,
 }
 
 impl<'gc> CryptoFS<'gc> {
+    /// Returns a new instance of CryptoFS
     pub fn new(
         folder: &str,
         cryptor: &'gc Cryptor,
@@ -39,6 +52,7 @@ impl<'gc> CryptoFS<'gc> {
         Ok(crypto_fs)
     }
 
+    /// Returns a real path to a dir by dir_id
     pub fn real_path_from_dir_id(&self, dir_id: &[u8]) -> Result<String, FileSystemError> {
         let dir_hash = self.cryptor.get_dir_id_hash(dir_id)?;
         let real_path = Path::new(self.root_folder.as_str())
@@ -52,6 +66,8 @@ impl<'gc> CryptoFS<'gc> {
         }
     }
 
+    /// Returns a dir_id for a path
+    /// There will be an PathIsNotExist error, if path does not exists and CryptoError cause of crypto errors
     pub fn dir_id_from_path(&self, path: &str) -> Result<Vec<u8>, FileSystemError> {
         let mut dir_id: Vec<u8> = vec![];
         let components = std::path::Path::new(path).components();
@@ -96,6 +112,7 @@ impl<'gc> CryptoFS<'gc> {
         Ok(dir_id)
     }
 
+    /// Translates a 'virtual' path to a real path
     pub fn filepath_to_real_path(&self, path: &str) -> Result<String, FileSystemError> {
         let filename = last_path_component(path)?;
 
@@ -117,6 +134,7 @@ impl<'gc> CryptoFS<'gc> {
         }
     }
 
+    /// Returns an iterator of DirEntries for the given path
     pub fn read_dir(
         &self,
         path: &str,
@@ -142,6 +160,8 @@ impl<'gc> CryptoFS<'gc> {
         ))
     }
 
+    /// Creates the directory at this path
+    /// Similar to create_dir_all()
     pub fn create_dir(&self, path: &str) -> Result<(), FileSystemError> {
         let mut parent_dir_id: Vec<u8> = vec![];
         let mut path_buf = std::path::PathBuf::new();
@@ -329,15 +349,29 @@ impl<'gc> CryptoFS<'gc> {
     }
 }
 
+/// 'Virtual' file implementation of the File trait
 pub struct CryptoFSFile<'gc> {
+    /// A Cryptor instance used to encrypt/decrypt data
     cryptor: &'gc Cryptor<'gc>,
+
+    /// Real filesystem file instance used to perform File(Read, Write, Seek) operations
     rfs_file: Box<dyn File>,
+
+    /// Keeps info about 'virtual' cursor for the 'virtual' file
     current_pos: u64,
+
+    /// FileHeader of the file
     header: FileHeader,
+
+    /// Metadata of the file
     metadata: Metadata,
 }
 
 impl<'gc> CryptoFSFile<'gc> {
+    /// Opens a file at the given real path (so the path must be translated from 'virtual' to real before the
+    /// function call) for reading/writing.
+    /// Read/Write implementations for the traits works with a cleartext data, so CryptoFSFile instance
+    /// must contain the Cryptor
     pub fn open(
         real_path: &str,
         cryptor: &'gc Cryptor,
@@ -345,7 +379,9 @@ impl<'gc> CryptoFSFile<'gc> {
     ) -> Result<CryptoFSFile<'gc>, FileSystemError> {
         let mut reader = real_file_system_provider.open_file(real_path)?;
         let mut encrypted_header: [u8; FILE_HEADER_LENGTH] = [0; FILE_HEADER_LENGTH];
+
         reader.read_exact(&mut encrypted_header)?;
+
         let header = cryptor.decrypt_file_header(&encrypted_header)?;
         let metadata = reader.metadata()?;
         Ok(CryptoFSFile {
@@ -360,6 +396,10 @@ impl<'gc> CryptoFSFile<'gc> {
         })
     }
 
+    /// Creates a file at the given real path (so the path must be translated from 'virtual' to real before the
+    /// function call).
+    /// Read/Write implementations for the traits works with a cleartext data, so CryptoFSFile instance
+    /// must contain the Cryptor
     pub fn create_file(
         cryptor: &'gc Cryptor,
         mut rfs_file: Box<dyn File>,
@@ -378,6 +418,7 @@ impl<'gc> CryptoFSFile<'gc> {
         })
     }
 
+    /// Returns a cleartext size of the file
     pub fn get_file_size(&mut self) -> Result<u64, FileSystemError> {
         let current_pos = self.rfs_file.seek(SeekFrom::Current(0))?;
         let real_file_size = self.rfs_file.seek(SeekFrom::End(0))?;
@@ -385,6 +426,7 @@ impl<'gc> CryptoFSFile<'gc> {
         Ok(calculate_cleartext_size(real_file_size))
     }
 
+    /// Return a real size of the file
     pub fn get_real_file_size(&mut self) -> Result<u64, FileSystemError> {
         let current_pos = self.rfs_file.seek(SeekFrom::Current(0))?;
         let real_file_size = self.rfs_file.seek(SeekFrom::End(0))?;
@@ -392,6 +434,7 @@ impl<'gc> CryptoFSFile<'gc> {
         Ok(real_file_size)
     }
 
+    /// Reads and returns cleartext chunk of the data.
     fn read_chunk(&mut self, chunk_index: u64) -> Result<Vec<u8>, FileSystemError> {
         self.rfs_file.seek(SeekFrom::Start(
             (chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,

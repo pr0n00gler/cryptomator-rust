@@ -8,6 +8,8 @@ use crate::crypto::error::MasterKeyError;
 const P: u32 = 1;
 const DEFAULT_IV: [u8; 8] = [0xA6; 8];
 
+/// Struct for MasterKey
+/// More info: https://docs.cryptomator.org/en/latest/security/architecture/#masterkey-derivation
 #[derive(Deserialize, Serialize)]
 pub struct MasterKey {
     version: u64,
@@ -22,6 +24,7 @@ pub struct MasterKey {
 }
 
 impl MasterKey {
+    /// Returns a new MasterKey instance by reading a file
     pub fn from_file(filename: &str, password: &str) -> Result<MasterKey, MasterKeyError> {
         let file = fs::File::open(filename)?;
         let mk_json: Value = serde_json::from_reader(file)?;

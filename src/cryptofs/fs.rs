@@ -142,7 +142,7 @@ impl<'gc> FileSystem for CryptoFS<'gc> {
         Ok(Box::new(
             self.file_system_provider
                 .read_dir(real_path.as_str())?
-                .map(move |f| DirEntry {
+                .map(|f| DirEntry {
                     path: Default::default(),
                     metadata: f.metadata,
                     file_name: self

@@ -81,13 +81,14 @@ pub struct FileHeader {
 }
 
 /// The core crypto instance to encrypt/decrypt data
-pub struct Cryptor<'gc> {
-    master_key: &'gc MasterKey,
+#[derive(Copy, Clone)]
+pub struct Cryptor {
+    master_key: MasterKey,
 }
 
-impl<'gc> Cryptor<'gc> {
+impl Cryptor {
     /// Creates a new cryptor instance
-    pub fn new(master_key: &'gc MasterKey) -> Cryptor {
+    pub fn new(master_key: MasterKey) -> Cryptor {
         Cryptor { master_key }
     }
 
@@ -176,7 +177,7 @@ impl<'gc> Cryptor<'gc> {
         payload.extend_from_slice(file_header.payload.content_key.as_ref());
 
         let mut cipher = Aes256Ctr::new(
-            GenericArray::from_slice(self.master_key.primary_master_key.as_slice()),
+            GenericArray::from_slice(&self.master_key.primary_master_key),
             GenericArray::from_slice(file_header.nonce.as_ref()),
         );
         cipher.apply_keystream(&mut payload);
@@ -184,7 +185,7 @@ impl<'gc> Cryptor<'gc> {
         let mut mac_payload: Vec<u8> = vec![];
         mac_payload.extend_from_slice(file_header.nonce.as_ref());
         mac_payload.extend(&payload);
-        let mut mac = HmacSha256::new_varkey(self.master_key.hmac_master_key.as_slice())?;
+        let mut mac = HmacSha256::new_varkey(&self.master_key.hmac_master_key)?;
         mac.update(mac_payload.as_slice());
         let mac_bytes = mac.finalize().into_bytes();
 
@@ -207,7 +208,7 @@ impl<'gc> Cryptor<'gc> {
         }
 
         //verify header payload
-        let mut mac = HmacSha256::new_varkey(self.master_key.hmac_master_key.as_slice())?;
+        let mut mac = HmacSha256::new_varkey(&self.master_key.hmac_master_key)?;
         let mut payload_to_verify = vec![]; // nonce + ciphertext
         payload_to_verify.extend(&encrypted_header[..FILE_HEADER_NONCE_LENGTH]); // nonce
         payload_to_verify.extend(
@@ -219,7 +220,7 @@ impl<'gc> Cryptor<'gc> {
 
         //decrypt header payload
         let mut cipher = Aes256Ctr::new(
-            GenericArray::from_slice(self.master_key.primary_master_key.as_slice()),
+            GenericArray::from_slice(&self.master_key.primary_master_key),
             GenericArray::from_slice(&encrypted_header[..FILE_HEADER_NONCE_LENGTH]),
         );
         let mut decrypted_payload = Vec::from(
@@ -334,7 +335,7 @@ impl<'gc> Cryptor<'gc> {
         mac_payload.extend_from_slice(chunk_nonce.as_ref());
         mac_payload.extend(&encrypted_chunk_data);
 
-        let mut mac = HmacSha256::new_varkey(self.master_key.hmac_master_key.as_slice())?;
+        let mut mac = HmacSha256::new_varkey(&self.master_key.hmac_master_key)?;
         mac.update(mac_payload.as_slice());
         let mac_bytes = mac.finalize().into_bytes();
 
@@ -369,7 +370,7 @@ impl<'gc> Cryptor<'gc> {
         chunk_number_big_endian.write_u64::<BigEndian>(chunk_number as u64)?;
 
         // check MAC
-        let mut mac = HmacSha256::new_varkey(self.master_key.hmac_master_key.as_slice())?;
+        let mut mac = HmacSha256::new_varkey(&self.master_key.hmac_master_key)?;
         let mut payload_to_verify = vec![]; // header_nonce + chunk_number + chunk_nonce + ciphertext
         payload_to_verify.extend(header_nonce); // header_nonce
         payload_to_verify.extend(chunk_number_big_endian); // chunk_number
@@ -407,7 +408,7 @@ pub mod tests {
     #[test]
     fn test_encrypt_dir_id() {
         let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
-        let cryptor = crypto::Cryptor::new(&mk);
+        let cryptor = crypto::Cryptor::new(mk);
         let dir_id_hash = cryptor.get_dir_id_hash(ROOT_DIR_ID).unwrap();
         assert_eq!(ROOT_DIR_ID_HASH, dir_id_hash.as_str());
     }
@@ -415,7 +416,7 @@ pub mod tests {
     #[test]
     fn test_encrypt_filename() {
         let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
-        let cryptor = crypto::Cryptor::new(&mk);
+        let cryptor = crypto::Cryptor::new(mk);
         let encrypted_filename = cryptor
             .encrypt_filename(TEST_FILENAME, ROOT_DIR_ID)
             .unwrap();
@@ -425,7 +426,7 @@ pub mod tests {
     #[test]
     fn test_decrypt_filename() {
         let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
-        let cryptor = crypto::Cryptor::new(&mk);
+        let cryptor = crypto::Cryptor::new(mk);
         let decrypted_filename = cryptor
             .decrypt_filename(ENCRYPTED_TEST_FILENAME, ROOT_DIR_ID)
             .unwrap();
@@ -435,7 +436,7 @@ pub mod tests {
     #[test]
     fn test_encrypt_decrypt_header() {
         let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
-        let cryptor = crypto::Cryptor::new(&mk);
+        let cryptor = crypto::Cryptor::new(mk);
 
         let header = cryptor.create_file_header();
         let encrypted_header = cryptor.encrypt_file_header(&header).unwrap();
@@ -454,7 +455,7 @@ pub mod tests {
     #[test]
     fn test_encrypt_decrypt_chunk() {
         let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
-        let cryptor = crypto::Cryptor::new(&mk);
+        let cryptor = crypto::Cryptor::new(mk);
 
         let header = cryptor.create_file_header();
         let chunk_data: Vec<u8> = (0..1024).map(|_| rand::random::<u8>()).collect();
@@ -482,7 +483,7 @@ pub mod tests {
     #[test]
     fn test_encrypt_decrypt_content() {
         let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
-        let cryptor = crypto::Cryptor::new(&mk);
+        let cryptor = crypto::Cryptor::new(mk);
 
         let content_data: Vec<u8> = (0..10 * 1024 * 1024)
             .map(|_| rand::random::<u8>())

@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use std::fs;
@@ -10,17 +9,10 @@ const DEFAULT_IV: [u8; 8] = [0xA6; 8];
 
 /// Struct for MasterKey
 /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#masterkey-derivation
-#[derive(Deserialize, Serialize)]
+#[derive(Copy, Clone)]
 pub struct MasterKey {
-    version: u64,
-    scrypt_salt: Vec<u8>,
-    scrypt_cost_param: u64,
-    scrypt_block_size: u64,
-    pub primary_master_key: Vec<u8>,
-    pub hmac_master_key: Vec<u8>,
-    filename: String,
-    //TODO
-    //version_mac: Vec<u8>,
+    pub primary_master_key: [u8; 32],
+    pub hmac_master_key: [u8; 32],
 }
 
 impl MasterKey {
@@ -33,7 +25,7 @@ impl MasterKey {
         let scrypt_block_size = mk_json["scryptBlockSize"].as_u64().unwrap_or(0);
 
         //TODO: check version
-        let version = mk_json["version"].as_u64().unwrap_or(0);
+        let _version = mk_json["version"].as_u64().unwrap_or(0);
 
         let scrypt_salt = base64::decode(mk_json["scryptSalt"].as_str().unwrap_or(""))?;
         let primary_master_key =
@@ -73,13 +65,8 @@ impl MasterKey {
         )?;
 
         Ok(MasterKey {
-            version,
-            scrypt_salt,
-            scrypt_cost_param,
-            scrypt_block_size,
-            primary_master_key: Vec::from(unwrapped_master_key),
-            hmac_master_key: Vec::from(unwrapped_hmac_master_key),
-            filename: String::from(filename),
+            primary_master_key: unwrapped_master_key,
+            hmac_master_key: unwrapped_hmac_master_key,
         })
     }
 }

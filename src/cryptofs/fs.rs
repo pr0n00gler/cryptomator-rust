@@ -75,24 +75,25 @@ impl<'gc> CryptoFS<'gc> {
                 std::path::Component::RootDir => vec![],
                 std::path::Component::Normal(p) => {
                     let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
-                    let files = self.file_system_provider.read_dir(real_path.as_str())?;
                     let mut dir_uuid = vec![];
-                    for f in files {
-                        let decrypted_name = self.cryptor.decrypt_filename(
-                            f.filename_without_extension().as_str(),
-                            dir_id.as_slice(),
+                    let encrypted_name = self
+                        .cryptor
+                        .encrypt_filename(p.to_str().unwrap_or_default(), dir_id.as_slice())?;
+                    let full_path = std::path::PathBuf::new()
+                        .join(real_path.as_str())
+                        .join((encrypted_name + ENCRYPTED_FILE_EXT).as_str());
+
+                    if self
+                        .file_system_provider
+                        .exists(full_path.to_str().unwrap_or_default())
+                    {
+                        let mut reader = self.file_system_provider.open_file(
+                            Path::new(full_path.as_path())
+                                .join(DIR_FILENAME)
+                                .to_str()
+                                .unwrap_or_default(),
                         )?;
-                        if decrypted_name == p.to_str().unwrap_or_default() {
-                            let mut reader = self.file_system_provider.open_file(
-                                Path::new(real_path.as_str())
-                                    .join(f.file_name)
-                                    .join(DIR_FILENAME)
-                                    .to_str()
-                                    .unwrap_or_default(),
-                            )?;
-                            reader.read_to_end(&mut dir_uuid)?;
-                            break;
-                        }
+                        reader.read_to_end(&mut dir_uuid)?;
                     }
                     if dir_uuid.is_empty() {
                         return Err(PathIsNotExist(String::from(

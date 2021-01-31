@@ -1,6 +1,7 @@
 use crate::cryptofs::FileSystemError;
 use std::ffi::OsString;
 use std::io::{Read, Seek, Write};
+use std::path::Path;
 use std::time::SystemTime;
 
 /// A File should be readable/writeable/seekable, and be able to return its metadata
@@ -11,38 +12,41 @@ pub trait File: Seek + Read + Write {
 /// The trait that defines a filesystem.
 pub trait FileSystem {
     /// Iterates over all entries of this directory path
-    fn read_dir(&self, path: &str) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError>;
+    fn read_dir<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError>;
 
     /// Creates the directory at this path
     /// Note that the parent directory must exist.
-    fn create_dir(&self, path: &str) -> Result<(), FileSystemError>;
+    fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError>;
 
     /// Recursively creates the directory at this path
-    fn create_dir_all(&self, path: &str) -> Result<(), FileSystemError>;
+    fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError>;
 
     /// Opens the file at this path for reading/writing
-    fn open_file(&self, path: &str) -> Result<Box<dyn File>, FileSystemError>;
+    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError>;
 
     /// Creates a file at the given path for reading/writing
-    fn create_file(&self, path: &str) -> Result<Box<dyn File>, FileSystemError>;
+    fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError>;
 
     /// Returns true if a file or directory at path exists, false otherwise
-    fn exists(&self, path: &str) -> bool;
+    fn exists<P: AsRef<Path>>(&self, path: P) -> bool;
 
     /// Removes the file at the given path
-    fn remove_file(&self, path: &str) -> Result<(), FileSystemError>;
+    fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError>;
 
     /// Removes dir at the given path
-    fn remove_dir(&self, path: &str) -> Result<(), FileSystemError>;
+    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError>;
 
     /// Copies _srs file to _dest
-    fn copy_file(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError>;
+    fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError>;
 
     /// Moves file from _src to _dest
-    fn move_file(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError>;
+    fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError>;
 
     /// Moves dir from _src to _dest
-    fn move_dir(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError>;
+    fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError>;
 }
 
 /// File metadata. Not much more than type, length, and some timestamps

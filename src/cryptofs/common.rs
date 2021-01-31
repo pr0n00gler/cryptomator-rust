@@ -25,8 +25,8 @@ pub fn component_to_string(c: Component) -> Result<String, FileSystemError> {
 /// let last_component = last_path_component("/a/b/c/d").unwrap();
 /// println!("{}", last_component); // "d"
 /// ```
-pub fn last_path_component(path: &str) -> Result<String, FileSystemError> {
-    let components = std::path::Path::new(path)
+pub fn last_path_component<S: AsRef<Path>>(path: S) -> Result<String, FileSystemError> {
+    let components = std::path::Path::new(path.as_ref())
         .components()
         .collect::<Vec<std::path::Component>>();
     Ok(match components.last() {
@@ -34,7 +34,12 @@ pub fn last_path_component(path: &str) -> Result<String, FileSystemError> {
             Some(s) => String::from(s),
             None => return Err(UnknownError(String::from("failed to convert OsStr to str"))),
         },
-        None => return Err(PathIsNotExist(format!("invalid path: {}", path))),
+        None => {
+            return Err(PathIsNotExist(format!(
+                "invalid path: {}",
+                path.as_ref().display()
+            )))
+        }
     })
 }
 
@@ -45,8 +50,8 @@ pub fn last_path_component(path: &str) -> Result<String, FileSystemError> {
 /// let parent = parent_path("/a/b/c/d");
 /// println!("{}", parent); // "/a/b/c"
 /// ```
-pub fn parent_path(path: &str) -> String {
-    let components = std::path::Path::new(path)
+pub fn parent_path<S: AsRef<Path>>(path: S) -> String {
+    let components = std::path::Path::new(path.as_ref())
         .components()
         .collect::<Vec<std::path::Component>>();
     let mut dir_path = std::path::PathBuf::new(); //path without filename

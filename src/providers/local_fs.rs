@@ -1,5 +1,6 @@
 use crate::cryptofs::{DirEntry, File, FileSystem, FileSystemError, Metadata};
 use std::fs;
+use std::path::Path;
 
 /// Provides access to a local filesystem
 pub struct LocalFS {}
@@ -23,7 +24,10 @@ impl File for std::fs::File {
 }
 
 impl FileSystem for LocalFS {
-    fn read_dir(&self, path: &str) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError> {
+    fn read_dir<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError> {
         Ok(Box::new(fs::read_dir(path)?.map(|rd| match rd {
             Ok(de) => DirEntry {
                 path: de.path(),
@@ -37,15 +41,15 @@ impl FileSystem for LocalFS {
         })))
     }
 
-    fn create_dir(&self, path: &str) -> Result<(), FileSystemError> {
+    fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         Ok(fs::create_dir(path)?)
     }
 
-    fn create_dir_all(&self, path: &str) -> Result<(), FileSystemError> {
+    fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         Ok(fs::create_dir_all(path)?)
     }
 
-    fn open_file(&self, path: &str) -> Result<Box<dyn File>, FileSystemError> {
+    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
         Ok(Box::new(
             std::fs::OpenOptions::new()
                 .create(true)
@@ -55,33 +59,33 @@ impl FileSystem for LocalFS {
         ))
     }
 
-    fn create_file(&self, path: &str) -> Result<Box<dyn File>, FileSystemError> {
+    fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
         Ok(Box::new(fs::File::create(path)?))
     }
 
-    fn exists(&self, path: &str) -> bool {
-        std::path::Path::exists(std::path::Path::new(path))
+    fn exists<P: AsRef<Path>>(&self, path: P) -> bool {
+        std::path::Path::exists(std::path::Path::new(path.as_ref()))
     }
 
-    fn remove_file(&self, path: &str) -> Result<(), FileSystemError> {
+    fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         Ok(fs::remove_file(path)?)
     }
 
-    fn remove_dir(&self, path: &str) -> Result<(), FileSystemError> {
+    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         Ok(fs::remove_dir_all(path)?)
     }
 
-    fn copy_file(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError> {
+    fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
         fs::copy(_src, _dest)?;
         Ok(())
     }
 
-    fn move_file(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError> {
-        self.copy_file(_src, _dest)?;
+    fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
+        self.copy_file(&_src, &_dest)?;
         Ok(self.remove_file(_src)?)
     }
 
-    fn move_dir(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError> {
+    fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
         // well, there is no call of this method from CryptoFS at this moment and i'm too lazy to
         // implement the method for no reason.
         //TODO: implement this method

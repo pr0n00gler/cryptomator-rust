@@ -5,6 +5,7 @@ use rsfs::mem::FS;
 use rsfs::{DirEntry as DE, GenFS, OpenOptions};
 use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
 use std::time::SystemTime;
 
 /// Simple implementation of in-memory filesystem
@@ -83,7 +84,10 @@ impl MemoryFS {
 }
 
 impl FileSystem for MemoryFS {
-    fn read_dir(&self, path: &str) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError> {
+    fn read_dir<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError> {
         Ok(Box::new(
             self.fs
                 .read_dir(path)
@@ -92,27 +96,27 @@ impl FileSystem for MemoryFS {
         ))
     }
 
-    fn create_dir(&self, path: &str) -> Result<(), FileSystemError> {
+    fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         Ok(self.fs.create_dir(path)?)
     }
 
-    fn create_dir_all(&self, path: &str) -> Result<(), FileSystemError> {
+    fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         Ok(self.fs.create_dir_all(path)?)
     }
 
-    fn open_file(&self, path: &str) -> Result<Box<dyn File>, FileSystemError> {
+    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
         Ok(Box::new(VirtualFile::new(
             self.fs.new_openopts().read(true).write(true).open(path)?,
         )))
     }
 
-    fn create_file(&self, path: &str) -> Result<Box<dyn File>, FileSystemError> {
+    fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
         Ok(Box::new(VirtualFile::new(self.fs.create_file(path)?)))
     }
 
-    fn exists(&self, path: &str) -> bool {
-        let last_element = last_path_component(path).unwrap();
-        let entries = self.fs.read_dir(parent_path(path)).unwrap();
+    fn exists<P: AsRef<Path>>(&self, path: P) -> bool {
+        let last_element = last_path_component(&path).unwrap();
+        let entries = self.fs.read_dir(parent_path(&path)).unwrap();
         for entry in entries {
             if entry.unwrap().file_name() == OsString::from(last_element.clone()) {
                 return true;
@@ -121,25 +125,25 @@ impl FileSystem for MemoryFS {
         false
     }
 
-    fn remove_file(&self, path: &str) -> Result<(), FileSystemError> {
+    fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         Ok(self.fs.remove_file(path)?)
     }
 
-    fn remove_dir(&self, path: &str) -> Result<(), FileSystemError> {
+    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         Ok(self.fs.remove_dir_all(path)?)
     }
 
-    fn copy_file(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError> {
+    fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
         self.fs.copy(_src, _dest)?;
         Ok(())
     }
 
-    fn move_file(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError> {
-        self.copy_file(_src, _dest)?;
+    fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
+        self.copy_file(&_src, &_dest)?;
         self.remove_file(_src)
     }
 
-    fn move_dir(&self, _src: &str, _dest: &str) -> Result<(), FileSystemError> {
+    fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
         // well, there is no call of this method from CryptoFS at this moment and i'm too lazy to
         // implement the method for no reason.
         //TODO: implement this method

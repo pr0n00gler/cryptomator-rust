@@ -115,9 +115,9 @@ impl Cryptor {
 
     /// Encrypts a filename using a parent dir_id
     /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#filename-encryption
-    pub fn encrypt_filename(
+    pub fn encrypt_filename<S: AsRef<str>>(
         &self,
-        cleartext_name: &str,
+        cleartext_name: S,
         parent_dir_id: &[u8],
     ) -> Result<String, CryptoError> {
         let mut long_key: Vec<u8> = vec![];
@@ -126,7 +126,8 @@ impl Cryptor {
         let aes_siv_key = GenericArray::clone_from_slice(long_key.as_slice());
 
         let mut cipher = Aes256Siv::new(aes_siv_key);
-        let encrypted_filename = cipher.encrypt(&[parent_dir_id], cleartext_name.as_bytes())?;
+        let encrypted_filename =
+            cipher.encrypt(&[parent_dir_id], cleartext_name.as_ref().as_bytes())?;
 
         let encoded_ciphertext = base64::encode_config(encrypted_filename, base64::URL_SAFE);
         Ok(encoded_ciphertext)
@@ -134,12 +135,13 @@ impl Cryptor {
 
     /// Decrypts a ciphertext filename using a parent dir_id
     /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#filename-encryption
-    pub fn decrypt_filename(
+    pub fn decrypt_filename<S: AsRef<str>>(
         &self,
-        encrypted_filename: &str,
+        encrypted_filename: S,
         parent_dir_id: &[u8],
     ) -> Result<String, CryptoError> {
-        let encrypted_filename_bytes = base64::decode_config(encrypted_filename, base64::URL_SAFE)?;
+        let encrypted_filename_bytes =
+            base64::decode_config(encrypted_filename.as_ref(), base64::URL_SAFE)?;
 
         let mut long_key: Vec<u8> = vec![];
         long_key.extend(&self.master_key.hmac_master_key);

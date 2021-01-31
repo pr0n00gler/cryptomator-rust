@@ -1,6 +1,6 @@
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist, UnknownError};
 use crate::cryptofs::FileSystemError;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 /// Returns a String implementation of a Component
 pub fn component_to_string(c: Component) -> Result<String, FileSystemError> {
@@ -23,17 +23,14 @@ pub fn component_to_string(c: Component) -> Result<String, FileSystemError> {
 /// ```
 /// use cryptomator::cryptofs::last_path_component;
 /// let last_component = last_path_component("/a/b/c/d").unwrap();
-/// println!("{}", last_component); // "d"
+/// assert_eq!("d", last_component.to_str().unwrap_or_default());
 /// ```
-pub fn last_path_component<S: AsRef<Path>>(path: S) -> Result<String, FileSystemError> {
+pub fn last_path_component<S: AsRef<Path>>(path: S) -> Result<PathBuf, FileSystemError> {
     let components = std::path::Path::new(path.as_ref())
         .components()
         .collect::<Vec<std::path::Component>>();
     Ok(match components.last() {
-        Some(c) => match c.as_os_str().to_str() {
-            Some(s) => String::from(s),
-            None => return Err(UnknownError(String::from("failed to convert OsStr to str"))),
-        },
+        Some(c) => PathBuf::new().join(c),
         None => {
             return Err(PathIsNotExist(format!(
                 "invalid path: {}",
@@ -48,9 +45,9 @@ pub fn last_path_component<S: AsRef<Path>>(path: S) -> Result<String, FileSystem
 /// ```
 /// use cryptomator::cryptofs::parent_path;
 /// let parent = parent_path("/a/b/c/d");
-/// println!("{}", parent); // "/a/b/c"
+/// assert_eq!("/a/b/c", parent.to_str().unwrap_or_default());
 /// ```
-pub fn parent_path<S: AsRef<Path>>(path: S) -> String {
+pub fn parent_path<S: AsRef<Path>>(path: S) -> PathBuf {
     let components = std::path::Path::new(path.as_ref())
         .components()
         .collect::<Vec<std::path::Component>>();
@@ -61,8 +58,5 @@ pub fn parent_path<S: AsRef<Path>>(path: S) -> String {
         }
         dir_path = dir_path.join(c.as_ref() as &Path);
     }
-    match dir_path.to_str() {
-        Some(s) => String::from(s),
-        None => String::new(),
-    }
+    dir_path
 }

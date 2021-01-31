@@ -2,7 +2,7 @@ use crate::crypto::{
     calculate_cleartext_size, Cryptor, FileHeader, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH,
     FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH,
 };
-use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist, UnknownError};
+use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist};
 use crate::cryptofs::filesystem::Metadata;
 use crate::cryptofs::{
     component_to_string, last_path_component, parent_path, DirEntry, File, FileSystem,
@@ -10,7 +10,7 @@ use crate::cryptofs::{
 };
 use std::cmp::Ordering;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Extension of encrypted filename
 const ENCRYPTED_FILE_EXT: &str = ".c9r";
@@ -45,24 +45,16 @@ impl<'gc, FS: FileSystem> CryptoFS<'gc, FS> {
             file_system_provider: fs_provider,
         };
         let root = crypto_fs.real_path_from_dir_id(b"")?;
-        crypto_fs
-            .file_system_provider
-            .create_dir_all(root.as_str())?;
+        crypto_fs.file_system_provider.create_dir_all(root)?;
         Ok(crypto_fs)
     }
 
     /// Returns a real path to a dir by dir_id
-    pub fn real_path_from_dir_id(&self, dir_id: &[u8]) -> Result<String, FileSystemError> {
+    pub fn real_path_from_dir_id(&self, dir_id: &[u8]) -> Result<PathBuf, FileSystemError> {
         let dir_hash = self.cryptor.get_dir_id_hash(dir_id)?;
-        let real_path = Path::new(self.root_folder.as_str())
+        Ok(Path::new(self.root_folder.as_str())
             .join(&dir_hash[..2])
-            .join(&dir_hash[2..]);
-        match real_path.to_str() {
-            Some(p) => Ok(String::from(p)),
-            None => Err(UnknownError(String::from(
-                "failed to convert PathBuf to str",
-            ))),
-        }
+            .join(&dir_hash[2..]))
     }
 
     /// Returns a dir_id for a path
@@ -90,12 +82,9 @@ impl<'gc, FS: FileSystem> CryptoFS<'gc, FS> {
                         .file_system_provider
                         .exists(full_path.to_str().unwrap_or_default())
                     {
-                        let mut reader = self.file_system_provider.open_file(
-                            Path::new(full_path.as_path())
-                                .join(DIR_FILENAME)
-                                .to_str()
-                                .unwrap_or_default(),
-                        )?;
+                        let mut reader = self
+                            .file_system_provider
+                            .open_file(Path::new(full_path.as_path()).join(DIR_FILENAME))?;
                         reader.read_to_end(&mut dir_uuid)?;
                     }
                     if dir_uuid.is_empty() {
@@ -119,23 +108,18 @@ impl<'gc, FS: FileSystem> CryptoFS<'gc, FS> {
     pub fn filepath_to_real_path<P: AsRef<Path>>(
         &self,
         path: P,
-    ) -> Result<String, FileSystemError> {
+    ) -> Result<PathBuf, FileSystemError> {
         let filename = last_path_component(&path)?;
 
-        let dir_id = self.dir_id_from_path(parent_path(&path).as_str())?;
+        let dir_id = self.dir_id_from_path(parent_path(&path))?;
         let real_dir_path = self.real_path_from_dir_id(dir_id.as_slice())?;
-        let real_filename = self.cryptor.encrypt_filename(filename, dir_id.as_slice())?;
+        let real_filename = self
+            .cryptor
+            .encrypt_filename(filename.to_str().unwrap_or_default(), dir_id.as_slice())?;
 
-        let full_path = std::path::PathBuf::new()
+        Ok(std::path::PathBuf::new()
             .join(&real_dir_path)
-            .join(real_filename.clone() + ENCRYPTED_FILE_EXT);
-
-        match full_path.to_str() {
-            Some(s) => Ok(String::from(s)),
-            None => Err(UnknownError(String::from(
-                "failed to convert PathBuf to str",
-            ))),
-        }
+            .join(real_filename + ENCRYPTED_FILE_EXT))
     }
 }
 
@@ -149,7 +133,7 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
         let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
         Ok(Box::new(
             self.file_system_provider
-                .read_dir(real_path.as_str())?
+                .read_dir(real_path)?
                 .map(|f| DirEntry {
                     path: Default::default(),
                     metadata: f.metadata,
@@ -175,10 +159,7 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
         for component in components {
             let path = component_to_string(component)?;
             path_buf = path_buf.join(std::path::Path::new(&path));
-            let dir_id = self.dir_id_from_path(match path_buf.to_str() {
-                Some(s) => s,
-                None => return Err(UnknownError(String::from("failed to convert OsStr to str"))),
-            });
+            let dir_id = self.dir_id_from_path(&path_buf);
 
             match dir_id {
                 Ok(id) => parent_dir_id = id,
@@ -193,13 +174,10 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
                         let mut real_path =
                             std::path::Path::new(&parent_folder).join(&encrypted_folder_name);
 
-                        self.file_system_provider
-                            .create_dir_all(real_path.to_str().unwrap_or_default())?;
+                        self.file_system_provider.create_dir_all(&real_path)?;
                         real_path = real_path.join(DIR_FILENAME);
 
-                        let mut writer = self
-                            .file_system_provider
-                            .create_file(real_path.to_str().unwrap_or_default())?;
+                        let mut writer = self.file_system_provider.create_file(&real_path)?;
                         let dir_uuid = uuid::Uuid::new_v4();
                         writer.write_all(dir_uuid.to_string().as_bytes())?;
 
@@ -211,9 +189,8 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
                             .join(&dir_id_hash[..2])
                             .join(&dir_id_hash[2..]);
 
-                        self.file_system_provider.create_dir_all(
-                            real_folder_path.as_os_str().to_str().unwrap_or_default(),
-                        )?;
+                        self.file_system_provider
+                            .create_dir_all(&real_folder_path)?;
 
                         parent_dir_id = Vec::from(dir_uuid.to_string().as_bytes());
                     }
@@ -261,18 +238,9 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
             let full_path = std::path::PathBuf::new();
             let full_path = full_path.join(&path).join(&entry.file_name);
 
-            let full_path = match full_path.as_os_str().to_str() {
-                Some(s) => s,
-                None => {
-                    return Err(UnknownError(String::from(
-                        "failed to convert PathBuf to str",
-                    )))
-                }
-            };
-
-            let real_path = self.filepath_to_real_path(full_path)?;
+            let real_path = self.filepath_to_real_path(&full_path)?;
             if entry.metadata.is_dir {
-                self.remove_dir(full_path)?;
+                self.remove_dir(&full_path)?;
             } else {
                 self.file_system_provider.remove_file(real_path)?;
             }
@@ -313,25 +281,10 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
         for entry in src_dir_entries {
             let dst_full_path = std::path::PathBuf::new();
             let dst_full_path = dst_full_path.join(dst_path).join(&entry.file_name);
-            let dst_full_path = match dst_full_path.as_os_str().to_str() {
-                Some(s) => s,
-                None => {
-                    return Err(UnknownError(String::from(
-                        "failed to convert PathBuf to str",
-                    )))
-                }
-            };
 
             let src_full_path = std::path::PathBuf::new();
             let src_full_path = src_full_path.join(&_src).join(&entry.file_name);
-            let src_full_path = match src_full_path.as_os_str().to_str() {
-                Some(s) => s,
-                None => {
-                    return Err(UnknownError(String::from(
-                        "failed to convert PathBuf to str",
-                    )))
-                }
-            };
+
             if entry.metadata.is_dir {
                 self.move_dir(src_full_path, dst_full_path)?;
             } else {

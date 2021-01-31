@@ -116,13 +116,8 @@ impl FileSystem for MemoryFS {
 
     fn exists<P: AsRef<Path>>(&self, path: P) -> bool {
         let last_element = last_path_component(&path).unwrap();
-        let entries = self.fs.read_dir(parent_path(&path)).unwrap();
-        for entry in entries {
-            if entry.unwrap().file_name() == OsString::from(last_element.clone()) {
-                return true;
-            }
-        }
-        false
+        let mut entries = self.fs.read_dir(parent_path(&path)).unwrap();
+        entries.any(|de| de.unwrap().file_name() == OsString::from(&last_element))
     }
 
     fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {

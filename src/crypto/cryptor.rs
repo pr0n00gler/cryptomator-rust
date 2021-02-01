@@ -19,6 +19,7 @@ use crate::crypto::common::clone_into_array;
 use crate::crypto::error::CryptoError::{InvalidFileChunkLength, InvalidFileHeaderLength};
 use hmac::{Hmac, Mac, NewMac};
 use sha2::Sha256;
+use std::path::Path;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -65,6 +66,12 @@ pub fn calculate_cleartext_size(ciphertext_size: u64) -> u64 {
         additional_ciphertext_bytes - overhead_per_chunk
     };
     FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64 * full_chunks_number + additional_cleartext_bytes
+}
+
+pub fn shorten_name<P: AsRef<str>>(name: P) -> String {
+    let mut hasher = sha1::Sha1::new();
+    hasher.update(name.as_ref().as_bytes());
+    base64::encode_config(hasher.digest().bytes(), base64::URL_SAFE)
 }
 
 /// Contains reserved bytes and content key

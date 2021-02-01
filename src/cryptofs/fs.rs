@@ -1,5 +1,5 @@
 use crate::crypto::{
-    calculate_cleartext_size, Cryptor, FileHeader, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH,
+    calculate_cleartext_size, shorten_name, Cryptor, FileHeader, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH,
     FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH,
 };
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist};
@@ -15,8 +15,23 @@ use std::path::{Path, PathBuf};
 /// Extension of encrypted filename
 const ENCRYPTED_FILE_EXT: &str = ".c9r";
 
+const SHORTEN_FILENAME_EXT: &str = ".c9s";
+
 /// Name of a file that contains dir_id
 const DIR_FILENAME: &str = "dir.c9r";
+
+const MAX_FILENAME_LENGTH: usize = 220;
+
+pub struct CryptoPath {
+    full_path: PathBuf,
+    is_shorten: bool,
+}
+
+impl AsRef<Path> for CryptoPath {
+    fn as_ref(&self) -> &Path {
+        self.full_path.as_ref()
+    }
+}
 
 /// Provides an access to an encrypted storage
 /// In a nutshell, translates all the 'virtual' paths, like '/some_folder/file.txt', to real paths,
@@ -71,8 +86,11 @@ impl<'gc, FS: FileSystem> CryptoFS<'gc, FS> {
                     let encrypted_name = self
                         .cryptor
                         .encrypt_filename(p.to_str().unwrap_or_default(), dir_id.as_slice())?;
+                    let mut full_encrypted_name = encrypted_name.clone() + ENCRYPTED_FILE_EXT;
 
-                    let full_encrypted_name = encrypted_name + ENCRYPTED_FILE_EXT;
+                    if encrypted_name.len() > MAX_FILENAME_LENGTH {
+                        full_encrypted_name = shorten_name(&encrypted_name) + SHORTEN_FILENAME_EXT;
+                    }
 
                     let full_path = std::path::PathBuf::new()
                         .join(real_path)
@@ -108,7 +126,7 @@ impl<'gc, FS: FileSystem> CryptoFS<'gc, FS> {
     pub fn filepath_to_real_path<P: AsRef<Path>>(
         &self,
         path: P,
-    ) -> Result<PathBuf, FileSystemError> {
+    ) -> Result<CryptoPath, FileSystemError> {
         let filename = last_path_component(&path)?;
 
         let dir_id = self.dir_id_from_path(parent_path(&path))?;
@@ -116,10 +134,55 @@ impl<'gc, FS: FileSystem> CryptoFS<'gc, FS> {
         let real_filename = self
             .cryptor
             .encrypt_filename(filename.to_str().unwrap_or_default(), dir_id.as_slice())?;
+        let mut full_name = real_filename.clone() + ENCRYPTED_FILE_EXT;
 
-        Ok(std::path::PathBuf::new()
-            .join(&real_dir_path)
-            .join(real_filename + ENCRYPTED_FILE_EXT))
+        let mut is_shorten = false;
+        if real_filename.len() > MAX_FILENAME_LENGTH {
+            full_name = shorten_name(real_filename) + SHORTEN_FILENAME_EXT;
+            is_shorten = true;
+        }
+
+        Ok(CryptoPath {
+            full_path: std::path::PathBuf::new()
+                .join(&real_dir_path)
+                .join(full_name),
+            is_shorten,
+        })
+    }
+
+    fn virtual_dir_entry_from_real(
+        &self,
+        de: DirEntry,
+        dir_id: &[u8],
+    ) -> Result<DirEntry, FileSystemError> {
+        let mut ciphertext_filename = de.filename_without_extension();
+        if ciphertext_filename.ends_with(SHORTEN_FILENAME_EXT) {
+            let mut read_name: Vec<u8> = vec![];
+            let mut fname_file = self
+                .file_system_provider
+                .open_file(de.path.join("name.c9r"))?;
+            fname_file.read_to_end(&mut read_name)?;
+            ciphertext_filename = String::from_utf8(read_name)?;
+            ciphertext_filename =
+                String::from(ciphertext_filename.strip_suffix(".c9r").unwrap_or_default());
+        }
+        let mut metadata = de.metadata;
+        if ciphertext_filename.ends_with(SHORTEN_FILENAME_EXT) {
+            let contents_file = self
+                .file_system_provider
+                .open_file(de.path.join("contents.c9r"))?;
+            metadata = contents_file.metadata()?;
+        }
+
+        Ok(DirEntry {
+            path: Default::default(), //TODO
+            metadata,
+            file_name: self
+                .cryptor
+                .decrypt_filename(ciphertext_filename, dir_id)?
+                .parse()
+                .unwrap(),
+        })
     }
 }
 
@@ -134,15 +197,9 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
         Ok(Box::new(
             self.file_system_provider
                 .read_dir(real_path)?
-                .map(|f| DirEntry {
-                    path: Default::default(),
-                    metadata: f.metadata,
-                    file_name: self
-                        .cryptor
-                        .decrypt_filename(f.filename_without_extension(), dir_id.as_slice())
+                .map(|de| {
+                    self.virtual_dir_entry_from_real(de, dir_id.as_slice())
                         .unwrap_or_default()
-                        .parse()
-                        .unwrap(),
                 })
                 .collect::<Vec<DirEntry>>()
                 .into_iter(),
@@ -165,16 +222,28 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
                 Ok(id) => parent_dir_id = id,
                 Err(e) => match e {
                     PathIsNotExist(_) => {
-                        let encrypted_folder_name = self
+                        let encrypted_name = self
                             .cryptor
-                            .encrypt_filename(path, parent_dir_id.as_slice())?
-                            + ENCRYPTED_FILE_EXT;
+                            .encrypt_filename(path, parent_dir_id.as_slice())?;
+                        let mut encrypted_folder_name = encrypted_name.clone() + ENCRYPTED_FILE_EXT;
+
+                        if encrypted_name.len() > MAX_FILENAME_LENGTH {
+                            encrypted_folder_name =
+                                shorten_name(&encrypted_name) + SHORTEN_FILENAME_EXT;
+                        }
 
                         let parent_folder = self.real_path_from_dir_id(parent_dir_id.as_slice())?;
                         let mut real_path =
                             std::path::Path::new(&parent_folder).join(&encrypted_folder_name);
-
                         self.file_system_provider.create_dir_all(&real_path)?;
+
+                        if encrypted_name.len() > MAX_FILENAME_LENGTH {
+                            let mut name_writer = self
+                                .file_system_provider
+                                .create_file(real_path.join("name.c9r"))?;
+                            name_writer.write_all((encrypted_name + ".c9r").as_bytes())?
+                        }
+
                         real_path = real_path.join(DIR_FILENAME);
 
                         let mut writer = self.file_system_provider.create_file(&real_path)?;
@@ -206,13 +275,19 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
     }
 
     fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
-        let real_path = self.filepath_to_real_path(path)?;
+        let mut real_path = self.filepath_to_real_path(path)?;
+        if real_path.is_shorten {
+            real_path.full_path = real_path.full_path.join("contents.c9r");
+        }
         let crypto_file = CryptoFSFile::open(real_path, self.cryptor, self.file_system_provider)?;
         Ok(Box::new(crypto_file))
     }
 
     fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
-        let real_path = self.filepath_to_real_path(path)?;
+        let mut real_path = self.filepath_to_real_path(path)?;
+        if real_path.is_shorten {
+            real_path.full_path = real_path.full_path.join("contents.c9r");
+        }
         let rfs_file = self.file_system_provider.create_file(real_path)?;
         Ok(Box::new(CryptoFSFile::create_file(self.cryptor, rfs_file)?))
     }
@@ -227,6 +302,9 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
 
     fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
+        if real_path.is_shorten {
+            return Ok(self.file_system_provider.remove_dir(real_path)?);
+        }
         Ok(self.file_system_provider.remove_file(real_path)?)
     }
 
@@ -257,8 +335,16 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
     }
 
     fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
-        let src_real_path = self.filepath_to_real_path(_src)?;
-        let dst_real_path = self.filepath_to_real_path(_dest)?;
+        let mut src_real_path = self.filepath_to_real_path(_src)?;
+        let mut dst_real_path = self.filepath_to_real_path(_dest)?;
+
+        if src_real_path.is_shorten {
+            src_real_path.full_path = src_real_path.full_path.join("contents.c9r");
+        }
+        if dst_real_path.is_shorten {
+            dst_real_path.full_path = dst_real_path.full_path.join("contents.c9r");
+        }
+
         Ok(self
             .file_system_provider
             .move_file(src_real_path, dst_real_path)?)

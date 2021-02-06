@@ -4,12 +4,14 @@ use crate::cryptofs::{
 use rsfs::mem::FS;
 use rsfs::{DirEntry as DE, GenFS, OpenOptions};
 use std::ffi::OsString;
+use std::fmt::Debug;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::SystemTime;
 
 /// Simple implementation of in-memory filesystem
 /// Only for testing purposes
+#[derive(Clone)]
 pub struct MemoryFS {
     fs: FS,
 }
@@ -20,6 +22,7 @@ impl Default for MemoryFS {
     }
 }
 
+#[derive(Debug)]
 pub struct VirtualFile<F: rsfs::File> {
     f: F,
 }
@@ -30,7 +33,7 @@ impl<F: rsfs::File> VirtualFile<F> {
     }
 }
 
-impl<F: rsfs::File> File for VirtualFile<F> {
+impl<F: rsfs::File + Send + Sync> File for VirtualFile<F> {
     fn metadata(&self) -> Result<Metadata, FileSystemError> {
         Ok(metadata_from_rsfs(self.f.metadata()?))
     }

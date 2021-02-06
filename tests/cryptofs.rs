@@ -15,7 +15,7 @@ fn test_crypto_fs_seek_and_read() {
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = LocalFS::new();
-    let crypto_fs = CryptoFS::new(TEST_STORAGE_PATH, cryptor, &local_fs).unwrap();
+    let crypto_fs = CryptoFS::new(TEST_STORAGE_PATH, cryptor, local_fs.clone()).unwrap();
 
     let mut cleartext_test_file = local_fs.open_file(TEST_FILE_PATH).unwrap();
     let cleartext_file_size = cleartext_test_file.seek(std::io::SeekFrom::End(0)).unwrap();
@@ -64,7 +64,7 @@ fn test_crypto_fs_write() {
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
-    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, &local_fs).unwrap();
+    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
     let mut random_data: Vec<u8> = (0..32 * 1024 * 3 + 2465)
         .map(|_| rand::random::<u8>())
@@ -106,7 +106,7 @@ fn test_crypto_fs_exists() {
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
-    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, &local_fs).unwrap();
+    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
     crypto_fs.create_file("/test.txt").unwrap();
 
@@ -121,7 +121,7 @@ fn test_crypto_fs_remove_dir() {
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
-    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, &local_fs).unwrap();
+    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
     let dir_to_remove = "/dirs/to/remove";
     let files: [&str; 3] = [
@@ -148,7 +148,7 @@ fn test_crypto_fs_copy_file() {
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
-    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, &local_fs).unwrap();
+    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
     let file_to_copy = "/test.pdf";
     let copied_file = "/test-copy.pdf";
@@ -194,7 +194,7 @@ fn test_crypto_fs_move_file() {
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
-    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, &local_fs).unwrap();
+    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
     let file_to_move = "/test.dat";
     let moved_file = "/test_moved.dat";
@@ -233,7 +233,7 @@ fn test_crypto_fs_move_dir() {
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
-    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, &local_fs).unwrap();
+    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
     let dir_to_move = "/dir1";
     let dirs_to_move = "/dir1/dir2";

@@ -9,7 +9,7 @@ const DEFAULT_IV: [u8; 8] = [0xA6; 8];
 
 /// Struct for MasterKey
 /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#masterkey-derivation
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct MasterKey {
     pub primary_master_key: [u8; 32],
     pub hmac_master_key: [u8; 32],

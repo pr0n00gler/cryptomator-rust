@@ -21,7 +21,8 @@ const DIR_FILENAME: &str = "dir.c9r";
 /// Provides an access to an encrypted storage
 /// In a nutshell, translates all the 'virtual' paths, like '/some_folder/file.txt', to real paths,
 /// like /d/DR/RW3L6XRAPFC2UCK5QY37Q2U552IRPE/eZdOa_B9fRqncpYjZmKXfJEz81LgRUbT0yWdE0wyNTMd.c9r
-pub struct CryptoFS<'gc, FS: FileSystem> {
+#[derive(Clone)]
+pub struct CryptoFS<FS: FileSystem> {
     /// Instance of the Cryptor - does all work with cryptography
     cryptor: Cryptor,
 
@@ -29,16 +30,16 @@ pub struct CryptoFS<'gc, FS: FileSystem> {
     root_folder: String,
 
     /// Instance of the FileSystem. Should provide access to a real files.
-    file_system_provider: &'gc FS,
+    file_system_provider: FS,
 }
 
-impl<'gc, FS: FileSystem> CryptoFS<'gc, FS> {
+impl<FS: FileSystem> CryptoFS<FS> {
     /// Returns a new instance of CryptoFS
     pub fn new(
         folder: &str,
         cryptor: Cryptor,
-        fs_provider: &'gc FS,
-    ) -> Result<CryptoFS<'gc, FS>, FileSystemError> {
+        fs_provider: FS,
+    ) -> Result<CryptoFS<FS>, FileSystemError> {
         let crypto_fs = CryptoFS {
             cryptor,
             root_folder: String::from(folder),
@@ -123,7 +124,7 @@ impl<'gc, FS: FileSystem> CryptoFS<'gc, FS> {
     }
 }
 
-impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
+impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
     /// Returns an iterator of DirEntries for the given path
     fn read_dir<P: AsRef<Path>>(
         &self,
@@ -207,7 +208,7 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
 
     fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
-        let crypto_file = CryptoFSFile::open(real_path, self.cryptor, self.file_system_provider)?;
+        let crypto_file = CryptoFSFile::open(real_path, self.cryptor, &self.file_system_provider)?;
         Ok(Box::new(crypto_file))
     }
 
@@ -296,6 +297,7 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
 }
 
 /// 'Virtual' file implementation of the File trait
+#[derive(Debug)]
 pub struct CryptoFSFile {
     /// A Cryptor instance used to encrypt/decrypt data
     cryptor: Cryptor,
@@ -321,7 +323,7 @@ impl<'gc> CryptoFSFile {
     pub fn open<P: AsRef<Path>, FS: FileSystem>(
         real_path: P,
         cryptor: Cryptor,
-        real_file_system_provider: &'gc FS,
+        real_file_system_provider: &FS,
     ) -> Result<CryptoFSFile, FileSystemError> {
         let mut reader = real_file_system_provider.open_file(real_path)?;
         let mut encrypted_header: [u8; FILE_HEADER_LENGTH] = [0; FILE_HEADER_LENGTH];

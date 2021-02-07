@@ -5,8 +5,7 @@ use cryptomator::providers::LocalFS;
 
 use bytes::Bytes;
 use futures01::{future::Future, stream::Stream};
-use hyper;
-use webdav_handler::{fakels::FakeLs, localfs::LocalFs, DavHandler};
+use webdav_handler::DavHandler;
 
 fn main() {
     let local_fs = LocalFS::new();
@@ -16,14 +15,14 @@ fn main() {
     let crypto_fs = CryptoFS::new("tests/test_storage/d", cryptor, local_fs).unwrap();
     let webdav = WebDav::new(crypto_fs);
 
-    let addr = ([127, 0, 0, 1], 4918).into();
+    let addr = ([127, 0, 0, 1], 4919).into();
 
-    let dav_server = DavHandler::new(None, Box::new(webdav), Some(FakeLs::new()));
+    let dav_server = DavHandler::new(None, Box::new(webdav), None);
     let make_service = move || {
         let dav_server = dav_server.clone();
         hyper::service::service_fn(move |req: hyper::Request<hyper::Body>| {
             let (parts, body) = req.into_parts();
-            let body = body.map(|item| Bytes::from(item));
+            let body = body.map(Bytes::from);
             let req = http::Request::from_parts(parts, body);
             let fut = dav_server.handle(req).and_then(|resp| {
                 let (parts, body) = resp.into_parts();

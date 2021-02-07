@@ -67,8 +67,8 @@ impl<FS: FileSystem> CryptoFS<FS> {
             dir_id = match c {
                 std::path::Component::RootDir => vec![],
                 std::path::Component::Normal(p) => {
-                    let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
                     let mut dir_uuid = vec![];
+                    let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
                     let encrypted_name = self
                         .cryptor
                         .encrypt_filename(p.to_str().unwrap_or_default(), dir_id.as_slice())?;
@@ -111,9 +111,16 @@ impl<FS: FileSystem> CryptoFS<FS> {
         path: P,
     ) -> Result<PathBuf, FileSystemError> {
         let filename = last_path_component(&path)?;
+        let parent = parent_path(&path);
 
-        let dir_id = self.dir_id_from_path(parent_path(&path))?;
+        let dir_id = self.dir_id_from_path(&parent)?;
         let real_dir_path = self.real_path_from_dir_id(dir_id.as_slice())?;
+
+        // return only dir path cause the path is not a path to a file
+        if filename == parent {
+            return Ok(std::path::PathBuf::new().join(&real_dir_path));
+        }
+
         let real_filename = self
             .cryptor
             .encrypt_filename(filename.to_str().unwrap_or_default(), dir_id.as_slice())?;
@@ -293,6 +300,11 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
             }
         }
         Ok(self.remove_dir(_src)?)
+    }
+
+    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
+        let real_path = self.filepath_to_real_path(path)?;
+        self.file_system_provider.metadata(real_path)
     }
 }
 

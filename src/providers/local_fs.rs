@@ -92,4 +92,9 @@ impl FileSystem for LocalFS {
         //TODO: implement this method
         unimplemented!();
     }
+
+    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
+        let metadata = fs::metadata(path)?;
+        Ok(Metadata::from(metadata))
+    }
 }

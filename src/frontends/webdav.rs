@@ -1,16 +1,25 @@
-use crate::cryptofs::{CryptoFS, DirEntry, File, FileSystem, Metadata};
+use crate::cryptofs::{CryptoFS, DirEntry, File, FileSystem, FileSystemError, Metadata};
 use futures::{future, future::FutureExt};
 use std::io::{Read, SeekFrom, Write};
 use std::time::SystemTime;
 use webdav_handler::fs::{
-    DavDirEntry, DavFile, DavFileSystem, DavMetaData, FsFuture, FsResult, FsStream, OpenOptions,
-    ReadDirMeta,
+    DavDirEntry, DavFile, DavFileSystem, DavMetaData, FsError, FsFuture, FsResult, FsStream,
+    OpenOptions, ReadDirMeta,
 };
 use webdav_handler::webpath::WebPath;
 
+impl From<FileSystemError> for FsError {
+    fn from(fse: FileSystemError) -> Self {
+        match fse {
+            FileSystemError::PathIsNotExist(_) => FsError::Exists,
+            _ => FsError::GeneralFailure,
+        }
+    }
+}
+
 impl DavDirEntry for DirEntry {
     fn name(&self) -> Vec<u8> {
-        Vec::from(self.file_name.to_str().unwrap())
+        Vec::from(self.file_name.to_str().unwrap_or_default())
     }
 
     fn metadata(&self) -> FsFuture<Box<dyn DavMetaData>> {
@@ -45,28 +54,27 @@ impl DFile {
 
 impl DavFile for DFile {
     fn metadata(&self) -> FsFuture<Box<dyn DavMetaData>> {
-        async move { Ok(Box::new(self.crypto_fs_file.metadata().unwrap()) as Box<dyn DavMetaData>) }
-            .boxed()
+        async move { Ok(Box::new(self.crypto_fs_file.metadata()?) as Box<dyn DavMetaData>) }.boxed()
     }
 
     fn write_bytes<'a>(&'a mut self, buf: &'a [u8]) -> FsFuture<'_, usize> {
-        async move { Ok(self.crypto_fs_file.write(buf).unwrap()) }.boxed()
+        async move { Ok(self.crypto_fs_file.write(buf)?) }.boxed()
     }
 
     fn write_all<'a>(&'a mut self, buf: &'a [u8]) -> FsFuture<'_, ()> {
-        async move { Ok(self.crypto_fs_file.write_all(buf).unwrap()) }.boxed()
+        async move { Ok(self.crypto_fs_file.write_all(buf)?) }.boxed()
     }
 
     fn read_bytes<'a>(&'a mut self, buf: &'a mut [u8]) -> FsFuture<'_, usize> {
-        async move { Ok(self.crypto_fs_file.read(buf).unwrap()) }.boxed()
+        async move { Ok(self.crypto_fs_file.read(buf)?) }.boxed()
     }
 
     fn seek(&mut self, pos: SeekFrom) -> FsFuture<u64> {
-        async move { Ok(self.crypto_fs_file.seek(pos).unwrap()) }.boxed()
+        async move { Ok(self.crypto_fs_file.seek(pos)?) }.boxed()
     }
 
     fn flush(&mut self) -> FsFuture<()> {
-        async move { Ok(self.crypto_fs_file.flush().unwrap()) }.boxed()
+        async move { Ok(self.crypto_fs_file.flush()?) }.boxed()
     }
 }
 
@@ -88,9 +96,10 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         _options: OpenOptions,
     ) -> FsFuture<'_, Box<dyn DavFile>> {
         async move {
-            Ok(Box::new(DFile::new(
-                self.crypto_fs.open_file(path.as_pathbuf()).unwrap(),
-            )) as Box<dyn DavFile>)
+            Ok(
+                Box::new(DFile::new(self.crypto_fs.open_file(path.as_pathbuf())?))
+                    as Box<dyn DavFile>,
+            )
         }
         .boxed()
     }
@@ -101,7 +110,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         _meta: ReadDirMeta,
     ) -> FsFuture<'_, FsStream<Box<dyn DavDirEntry>>> {
         async move {
-            let entries = self.crypto_fs.read_dir(path.as_pathbuf()).unwrap();
+            let entries = self.crypto_fs.read_dir(path.as_pathbuf())?;
             let mut v: Vec<Box<dyn DavDirEntry>> = Vec::new();
             for entry in entries {
                 v.push(Box::new(entry));
@@ -114,8 +123,8 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
 
     fn metadata<'a>(&'a self, path: &'a WebPath) -> FsFuture<'_, Box<dyn DavMetaData>> {
         async move {
-            let f = self.crypto_fs.open_file(path.as_pathbuf()).unwrap();
-            Ok(Box::new(f.metadata().unwrap()) as Box<dyn DavMetaData>)
+            let metadata = self.crypto_fs.metadata(path.as_pathbuf())?;
+            Ok(Box::new(metadata) as Box<dyn DavMetaData>)
         }
         .boxed()
     }

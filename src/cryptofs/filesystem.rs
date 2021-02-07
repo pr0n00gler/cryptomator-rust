@@ -48,6 +48,9 @@ pub trait FileSystem: Sync + Send + Clone {
 
     /// Moves dir from _src to _dest
     fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError>;
+
+    /// Returns metadata of an entry by the given path
+    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError>;
 }
 
 /// File metadata. Not much more than type, length, and some timestamps

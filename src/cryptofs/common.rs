@@ -52,8 +52,14 @@ pub fn parent_path<S: AsRef<Path>>(path: S) -> PathBuf {
         .components()
         .collect::<Vec<std::path::Component>>();
     let mut dir_path = std::path::PathBuf::new(); //path without filename
+
+    // return the same path if there are no parents
+    if components.len() < 2 {
+        dir_path.push(path);
+        return dir_path;
+    }
     for (i, c) in components.iter().enumerate() {
-        if components.len() < 2 || i > components.len() - 2 {
+        if i > components.len() - 2 {
             break;
         }
         dir_path = dir_path.join(c.as_ref() as &Path);

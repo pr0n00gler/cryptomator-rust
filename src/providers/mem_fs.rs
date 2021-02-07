@@ -147,4 +147,9 @@ impl FileSystem for MemoryFS {
         //TODO: implement this method
         unimplemented!()
     }
+
+    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
+        let metadata = self.fs.metadata(path)?;
+        Ok(metadata_from_rsfs(metadata))
+    }
 }

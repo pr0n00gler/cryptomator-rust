@@ -96,6 +96,16 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         _options: OpenOptions,
     ) -> FsFuture<'_, Box<dyn DavFile>> {
         async move {
+            let exists = self.crypto_fs.exists(path.as_pathbuf());
+            if _options.create_new && exists {
+                return Err(FsError::Exists);
+            }
+            if _options.create && !exists {
+                return Ok(
+                    Box::new(DFile::new(self.crypto_fs.create_file(path.as_pathbuf())?))
+                        as Box<dyn DavFile>,
+                );
+            }
             Ok(
                 Box::new(DFile::new(self.crypto_fs.open_file(path.as_pathbuf())?))
                     as Box<dyn DavFile>,
@@ -125,6 +135,48 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         async move {
             let metadata = self.crypto_fs.metadata(path.as_pathbuf())?;
             Ok(Box::new(metadata) as Box<dyn DavMetaData>)
+        }
+        .boxed()
+    }
+
+    fn create_dir<'a>(&'a self, path: &'a WebPath) -> FsFuture<()> {
+        async move { Ok(self.crypto_fs.create_dir(path.as_pathbuf())?) }.boxed()
+    }
+
+    fn remove_dir<'a>(&'a self, path: &'a WebPath) -> FsFuture<()> {
+        async move { Ok(self.crypto_fs.remove_dir(path.as_pathbuf())?) }.boxed()
+    }
+
+    fn remove_file<'a>(&'a self, path: &'a WebPath) -> FsFuture<()> {
+        async move { Ok(self.crypto_fs.remove_file(path.as_pathbuf())?) }.boxed()
+    }
+
+    fn rename<'a>(&'a self, from: &'a WebPath, to: &'a WebPath) -> FsFuture<()> {
+        async move {
+            let from_metadata = self.crypto_fs.metadata(from.as_pathbuf())?;
+            let to_metadata = self.crypto_fs.metadata(to.as_pathbuf())?;
+            if (from_metadata.is_dir != to_metadata.is_dir)
+                || (from_metadata.is_file != to_metadata.is_file)
+            {
+                return Err(FsError::GeneralFailure);
+            }
+            if from_metadata.is_dir {
+                return Ok(self
+                    .crypto_fs
+                    .move_dir(from.as_pathbuf(), to.as_pathbuf())?);
+            }
+            Ok(self
+                .crypto_fs
+                .move_file(from.as_pathbuf(), to.as_pathbuf())?)
+        }
+        .boxed()
+    }
+
+    fn copy<'a>(&'a self, from: &'a WebPath, to: &'a WebPath) -> FsFuture<()> {
+        async move {
+            Ok(self
+                .crypto_fs
+                .copy_file(from.as_pathbuf(), to.as_pathbuf())?)
         }
         .boxed()
     }

@@ -21,7 +21,8 @@ const DIR_FILENAME: &str = "dir.c9r";
 /// Provides an access to an encrypted storage
 /// In a nutshell, translates all the 'virtual' paths, like '/some_folder/file.txt', to real paths,
 /// like /d/DR/RW3L6XRAPFC2UCK5QY37Q2U552IRPE/eZdOa_B9fRqncpYjZmKXfJEz81LgRUbT0yWdE0wyNTMd.c9r
-pub struct CryptoFS<'gc, FS: FileSystem> {
+#[derive(Clone)]
+pub struct CryptoFS<FS: FileSystem> {
     /// Instance of the Cryptor - does all work with cryptography
     cryptor: Cryptor,
 
@@ -29,16 +30,16 @@ pub struct CryptoFS<'gc, FS: FileSystem> {
     root_folder: String,
 
     /// Instance of the FileSystem. Should provide access to a real files.
-    file_system_provider: &'gc FS,
+    file_system_provider: FS,
 }
 
-impl<'gc, FS: FileSystem> CryptoFS<'gc, FS> {
+impl<FS: FileSystem> CryptoFS<FS> {
     /// Returns a new instance of CryptoFS
     pub fn new(
         folder: &str,
         cryptor: Cryptor,
-        fs_provider: &'gc FS,
-    ) -> Result<CryptoFS<'gc, FS>, FileSystemError> {
+        fs_provider: FS,
+    ) -> Result<CryptoFS<FS>, FileSystemError> {
         let crypto_fs = CryptoFS {
             cryptor,
             root_folder: String::from(folder),
@@ -66,8 +67,8 @@ impl<'gc, FS: FileSystem> CryptoFS<'gc, FS> {
             dir_id = match c {
                 std::path::Component::RootDir => vec![],
                 std::path::Component::Normal(p) => {
-                    let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
                     let mut dir_uuid = vec![];
+                    let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
                     let encrypted_name = self
                         .cryptor
                         .encrypt_filename(p.to_str().unwrap_or_default(), dir_id.as_slice())?;
@@ -110,9 +111,16 @@ impl<'gc, FS: FileSystem> CryptoFS<'gc, FS> {
         path: P,
     ) -> Result<PathBuf, FileSystemError> {
         let filename = last_path_component(&path)?;
+        let parent = parent_path(&path);
 
-        let dir_id = self.dir_id_from_path(parent_path(&path))?;
+        let dir_id = self.dir_id_from_path(&parent)?;
         let real_dir_path = self.real_path_from_dir_id(dir_id.as_slice())?;
+
+        // return only dir path cause the path is not a path to a file
+        if filename == parent {
+            return Ok(std::path::PathBuf::new().join(&real_dir_path));
+        }
+
         let real_filename = self
             .cryptor
             .encrypt_filename(filename.to_str().unwrap_or_default(), dir_id.as_slice())?;
@@ -123,7 +131,7 @@ impl<'gc, FS: FileSystem> CryptoFS<'gc, FS> {
     }
 }
 
-impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
+impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
     /// Returns an iterator of DirEntries for the given path
     fn read_dir<P: AsRef<Path>>(
         &self,
@@ -207,7 +215,7 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
 
     fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
-        let crypto_file = CryptoFSFile::open(real_path, self.cryptor, self.file_system_provider)?;
+        let crypto_file = CryptoFSFile::open(real_path, self.cryptor, &self.file_system_provider)?;
         Ok(Box::new(crypto_file))
     }
 
@@ -293,9 +301,15 @@ impl<'gc, FS: FileSystem> FileSystem for CryptoFS<'gc, FS> {
         }
         Ok(self.remove_dir(_src)?)
     }
+
+    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
+        let real_path = self.filepath_to_real_path(path)?;
+        self.file_system_provider.metadata(real_path)
+    }
 }
 
 /// 'Virtual' file implementation of the File trait
+#[derive(Debug)]
 pub struct CryptoFSFile {
     /// A Cryptor instance used to encrypt/decrypt data
     cryptor: Cryptor,
@@ -321,7 +335,7 @@ impl<'gc> CryptoFSFile {
     pub fn open<P: AsRef<Path>, FS: FileSystem>(
         real_path: P,
         cryptor: Cryptor,
-        real_file_system_provider: &'gc FS,
+        real_file_system_provider: &FS,
     ) -> Result<CryptoFSFile, FileSystemError> {
         let mut reader = real_file_system_provider.open_file(real_path)?;
         let mut encrypted_header: [u8; FILE_HEADER_LENGTH] = [0; FILE_HEADER_LENGTH];

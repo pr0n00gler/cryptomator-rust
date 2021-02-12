@@ -23,3 +23,9 @@ sha1 = "0.6.0"
 rand = "0.7.3"
 uuid = { version = "0.8", features = ["serde", "v4"] }
 rsfs = "0.4.1"
+webdav-handler = "0.1.2"
+futures01 = { package = "futures", version = "0.1.27" }
+futures = { version = "0.3.1", features = ["io-compat"] }
+http = "0.1.17"
+hyper = "0.12.30"
+bytes = "0.4.12"

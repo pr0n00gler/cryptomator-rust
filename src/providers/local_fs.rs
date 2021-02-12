@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 /// Provides access to a local filesystem
+#[derive(Clone)]
 pub struct LocalFS {}
 
 impl LocalFS {
@@ -90,5 +91,10 @@ impl FileSystem for LocalFS {
         // implement the method for no reason.
         //TODO: implement this method
         unimplemented!();
+    }
+
+    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
+        let metadata = fs::metadata(path)?;
+        Ok(Metadata::from(metadata))
     }
 }

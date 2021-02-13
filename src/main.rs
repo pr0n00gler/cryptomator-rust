@@ -22,10 +22,12 @@ fn main() {
         let dav_server = dav_server.clone();
         hyper::service::service_fn(move |req: hyper::Request<hyper::Body>| {
             let (parts, body) = req.into_parts();
+            println!("REQ {} {}", parts.method.as_str(), parts.uri.path());
             let body = body.map(Bytes::from);
             let req = http::Request::from_parts(parts, body);
             let fut = dav_server.handle(req).and_then(|resp| {
                 let (parts, body) = resp.into_parts();
+                println!("RESP {}", parts.status);
                 let body = hyper::Body::wrap_stream(body);
                 Ok(hyper::Response::from_parts(parts, body))
             });

@@ -110,6 +110,13 @@ impl<FS: FileSystem> CryptoFS<FS> {
         &self,
         path: P,
     ) -> Result<PathBuf, FileSystemError> {
+        // webdav-handler::parent() method returns an empty path for root paths, like "/file.txt",
+        // "/some_folder", so that's a little hack to handle this bug (is it a bug btw?)
+        if path.as_ref().eq(Path::new("")) {
+            let real_dir_path = self.real_path_from_dir_id(&[])?;
+            return Ok(std::path::PathBuf::new().join(&real_dir_path));
+        }
+
         let filename = last_path_component(&path)?;
         let parent = parent_path(&path);
 

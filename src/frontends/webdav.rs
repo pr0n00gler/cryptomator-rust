@@ -1,6 +1,7 @@
+use crate::crypto::CryptoError;
 use crate::cryptofs::{CryptoFS, DirEntry, File, FileSystem, FileSystemError, Metadata};
 use futures::{future, future::FutureExt};
-use std::io::{Read, SeekFrom, Write};
+use std::io::{ErrorKind, Read, SeekFrom, Write};
 use std::time::SystemTime;
 use webdav_handler::fs::{
     DavDirEntry, DavFile, DavFileSystem, DavMetaData, FsError, FsFuture, FsResult, FsStream,
@@ -11,7 +12,18 @@ use webdav_handler::webpath::WebPath;
 impl From<FileSystemError> for FsError {
     fn from(fse: FileSystemError) -> Self {
         match fse {
-            FileSystemError::PathIsNotExist(_) => FsError::Exists,
+            FileSystemError::PathIsNotExist(_) => FsError::NotFound,
+            FileSystemError::CryptoError(s) => match s {
+                CryptoError::IOError(i) => match i.kind() {
+                    ErrorKind::NotFound => FsError::NotFound,
+                    _ => FsError::GeneralFailure,
+                },
+                _ => FsError::GeneralFailure,
+            },
+            FileSystemError::IOError(s) => match s.kind() {
+                ErrorKind::NotFound => FsError::NotFound,
+                _ => FsError::GeneralFailure,
+            },
             _ => FsError::GeneralFailure,
         }
     }
@@ -133,6 +145,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
 
     fn metadata<'a>(&'a self, path: &'a WebPath) -> FsFuture<'_, Box<dyn DavMetaData>> {
         async move {
+            println!("METADATA {}", path.to_string());
             let metadata = self.crypto_fs.metadata(path.as_pathbuf())?;
             Ok(Box::new(metadata) as Box<dyn DavMetaData>)
         }

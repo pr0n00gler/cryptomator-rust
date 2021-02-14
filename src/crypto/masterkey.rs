@@ -19,6 +19,7 @@ impl MasterKey {
     /// Returns a new MasterKey instance by reading a file
     pub fn from_file(filename: &str, password: &str) -> Result<MasterKey, MasterKeyError> {
         let file = fs::File::open(filename)?;
+        debug!("Opened file - {}", filename);
         let mk_json: Value = serde_json::from_reader(file)?;
 
         let scrypt_cost_param = mk_json["scryptCostParam"].as_u64().unwrap_or(0);

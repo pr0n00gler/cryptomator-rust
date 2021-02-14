@@ -6,6 +6,7 @@ use cryptomator::providers::LocalFS;
 
 use bytes::Bytes;
 use futures01::{future::Future, stream::Stream};
+use log::{error, info};
 use webdav_handler::{fakels::FakeLs, DavHandler};
 
 fn main() {
@@ -35,10 +36,10 @@ fn main() {
         })
     };
 
-    println!("Serving {}", addr);
+    info!("Serving {}", addr);
     let server = hyper::Server::bind(&addr)
         .serve(make_service)
-        .map_err(|e| eprintln!("server error: {}", e));
+        .map_err(|e| error!("server error: {}", e));
 
     hyper::rt::run(server);
 }

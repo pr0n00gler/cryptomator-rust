@@ -1,6 +1,7 @@
 use cryptomator::crypto::{Cryptor, MasterKey};
 use cryptomator::cryptofs::CryptoFS;
 use cryptomator::frontends::webdav::WebDav;
+use cryptomator::logging::init_logger;
 use cryptomator::providers::LocalFS;
 
 use bytes::Bytes;
@@ -8,6 +9,7 @@ use futures01::{future::Future, stream::Stream};
 use webdav_handler::{fakels::FakeLs, DavHandler};
 
 fn main() {
+    let _log = init_logger();
     let local_fs = LocalFS::new();
     let master_key =
         MasterKey::from_file("tests/test_storage/masterkey.cryptomator", "12345678").unwrap();

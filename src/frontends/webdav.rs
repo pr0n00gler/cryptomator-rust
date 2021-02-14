@@ -51,6 +51,22 @@ impl DavMetaData for Metadata {
     fn is_dir(&self) -> bool {
         self.is_dir
     }
+
+    fn accessed(&self) -> FsResult<SystemTime> {
+        Ok(self.accessed)
+    }
+
+    fn created(&self) -> FsResult<SystemTime> {
+        Ok(self.created)
+    }
+
+    fn status_changed(&self) -> FsResult<SystemTime> {
+        Ok(self.modified)
+    }
+
+    fn executable(&self) -> FsResult<bool> {
+        Ok(false)
+    }
 }
 
 #[derive(Debug)]
@@ -66,27 +82,51 @@ impl DFile {
 
 impl DavFile for DFile {
     fn metadata(&self) -> FsFuture<Box<dyn DavMetaData>> {
-        async move { Ok(Box::new(self.crypto_fs_file.metadata()?) as Box<dyn DavMetaData>) }.boxed()
+        async move {
+            println!("FILE METADATA");
+            Ok(Box::new(self.crypto_fs_file.metadata()?) as Box<dyn DavMetaData>)
+        }
+        .boxed()
     }
 
     fn write_bytes<'a>(&'a mut self, buf: &'a [u8]) -> FsFuture<'_, usize> {
-        async move { Ok(self.crypto_fs_file.write(buf)?) }.boxed()
+        async move {
+            println!("WRITE BYTES");
+            Ok(self.crypto_fs_file.write(buf)?)
+        }
+        .boxed()
     }
 
     fn write_all<'a>(&'a mut self, buf: &'a [u8]) -> FsFuture<'_, ()> {
-        async move { Ok(self.crypto_fs_file.write_all(buf)?) }.boxed()
+        async move {
+            println!("WRITE ALL");
+            Ok(self.crypto_fs_file.write_all(buf)?)
+        }
+        .boxed()
     }
 
     fn read_bytes<'a>(&'a mut self, buf: &'a mut [u8]) -> FsFuture<'_, usize> {
-        async move { Ok(self.crypto_fs_file.read(buf)?) }.boxed()
+        async move {
+            println!("READ BYTES");
+            Ok(self.crypto_fs_file.read(buf)?)
+        }
+        .boxed()
     }
 
     fn seek(&mut self, pos: SeekFrom) -> FsFuture<u64> {
-        async move { Ok(self.crypto_fs_file.seek(pos)?) }.boxed()
+        async move {
+            println!("SEEK");
+            Ok(self.crypto_fs_file.seek(pos)?)
+        }
+        .boxed()
     }
 
     fn flush(&mut self) -> FsFuture<()> {
-        async move { Ok(self.crypto_fs_file.flush()?) }.boxed()
+        async move {
+            println!("FLUSH");
+            Ok(self.crypto_fs_file.flush()?)
+        }
+        .boxed()
     }
 }
 
@@ -108,6 +148,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         _options: OpenOptions,
     ) -> FsFuture<'_, Box<dyn DavFile>> {
         async move {
+            println!("OPEN FILE {}", path.to_string());
             let exists = self.crypto_fs.exists(path.as_pathbuf());
             if _options.create_new && exists {
                 return Err(FsError::Exists);
@@ -181,9 +222,26 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
 
     fn copy<'a>(&'a self, from: &'a WebPath, to: &'a WebPath) -> FsFuture<()> {
         async move {
+            println!("COPY {} {}", from.to_string(), to.to_string());
             Ok(self
                 .crypto_fs
                 .copy_file(from.as_pathbuf(), to.as_pathbuf())?)
+        }
+        .boxed()
+    }
+
+    fn set_accessed<'a>(&'a self, path: &'a WebPath, tm: SystemTime) -> FsFuture<()> {
+        async move {
+            println!("SET ACCESSED {}", path.to_string());
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn set_modified<'a>(&'a self, path: &'a WebPath, tm: SystemTime) -> FsFuture<()> {
+        async move {
+            println!("SET MODIFIED {}", path.to_string());
+            Ok(())
         }
         .boxed()
     }

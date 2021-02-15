@@ -1,13 +1,16 @@
 use cryptomator::crypto::{Cryptor, MasterKey};
 use cryptomator::cryptofs::CryptoFS;
 use cryptomator::frontends::webdav::WebDav;
+use cryptomator::logging::init_logger;
 use cryptomator::providers::LocalFS;
 
 use bytes::Bytes;
 use futures01::{future::Future, stream::Stream};
+use log::{error, info};
 use webdav_handler::{fakels::FakeLs, DavHandler};
 
 fn main() {
+    let _log = init_logger();
     let local_fs = LocalFS::new();
     let master_key =
         MasterKey::from_file("tests/test_storage/masterkey.cryptomator", "12345678").unwrap();
@@ -33,10 +36,10 @@ fn main() {
         })
     };
 
-    println!("Serving {}", addr);
+    info!("Serving {}", addr);
     let server = hyper::Server::bind(&addr)
         .serve(make_service)
-        .map_err(|e| eprintln!("server error: {}", e));
+        .map_err(|e| error!("server error: {}", e));
 
     hyper::rt::run(server);
 }

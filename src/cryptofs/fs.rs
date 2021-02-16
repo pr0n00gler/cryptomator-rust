@@ -8,6 +8,7 @@ use crate::cryptofs::{
     component_to_string, last_path_component, parent_path, DirEntry, File, FileSystem,
     FileSystemError,
 };
+use failure::AsFail;
 use std::cmp::Ordering;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -478,6 +479,7 @@ impl Write for CryptoFSFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let mut encrypted_data: Vec<u8> = vec![];
         let mut chunk_index = self.current_pos / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        println!("Writing {} bytes to chunk #{}", buf.len(), chunk_index);
         let file_size = match self.get_real_file_size() {
             Ok(s) => s,
             Err(_) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
@@ -485,14 +487,9 @@ impl Write for CryptoFSFile {
 
         let chunks_count = file_size / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
         let start_chunk_index = chunk_index;
+
         let mut n: usize = 0;
         while n < buf.len() {
-            let offset = if n > 0 {
-                0
-            } else {
-                (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize
-            };
-
             let mut chunk: Vec<u8> = vec![];
             if chunk_index > chunks_count || file_size == FILE_HEADER_LENGTH as u64 {
                 let slice_len = if FILE_CHUNK_CONTENT_PAYLOAD_LENGTH <= buf.len() - n {
@@ -505,23 +502,34 @@ impl Write for CryptoFSFile {
             } else {
                 let mut buf_chunk = match self.read_chunk(chunk_index) {
                     Ok(c) => c,
-                    Err(_) => {
+                    Err(e) => {
+                        println!("{}", e.as_fail());
                         return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                     }
                 };
-                if buf_chunk.is_empty() {
-                    break;
-                }
 
-                let slice_len = match (buf.len() - n).cmp(&(buf_chunk.len() - offset)) {
-                    Ordering::Less => buf.len() - n,
-                    Ordering::Greater => buf_chunk.len() - offset,
-                    Ordering::Equal => buf.len() - n,
+                let offset = (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize;
+                let slice_len = if offset + buf.len() - n > FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
+                    FILE_CHUNK_CONTENT_PAYLOAD_LENGTH - offset - n
+                } else {
+                    buf.len() - n
                 };
 
+                println!(
+                    "SLICE_LEN={}, CHUNK_LEN={}, BUF_LEN={}, OFFSET={}, N={}",
+                    slice_len,
+                    buf_chunk.len(),
+                    buf.len(),
+                    offset,
+                    n
+                );
+                let chunk_len = buf_chunk.len();
+                if chunk_len == 0 || chunk_len - offset < slice_len {
+                    buf_chunk.extend_from_slice(vec![0; chunk_len - offset + slice_len].as_slice());
+                }
+                println!("NEW CHUNK #{} SIZE={}", chunk_index, buf_chunk.len());
                 buf_chunk[offset..offset + slice_len].copy_from_slice(&buf[n..n + slice_len]);
                 n += slice_len;
-
                 chunk = buf_chunk;
             }
 
@@ -534,7 +542,7 @@ impl Write for CryptoFSFile {
                 Ok(c) => c,
                 Err(_) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
             };
-            encrypted_data.extend(encrypted_chunk);
+            encrypted_data.extend_from_slice(encrypted_chunk.as_slice());
             self.current_pos += n as u64;
             chunk_index += 1;
         }
@@ -544,6 +552,86 @@ impl Write for CryptoFSFile {
         self.rfs_file.write_all(encrypted_data.as_ref())?;
         Ok(n)
     }
+
+    // fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    //     println!("Writing {} bytes", buf.len());
+    //     let mut encrypted_data: Vec<u8> = vec![];
+    //     let mut chunk_index = self.current_pos / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+    //     let file_size = match self.get_real_file_size() {
+    //         Ok(s) => s,
+    //         Err(_) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
+    //     };
+    //
+    //     let chunks_count = file_size / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+    //     let start_chunk_index = chunk_index;
+    //     let mut n: usize = 0;
+    //     while n < buf.len() {
+    //         let offset = if n > 0 {
+    //             0
+    //         } else {
+    //             (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize
+    //         };
+    //
+    //         let mut chunk: Vec<u8> = vec![];
+    //         if chunk_index > chunks_count || file_size == FILE_HEADER_LENGTH as u64 {
+    //             let slice_len = if FILE_CHUNK_CONTENT_PAYLOAD_LENGTH <= buf.len() - n {
+    //                 FILE_CHUNK_CONTENT_PAYLOAD_LENGTH
+    //             } else {
+    //                 buf.len() - n
+    //             };
+    //             chunk.extend_from_slice(&buf[n..n + slice_len]);
+    //             n += slice_len;
+    //         } else {
+    //             let mut buf_chunk = match self.read_chunk(chunk_index) {
+    //                 Ok(c) => c,
+    //                 Err(e) => {
+    //                     println!("{}", e.as_fail());
+    //                     return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+    //                 }
+    //             };
+    //
+    //             if buf_chunk.is_empty() {
+    //                 break;
+    //             }
+    //
+    //             let slice_len = match (buf.len() - n).cmp(&(buf_chunk.len() - offset)) {
+    //                 Ordering::Less => buf.len() - n,
+    //                 Ordering::Greater => buf_chunk.len() - offset,
+    //                 Ordering::Equal => buf.len() - n,
+    //             };
+    //
+    //             if offset + buf.len() <= buf_chunk.len() {
+    //                 buf_chunk[offset..offset + buf.len()].copy_from_slice(&buf[n..n + buf.len()]);
+    //             } else if offset + buf.len() > buf_chunk.len() {
+    //                 if offset + buf.len()
+    //             }
+    //
+    //             buf_chunk[offset..offset + slice_len].copy_from_slice(&buf[n..n + slice_len]);
+    //             n += slice_len;
+    //
+    //             chunk = buf_chunk;
+    //         }
+    //
+    //         let encrypted_chunk = match self.cryptor.encrypt_chunk(
+    //             &self.header.nonce,
+    //             &self.header.payload.content_key,
+    //             chunk_index as usize,
+    //             chunk.as_slice(),
+    //         ) {
+    //             Ok(c) => c,
+    //             Err(_) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
+    //         };
+    //         encrypted_data.extend(encrypted_chunk);
+    //         self.current_pos += n as u64;
+    //         chunk_index += 1;
+    //     }
+    //     self.rfs_file.seek(SeekFrom::Start(
+    //         (start_chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
+    //     ))?;
+    //     self.rfs_file.write_all(encrypted_data.as_ref())?;
+    //     debug!("Wrote!");
+    //     Ok(n)
+    // }
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(self.rfs_file.flush()?)

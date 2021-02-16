@@ -114,7 +114,15 @@ impl FileSystem for MemoryFS {
     }
 
     fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
-        Ok(Box::new(VirtualFile::new(self.fs.create_file(path)?)))
+        Ok(Box::new(VirtualFile::new(
+            self.fs
+                .new_openopts()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .create(true)
+                .open(path)?,
+        )))
     }
 
     fn exists<P: AsRef<Path>>(&self, path: P) -> bool {

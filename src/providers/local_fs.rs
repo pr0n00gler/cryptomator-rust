@@ -61,7 +61,14 @@ impl FileSystem for LocalFS {
     }
 
     fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
-        Ok(Box::new(fs::File::create(path)?))
+        Ok(Box::new(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .read(true)
+                .create_new(true)
+                .open(path)?,
+        ))
     }
 
     fn exists<P: AsRef<Path>>(&self, path: P) -> bool {

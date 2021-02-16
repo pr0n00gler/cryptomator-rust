@@ -1,5 +1,6 @@
 use crate::crypto::CryptoError;
 use crate::cryptofs::{CryptoFS, DirEntry, File, FileSystem, FileSystemError, Metadata};
+use failure::AsFail;
 use futures::{future, future::FutureExt};
 use std::io::{ErrorKind, Read, SeekFrom, Write};
 use std::time::SystemTime;
@@ -83,7 +84,7 @@ impl DFile {
 impl DavFile for DFile {
     fn metadata(&self) -> FsFuture<Box<dyn DavMetaData>> {
         async move {
-            println!("FILE METADATA");
+            debug!("Metadata for a file");
             Ok(Box::new(self.crypto_fs_file.metadata()?) as Box<dyn DavMetaData>)
         }
         .boxed()
@@ -91,7 +92,7 @@ impl DavFile for DFile {
 
     fn write_bytes<'a>(&'a mut self, buf: &'a [u8]) -> FsFuture<'_, usize> {
         async move {
-            println!("WRITE BYTES");
+            debug!("Writing bytes to a file");
             Ok(self.crypto_fs_file.write(buf)?)
         }
         .boxed()
@@ -99,15 +100,19 @@ impl DavFile for DFile {
 
     fn write_all<'a>(&'a mut self, buf: &'a [u8]) -> FsFuture<'_, ()> {
         async move {
-            println!("WRITE ALL");
-            Ok(self.crypto_fs_file.write_all(buf)?)
+            debug!("Writing all bytes to a file");
+            if let Err(e) = self.crypto_fs_file.write_all(buf) {
+                debug!("ERROR KEKE!!!!!!!! {}", e.as_fail());
+                return Err(FsError::GeneralFailure);
+            }
+            Ok(())
         }
         .boxed()
     }
 
     fn read_bytes<'a>(&'a mut self, buf: &'a mut [u8]) -> FsFuture<'_, usize> {
         async move {
-            println!("READ BYTES");
+            debug!("Reading bytes from a file");
             Ok(self.crypto_fs_file.read(buf)?)
         }
         .boxed()
@@ -115,7 +120,7 @@ impl DavFile for DFile {
 
     fn seek(&mut self, pos: SeekFrom) -> FsFuture<u64> {
         async move {
-            println!("SEEK");
+            debug!("Seeking file");
             Ok(self.crypto_fs_file.seek(pos)?)
         }
         .boxed()
@@ -123,7 +128,7 @@ impl DavFile for DFile {
 
     fn flush(&mut self) -> FsFuture<()> {
         async move {
-            println!("FLUSH");
+            debug!("Flushing file");
             Ok(self.crypto_fs_file.flush()?)
         }
         .boxed()
@@ -148,7 +153,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         _options: OpenOptions,
     ) -> FsFuture<'_, Box<dyn DavFile>> {
         async move {
-            println!("OPEN FILE {}", path.to_string());
+            debug!("Opening file");
             let exists = self.crypto_fs.exists(path.as_pathbuf());
             if _options.create_new && exists {
                 return Err(FsError::Exists);
@@ -173,6 +178,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         _meta: ReadDirMeta,
     ) -> FsFuture<'_, FsStream<Box<dyn DavDirEntry>>> {
         async move {
+            debug!("Reading dir");
             let entries = self.crypto_fs.read_dir(path.as_pathbuf())?;
             let mut v: Vec<Box<dyn DavDirEntry>> = Vec::new();
             for entry in entries {
@@ -186,7 +192,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
 
     fn metadata<'a>(&'a self, path: &'a WebPath) -> FsFuture<'_, Box<dyn DavMetaData>> {
         async move {
-            println!("METADATA {}", path.to_string());
+            debug!("FS::Metadata");
             let metadata = self.crypto_fs.metadata(path.as_pathbuf())?;
             Ok(Box::new(metadata) as Box<dyn DavMetaData>)
         }
@@ -194,11 +200,19 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
     }
 
     fn create_dir<'a>(&'a self, path: &'a WebPath) -> FsFuture<()> {
-        async move { Ok(self.crypto_fs.create_dir(path.as_pathbuf())?) }.boxed()
+        async move {
+            debug!("Creating dir");
+            Ok(self.crypto_fs.create_dir(path.as_pathbuf())?)
+        }
+        .boxed()
     }
 
     fn remove_dir<'a>(&'a self, path: &'a WebPath) -> FsFuture<()> {
-        async move { Ok(self.crypto_fs.remove_dir(path.as_pathbuf())?) }.boxed()
+        async move {
+            debug!("Removing dir");
+            Ok(self.crypto_fs.remove_dir(path.as_pathbuf())?)
+        }
+        .boxed()
     }
 
     fn remove_file<'a>(&'a self, path: &'a WebPath) -> FsFuture<()> {
@@ -222,7 +236,6 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
 
     fn copy<'a>(&'a self, from: &'a WebPath, to: &'a WebPath) -> FsFuture<()> {
         async move {
-            println!("COPY {} {}", from.to_string(), to.to_string());
             Ok(self
                 .crypto_fs
                 .copy_file(from.as_pathbuf(), to.as_pathbuf())?)
@@ -231,18 +244,10 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
     }
 
     fn set_accessed<'a>(&'a self, path: &'a WebPath, tm: SystemTime) -> FsFuture<()> {
-        async move {
-            println!("SET ACCESSED {}", path.to_string());
-            Ok(())
-        }
-        .boxed()
+        async move { Ok(()) }.boxed()
     }
 
     fn set_modified<'a>(&'a self, path: &'a WebPath, tm: SystemTime) -> FsFuture<()> {
-        async move {
-            println!("SET MODIFIED {}", path.to_string());
-            Ok(())
-        }
-        .boxed()
+        async move { Ok(()) }.boxed()
     }
 }

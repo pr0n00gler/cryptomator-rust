@@ -1,6 +1,7 @@
+use crate::crypto::CryptoError;
 use crate::cryptofs::{CryptoFS, DirEntry, File, FileSystem, FileSystemError, Metadata};
 use futures::{future, future::FutureExt};
-use std::io::{Read, SeekFrom, Write};
+use std::io::{ErrorKind, Read, SeekFrom, Write};
 use std::time::SystemTime;
 use webdav_handler::fs::{
     DavDirEntry, DavFile, DavFileSystem, DavMetaData, FsError, FsFuture, FsResult, FsStream,
@@ -11,7 +12,18 @@ use webdav_handler::webpath::WebPath;
 impl From<FileSystemError> for FsError {
     fn from(fse: FileSystemError) -> Self {
         match fse {
-            FileSystemError::PathIsNotExist(_) => FsError::Exists,
+            FileSystemError::PathIsNotExist(_) => FsError::NotFound,
+            FileSystemError::CryptoError(s) => match s {
+                CryptoError::IOError(i) => match i.kind() {
+                    ErrorKind::NotFound => FsError::NotFound,
+                    _ => FsError::GeneralFailure,
+                },
+                _ => FsError::GeneralFailure,
+            },
+            FileSystemError::IOError(s) => match s.kind() {
+                ErrorKind::NotFound => FsError::NotFound,
+                _ => FsError::GeneralFailure,
+            },
             _ => FsError::GeneralFailure,
         }
     }
@@ -38,6 +50,14 @@ impl DavMetaData for Metadata {
 
     fn is_dir(&self) -> bool {
         self.is_dir
+    }
+
+    fn accessed(&self) -> FsResult<SystemTime> {
+        Ok(self.accessed)
+    }
+
+    fn created(&self) -> FsResult<SystemTime> {
+        Ok(self.created)
     }
 }
 

@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 /// Provides access to a local filesystem
+#[derive(Clone)]
 pub struct LocalFS {}
 
 impl LocalFS {
@@ -60,7 +61,14 @@ impl FileSystem for LocalFS {
     }
 
     fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
-        Ok(Box::new(fs::File::create(path)?))
+        Ok(Box::new(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .read(true)
+                .create_new(true)
+                .open(path)?,
+        ))
     }
 
     fn exists<P: AsRef<Path>>(&self, path: P) -> bool {
@@ -90,5 +98,10 @@ impl FileSystem for LocalFS {
         // implement the method for no reason.
         //TODO: implement this method
         unimplemented!();
+    }
+
+    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
+        let metadata = fs::metadata(path)?;
+        Ok(Metadata::from(metadata))
     }
 }

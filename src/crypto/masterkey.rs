@@ -9,7 +9,7 @@ const DEFAULT_IV: [u8; 8] = [0xA6; 8];
 
 /// Struct for MasterKey
 /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#masterkey-derivation
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct MasterKey {
     pub primary_master_key: [u8; 32],
     pub hmac_master_key: [u8; 32],
@@ -19,6 +19,7 @@ impl MasterKey {
     /// Returns a new MasterKey instance by reading a file
     pub fn from_file(filename: &str, password: &str) -> Result<MasterKey, MasterKeyError> {
         let file = fs::File::open(filename)?;
+        debug!("Opened file - {}", filename);
         let mk_json: Value = serde_json::from_reader(file)?;
 
         let scrypt_cost_param = mk_json["scryptCostParam"].as_u64().unwrap_or(0);

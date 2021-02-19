@@ -1,16 +1,17 @@
 use crate::cryptofs::FileSystemError;
 use std::ffi::OsString;
+use std::fmt::Debug;
 use std::io::{Read, Seek, Write};
 use std::path::Path;
 use std::time::SystemTime;
 
 /// A File should be readable/writeable/seekable, and be able to return its metadata
-pub trait File: Seek + Read + Write {
+pub trait File: Seek + Read + Write + Sync + Send + Debug {
     fn metadata(&self) -> Result<Metadata, FileSystemError>;
 }
 
 /// The trait that defines a filesystem.
-pub trait FileSystem {
+pub trait FileSystem: Sync + Send + Clone {
     /// Iterates over all entries of this directory path
     fn read_dir<P: AsRef<Path>>(
         &self,
@@ -47,10 +48,13 @@ pub trait FileSystem {
 
     /// Moves dir from _src to _dest
     fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError>;
+
+    /// Returns metadata of an entry by the given path
+    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError>;
 }
 
 /// File metadata. Not much more than type, length, and some timestamps
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct Metadata {
     pub is_dir: bool,
     pub is_file: bool,

@@ -4,12 +4,14 @@ use crate::cryptofs::{
 use rsfs::mem::FS;
 use rsfs::{DirEntry as DE, GenFS, OpenOptions};
 use std::ffi::OsString;
+use std::fmt::Debug;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::SystemTime;
 
 /// Simple implementation of in-memory filesystem
 /// Only for testing purposes
+#[derive(Clone)]
 pub struct MemoryFS {
     fs: FS,
 }
@@ -20,6 +22,7 @@ impl Default for MemoryFS {
     }
 }
 
+#[derive(Debug)]
 pub struct VirtualFile<F: rsfs::File> {
     f: F,
 }
@@ -30,7 +33,7 @@ impl<F: rsfs::File> VirtualFile<F> {
     }
 }
 
-impl<F: rsfs::File> File for VirtualFile<F> {
+impl<F: rsfs::File + Send + Sync> File for VirtualFile<F> {
     fn metadata(&self) -> Result<Metadata, FileSystemError> {
         Ok(metadata_from_rsfs(self.f.metadata()?))
     }
@@ -111,7 +114,15 @@ impl FileSystem for MemoryFS {
     }
 
     fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
-        Ok(Box::new(VirtualFile::new(self.fs.create_file(path)?)))
+        Ok(Box::new(VirtualFile::new(
+            self.fs
+                .new_openopts()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .create(true)
+                .open(path)?,
+        )))
     }
 
     fn exists<P: AsRef<Path>>(&self, path: P) -> bool {
@@ -143,5 +154,10 @@ impl FileSystem for MemoryFS {
         // implement the method for no reason.
         //TODO: implement this method
         unimplemented!()
+    }
+
+    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
+        let metadata = self.fs.metadata(path)?;
+        Ok(metadata_from_rsfs(metadata))
     }
 }

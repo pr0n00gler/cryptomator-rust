@@ -75,12 +75,14 @@ pub fn shorten_name<P: AsRef<str>>(name: P) -> String {
 }
 
 /// Contains reserved bytes and content key
+#[derive(Debug)]
 pub struct FileHeaderPayload {
     pub reserved: [u8; 8],
     pub content_key: [u8; 32],
 }
 
 /// Contains nonce, payload and mac
+#[derive(Debug)]
 pub struct FileHeader {
     pub nonce: [u8; 16],
     pub payload: FileHeaderPayload,
@@ -88,7 +90,7 @@ pub struct FileHeader {
 }
 
 /// The core crypto instance to encrypt/decrypt data
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct Cryptor {
     master_key: MasterKey,
 }

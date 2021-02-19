@@ -1,7 +1,10 @@
 use cryptomator::crypto;
 use cryptomator::cryptofs::{CryptoFS, FileSystem};
 use cryptomator::providers::{LocalFS, MemoryFS};
+use rand::distributions::Alphanumeric;
+use rand::{thread_rng, Rng};
 use std::io::Read;
+use std::path::Path;
 
 const TEST_STORAGE_PATH: &str = "tests/test_storage/d";
 const TEST_FILE_PATH: &str = "tests/lorem-ipsum.pdf";
@@ -59,7 +62,17 @@ fn test_crypto_fs_seek_and_read() {
 
 #[test]
 fn test_crypto_fs_write() {
-    let test_write_file: &str = "/test.dat";
+    crypto_fs_write("/test.dat");
+    let long_name: String = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(300)
+        .map(char::from)
+        .collect();
+    crypto_fs_write("/".to_string() + long_name.as_str());
+}
+
+fn crypto_fs_write<P: AsRef<Path>>(filename: P) {
+    let test_write_file: P = filename;
     let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
@@ -70,11 +83,11 @@ fn test_crypto_fs_write() {
         .map(|_| rand::random::<u8>())
         .collect();
 
-    let mut test_file = crypto_fs.create_file(test_write_file).unwrap();
+    let mut test_file = crypto_fs.create_file(&test_write_file).unwrap();
     test_file.write_all(random_data.as_slice()).unwrap();
     test_file.flush().unwrap();
 
-    let mut check_file = crypto_fs.open_file(test_write_file).unwrap();
+    let mut check_file = crypto_fs.open_file(&test_write_file).unwrap();
     let mut check_data: Vec<u8> = vec![];
     let count = check_file.read_to_end(&mut check_data).unwrap();
     assert_eq!(count, random_data.len());
@@ -85,7 +98,7 @@ fn test_crypto_fs_write() {
     for (i, b) in random_slice.iter().enumerate() {
         random_data[i + slice_offset] = *b
     }
-    let mut dat_file = crypto_fs.open_file(test_write_file).unwrap();
+    let mut dat_file = crypto_fs.open_file(&test_write_file).unwrap();
     dat_file
         .seek(std::io::SeekFrom::Start(slice_offset as u64))
         .unwrap();
@@ -97,25 +110,63 @@ fn test_crypto_fs_write() {
     assert_eq!(count, random_data.len());
     assert_eq!(check_data, random_data);
 
-    crypto_fs.remove_file(test_write_file).unwrap();
+    crypto_fs.remove_file(&test_write_file).unwrap();
 }
 
 #[test]
 fn test_crypto_fs_exists() {
+    crypto_fs_exists("/test.txt");
+    let long_name: String = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(300)
+        .map(char::from)
+        .collect();
+    crypto_fs_exists("/".to_string() + long_name.as_str());
+}
+
+fn crypto_fs_exists<P: AsRef<Path>>(filename: P) {
     let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
     let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
-    crypto_fs.create_file("/test.txt").unwrap();
+    crypto_fs.create_file(&filename).unwrap();
 
-    assert_eq!(crypto_fs.exists("/test.txt"), true);
+    assert_eq!(crypto_fs.exists(&filename), true);
     assert_eq!(crypto_fs.exists("/404.file"), false);
 }
 
 #[test]
 fn test_crypto_fs_remove_dir() {
+    crypto_fs_remove_dir(
+        vec![
+            "/dirs/to/remove/file1.dat",
+            "/dirs/to/remove/file2.dat",
+            "/dirs/to/remove/file3.dat",
+        ],
+        "/dirs/to/remove",
+        "/dirs",
+    );
+    let long_dir_name: String = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(300)
+        .map(char::from)
+        .collect();
+    let dir_to_remove = Path::new("/dirs/child/");
+    let dir_to_remove = dir_to_remove.join(long_dir_name.as_str());
+    crypto_fs_remove_dir(
+        vec![
+            dir_to_remove.join("file1.dat"),
+            dir_to_remove.join("file2.dat"),
+            dir_to_remove.join("file3.dat"),
+        ],
+        dir_to_remove,
+        Path::new("/dirs").to_path_buf(),
+    );
+}
+
+fn crypto_fs_remove_dir<P: AsRef<Path>>(files: Vec<P>, dir_to_remove: P, parent_dir: P) {
     //TODO: remake this test
     let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
@@ -123,35 +174,64 @@ fn test_crypto_fs_remove_dir() {
     let local_fs = MemoryFS::new();
     let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
-    let dir_to_remove = "/dirs/to/remove";
-    let files: [&str; 3] = [
-        "/dirs/to/remove/file1.dat",
-        "/dirs/to/remove/file2.dat",
-        "/dirs/to/remove/file3.dat",
-    ];
-
-    crypto_fs.create_dir(dir_to_remove).unwrap();
+    crypto_fs.create_dir(&dir_to_remove).unwrap();
     for f in files.iter() {
-        crypto_fs.create_file(*f).unwrap();
+        crypto_fs.create_file(f).unwrap();
     }
-    crypto_fs.remove_dir("/dirs").unwrap();
+    crypto_fs.remove_dir(&parent_dir).unwrap();
 
     assert_eq!(crypto_fs.exists(dir_to_remove), false);
     for f in files.iter() {
-        assert_eq!(crypto_fs.exists(*f), false);
+        assert_eq!(crypto_fs.exists(f), false);
     }
 }
 
 #[test]
 fn test_crypto_fs_copy_file() {
+    crypto_fs_copy_file("/test.pdf", "/test-copy.pdf", "/dir-to-copy");
+
+    let long_dir_name: String = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(300)
+        .map(char::from)
+        .collect();
+    let long_src_name: String = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(300)
+        .map(char::from)
+        .collect();
+    crypto_fs_copy_file(
+        "/".to_string() + long_src_name.as_str(),
+        "/test-copy.pdf".to_string(),
+        "/".to_string() + long_dir_name.as_str(),
+    );
+
+    let long_dir_name: String = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(300)
+        .map(char::from)
+        .collect();
+    let long_dst_name: String = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(300)
+        .map(char::from)
+        .collect();
+    crypto_fs_copy_file(
+        "/test.pdf".to_string(),
+        "/".to_string() + long_dst_name.as_str(),
+        "/".to_string() + long_dir_name.as_str(),
+    );
+}
+
+fn crypto_fs_copy_file<P: AsRef<Path>>(src_file: P, dst_file: P, dir: P) {
     let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
     let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
-    let file_to_copy = "/test.pdf";
-    let copied_file = "/test-copy.pdf";
+    let file_to_copy = &src_file;
+    let copied_file = &dst_file;
 
     let data: Vec<u8> = (0..32 * 1024 * 3 + 2465)
         .map(|_| rand::random::<u8>())
@@ -173,11 +253,11 @@ fn test_crypto_fs_copy_file() {
     assert_eq!(data, data_copy);
 
     //test copy to another folder
-    let dir_to_copy = "/dir-to-copy";
-    let copied_file_full_path = "/dir-to-copy/test-copy.pdf";
+    let dir_to_copy = dir.as_ref();
+    let copied_file_full_path = dir_to_copy.join(copied_file);
     crypto_fs.create_dir(dir_to_copy).unwrap();
     crypto_fs
-        .copy_file(file_to_copy, copied_file_full_path)
+        .copy_file(file_to_copy.as_ref(), copied_file_full_path.as_path())
         .unwrap();
     let mut file_copy2 = crypto_fs.open_file(copied_file_full_path).unwrap();
     let mut data_copy2: Vec<u8> = vec![];
@@ -190,14 +270,35 @@ fn test_crypto_fs_copy_file() {
 
 #[test]
 fn test_crypto_fs_move_file() {
+    crypto_fs_move_file("/test.dat", "test_moved.dat", "/dir_for_moved_file");
+
+    let long_dst_name: String = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(300)
+        .map(char::from)
+        .collect();
+    let long_src_name: String = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(300)
+        .map(char::from)
+        .collect();
+    crypto_fs_move_file(
+        "/".to_string() + long_src_name.as_str(),
+        long_dst_name,
+        "/dir_for_moved_file".to_string(),
+    );
+}
+
+fn crypto_fs_move_file<P: AsRef<Path>>(src_file: P, dst_file: P, dst_dir: P) {
     let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
     let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
-    let file_to_move = "/test.dat";
-    let moved_file = "/test_moved.dat";
+    let root = Path::new("/");
+    let file_to_move = &src_file;
+    let moved_file = root.join(&dst_file);
 
     let data: Vec<u8> = (0..32 * 1024 * 3 + 2465)
         .map(|_| rand::random::<u8>())
@@ -206,19 +307,22 @@ fn test_crypto_fs_move_file() {
     test_file.write_all(data.as_slice()).unwrap();
     test_file.flush().unwrap();
 
-    crypto_fs.move_file(file_to_move, moved_file).unwrap();
-    let mut check_file = crypto_fs.open_file(moved_file).unwrap();
+    crypto_fs
+        .move_file(file_to_move.as_ref(), moved_file.as_path())
+        .unwrap();
+    let mut check_file = crypto_fs.open_file(&moved_file).unwrap();
     let mut data_check: Vec<u8> = vec![];
     check_file.read_to_end(&mut data_check).unwrap();
     assert_eq!(data, data_check);
 
-    let dir_for_moved_file = "/dir_for_moved_file";
-    let moved_file_to_folder = "/dir_for_moved_file/test_moved_to_folder.dat";
+    let dir_for_moved_file = dst_dir.as_ref();
+    let moved_file_to_folder = dir_for_moved_file.join(&dst_file);
     crypto_fs.create_dir(dir_for_moved_file).unwrap();
 
     crypto_fs
-        .move_file(moved_file, moved_file_to_folder)
+        .move_file(&moved_file, &moved_file_to_folder)
         .unwrap();
+    println!("AAAA {}", moved_file_to_folder.to_str().unwrap_or_default());
     let mut check_file = crypto_fs.open_file(moved_file_to_folder).unwrap();
     let mut data_check: Vec<u8> = vec![];
     check_file.read_to_end(&mut data_check).unwrap();
@@ -229,28 +333,36 @@ fn test_crypto_fs_move_file() {
 
 #[test]
 fn test_crypto_fs_move_dir() {
+    crypto_fs_move_dir("dir1", "dir2", "test.dat", "/dest_dir");
+}
+
+fn crypto_fs_move_dir<P: AsRef<Path>>(dir1: P, child_dir: P, file: P, dst_dir: P) {
     let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
     let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
-    let dir_to_move = "/dir1";
-    let dirs_to_move = "/dir1/dir2";
-    let test_filename = "/dir1/dir2/test.dat";
-    let dest_dir = "/dest_dir";
-    let moved_file_path = "/dest_dir/dir2/test.dat";
+    let root = Path::new("/");
 
-    crypto_fs.create_dir(dirs_to_move).unwrap();
+    let dir_to_move = dir1.as_ref();
+    let dirs_to_move = dir_to_move.join(&child_dir);
+    let test_filename = &dirs_to_move.join(&file);
+    let dest_dir = dst_dir.as_ref();
+    let moved_file_path = dest_dir.join(child_dir.as_ref().join(file));
+
+    crypto_fs.create_dir(root.join(&dirs_to_move)).unwrap();
 
     let data: Vec<u8> = (0..32 * 1024 * 3 + 2465)
         .map(|_| rand::random::<u8>())
         .collect();
-    let mut test_file = crypto_fs.create_file(test_filename).unwrap();
+    let mut test_file = crypto_fs.create_file(root.join(&test_filename)).unwrap();
     test_file.write_all(data.as_slice()).unwrap();
     test_file.flush().unwrap();
 
-    crypto_fs.move_dir(dir_to_move, dest_dir).unwrap();
+    crypto_fs
+        .move_dir(root.join(dir_to_move).as_path(), dest_dir)
+        .unwrap();
     let mut check_file = crypto_fs.open_file(moved_file_path).unwrap();
     let mut data_check: Vec<u8> = vec![];
     check_file.read_to_end(&mut data_check).unwrap();
@@ -258,19 +370,21 @@ fn test_crypto_fs_move_dir() {
     crypto_fs.remove_dir(dest_dir).unwrap();
 
     //test move folder into folder
-    let moved_file_path = "/dest_dir/dir1/dir2/test.dat";
+    let moved_file_path = dest_dir.join(&test_filename);
 
-    crypto_fs.create_dir(dirs_to_move).unwrap();
+    crypto_fs.create_dir(root.join(dirs_to_move)).unwrap();
     crypto_fs.create_dir(dest_dir).unwrap();
 
     let data: Vec<u8> = (0..32 * 1024 * 3 + 2465)
         .map(|_| rand::random::<u8>())
         .collect();
-    let mut test_file = crypto_fs.create_file(test_filename).unwrap();
+    let mut test_file = crypto_fs.create_file(root.join(test_filename)).unwrap();
     test_file.write_all(data.as_slice()).unwrap();
     test_file.flush().unwrap();
 
-    crypto_fs.move_dir(dir_to_move, dest_dir).unwrap();
+    crypto_fs
+        .move_dir(root.join(dir_to_move).as_path(), dest_dir)
+        .unwrap();
     let mut check_file = crypto_fs.open_file(moved_file_path).unwrap();
     let mut data_check: Vec<u8> = vec![];
     check_file.read_to_end(&mut data_check).unwrap();

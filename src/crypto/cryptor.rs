@@ -19,7 +19,6 @@ use crate::crypto::common::clone_into_array;
 use crate::crypto::error::CryptoError::{InvalidFileChunkLength, InvalidFileHeaderLength};
 use hmac::{Hmac, Mac, NewMac};
 use sha2::Sha256;
-use std::path::Path;
 
 type HmacSha256 = Hmac<Sha256>;
 

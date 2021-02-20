@@ -322,7 +322,6 @@ fn crypto_fs_move_file<P: AsRef<Path>>(src_file: P, dst_file: P, dst_dir: P) {
     crypto_fs
         .move_file(&moved_file, &moved_file_to_folder)
         .unwrap();
-    println!("AAAA {}", moved_file_to_folder.to_str().unwrap_or_default());
     let mut check_file = crypto_fs.open_file(moved_file_to_folder).unwrap();
     let mut data_check: Vec<u8> = vec![];
     check_file.read_to_end(&mut data_check).unwrap();
@@ -334,6 +333,30 @@ fn crypto_fs_move_file<P: AsRef<Path>>(src_file: P, dst_file: P, dst_dir: P) {
 #[test]
 fn test_crypto_fs_move_dir() {
     crypto_fs_move_dir("dir1", "dir2", "test.dat", "/dest_dir");
+
+    let long_dir1_name: String = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(300)
+        .map(char::from)
+        .collect();
+    let long_dir2_name: String = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(300)
+        .map(char::from)
+        .collect();
+    let long_file_name: String = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(300)
+        .map(char::from)
+        .collect();
+    let dest_dir = "/dest_dir";
+
+    crypto_fs_move_dir(
+        long_dir1_name,
+        long_dir2_name,
+        long_file_name,
+        dest_dir.to_string(),
+    );
 }
 
 fn crypto_fs_move_dir<P: AsRef<Path>>(dir1: P, child_dir: P, file: P, dst_dir: P) {

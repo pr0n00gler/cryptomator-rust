@@ -1586,8 +1586,7 @@ checksum = "b5eb417147ba9860a96cfe72a0b93bf88fee1744b5636ec99ab20c1aa9376581"
 [[package]]
 name = "rsfs"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "101969b02a54a072eaa40591765fa61d54e30bed4c7dfa7f3006380600546be6"
+source = "git+https://github.com/programmer10110/rsfs#ac8be01e6308d4fcaa08790c57fcc9a2f4b45ae2"
 dependencies = [
  "parking_lot 0.4.8",
 ]

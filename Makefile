@@ -8,7 +8,7 @@ test:
 	cargo test
 
 build: clippy test
-	cargo build
+	cargo build --release
 
-run: build
+run:
 	cargo run

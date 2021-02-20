@@ -9,6 +9,7 @@ use crate::cryptofs::{
     FileSystemError,
 };
 use failure::AsFail;
+use lru::LruCache;
 use std::cmp::Ordering;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -28,6 +29,10 @@ const FULL_NAME_FILENAME: &str = "name.c9s";
 const CONTENTS_FILENAME: &str = "contents.c9r";
 
 const MAX_FILENAME_LENGTH: usize = 220;
+
+// TODO: make configurable
+/// Chunk cache capacity for per files
+const CHUNK_CACHE_CAP: usize = 2;
 
 pub struct CryptoPath {
     full_path: PathBuf,
@@ -493,6 +498,9 @@ pub struct CryptoFSFile {
 
     /// Metadata of the file
     metadata: Metadata,
+
+    /// Stores the most frequently used chunks of the file to decrease read operations
+    chunk_cache: lru::LruCache<u64, Vec<u8>>,
 }
 
 impl<'gc> CryptoFSFile {
@@ -521,6 +529,7 @@ impl<'gc> CryptoFSFile {
                 len: calculate_cleartext_size(metadata.len),
                 ..metadata
             },
+            chunk_cache: LruCache::new(CHUNK_CACHE_CAP),
         })
     }
 
@@ -543,6 +552,7 @@ impl<'gc> CryptoFSFile {
             current_pos: 0,
             header,
             metadata,
+            chunk_cache: LruCache::new(CHUNK_CACHE_CAP),
         })
     }
 
@@ -564,6 +574,10 @@ impl<'gc> CryptoFSFile {
 
     /// Reads and returns cleartext chunk of the data.
     fn read_chunk(&mut self, chunk_index: u64) -> Result<Vec<u8>, FileSystemError> {
+        if self.chunk_cache.contains(&chunk_index) {
+            let chunk = self.chunk_cache.get(&chunk_index).unwrap();
+            return Ok(chunk.clone());
+        }
         self.rfs_file.seek(SeekFrom::Start(
             (chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
         ))?;
@@ -572,12 +586,14 @@ impl<'gc> CryptoFSFile {
         if read_bytes == 0 {
             return Ok(vec![0; 0]);
         }
-        Ok(self.cryptor.decrypt_chunk(
+        let decrypted_chunk = self.cryptor.decrypt_chunk(
             &self.header.nonce,
             &self.header.payload.content_key,
             chunk_index as usize,
             &chunk[..read_bytes],
-        )?)
+        )?;
+        self.chunk_cache.put(chunk_index, decrypted_chunk.clone());
+        Ok(decrypted_chunk)
     }
 }
 
@@ -691,6 +707,7 @@ impl Write for CryptoFSFile {
                 chunk = buf_chunk;
             }
 
+            self.chunk_cache.put(chunk_index, chunk.clone());
             let encrypted_chunk = match self.cryptor.encrypt_chunk(
                 &self.header.nonce,
                 &self.header.payload.content_key,

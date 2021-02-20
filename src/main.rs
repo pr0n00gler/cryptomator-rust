@@ -3,13 +3,13 @@ use cryptomator::cryptofs::CryptoFS;
 use cryptomator::frontends::webdav::WebDav;
 use cryptomator::logging::init_logger;
 use cryptomator::providers::LocalFS;
+use std::convert::Infallible;
 
-use bytes::Bytes;
-use futures01::{future::Future, stream::Stream};
-use log::{error, info};
+use log::info;
 use webdav_handler::{fakels::FakeLs, DavHandler};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let _log = init_logger();
     let local_fs = LocalFS::new();
     let master_key =
@@ -20,26 +20,25 @@ fn main() {
 
     let addr = ([127, 0, 0, 1], 4919).into();
 
-    let dav_server = DavHandler::new(None, Box::new(webdav), Some(FakeLs::new()));
-    let make_service = move || {
+    let dav_server = DavHandler::builder()
+        .filesystem(Box::new(webdav))
+        .locksystem(FakeLs::new())
+        .build_handler();
+
+    let make_service = hyper::service::make_service_fn(move |_| {
         let dav_server = dav_server.clone();
-        hyper::service::service_fn(move |req: hyper::Request<hyper::Body>| {
-            let (parts, body) = req.into_parts();
-            let body = body.map(Bytes::from);
-            let req = http::Request::from_parts(parts, body);
-            let fut = dav_server.handle(req).and_then(|resp| {
-                let (parts, body) = resp.into_parts();
-                let body = hyper::Body::wrap_stream(body);
-                Ok(hyper::Response::from_parts(parts, body))
-            });
-            Box::new(fut)
-        })
-    };
+        async move {
+            let func = move |req| {
+                let dav_server = dav_server.clone();
+                async move { Ok::<_, Infallible>(dav_server.handle(req).await) }
+            };
+            Ok::<_, Infallible>(hyper::service::service_fn(func))
+        }
+    });
 
-    info!("Serving {}", addr);
-    let server = hyper::Server::bind(&addr)
+    info!("Listening on {:?}", addr);
+    let _ = hyper::Server::bind(&addr)
         .serve(make_service)
-        .map_err(|e| error!("server error: {}", e));
-
-    hyper::rt::run(server);
+        .await
+        .map_err(|e| eprintln!("server error: {}", e));
 }

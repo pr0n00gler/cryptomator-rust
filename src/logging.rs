@@ -3,7 +3,7 @@ use std::env;
 
 pub fn init_logger() -> (slog_scope::GlobalLoggerGuard, slog_async::AsyncGuard) {
     if env::var("RUST_LOG").is_err() {
-        env::set_var("RUST_LOG", "info")
+        env::set_var("RUST_LOG", "debug")
     }
     let decorator = slog_term::TermDecorator::new().build();
     let term_drain = slog_term::FullFormat::new(decorator).build().fuse();

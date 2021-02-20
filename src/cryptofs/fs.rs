@@ -272,7 +272,7 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
                 .read_dir(real_path)?
                 .map(|de| {
                     self.virtual_dir_entry_from_real(de, dir_id.as_slice())
-                        .unwrap()
+                        .unwrap_or_default()
                 })
                 .collect::<Vec<DirEntry>>()
                 .into_iter(),

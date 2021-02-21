@@ -45,7 +45,10 @@ pub fn last_path_component<S: AsRef<Path>>(path: S) -> Result<PathBuf, FileSyste
 /// ```
 /// use cryptomator::cryptofs::parent_path;
 /// let parent = parent_path("/a/b/c/d");
+/// #[cfg(unix)]
 /// assert_eq!("/a/b/c", parent.to_str().unwrap_or_default());
+/// #[cfg(windows)]
+/// assert_eq!("\\a\\b\\c", parent.to_str().unwrap_or_default());
 /// ```
 pub fn parent_path<S: AsRef<Path>>(path: S) -> PathBuf {
     let components = std::path::Path::new(path.as_ref())

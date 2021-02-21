@@ -16,7 +16,7 @@ const DEFAULT_MASTER_KEY_FILE: &str = "masterkey.cryptomator";
 const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
 
 #[derive(Clap)]
-#[clap(version = "1.0", author = "pr0n00gler <pr0n00gler@yandex.ru>")]
+#[clap(version = "0.1.0", author = "pr0n00gler <pr0n00gler@yandex.ru>")]
 struct Opts {
     /// Path to a storage
     #[clap(short, long)]

@@ -23,6 +23,7 @@ This project is in an early stage and not ready for production use. We recommend
 * FUSE/Dokan support to mount vaults as a virtual filesystem
 * Dropbox, Google Drive, OneDrive and other cloud storages to work with without synchronize with a local directory
 * GUI
+* Log coverage
 
 ## Building
 

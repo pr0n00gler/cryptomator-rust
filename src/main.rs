@@ -36,7 +36,10 @@ struct Opts {
 
 #[derive(Clap)]
 enum Command {
+    /// Unlocks a vault
     Unlock(Unlock),
+
+    /// Creates a new vault at the given path
     Create(Create),
 }
 

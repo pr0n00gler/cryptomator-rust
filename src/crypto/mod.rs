@@ -9,4 +9,4 @@ pub use self::cryptor::{
 };
 pub use self::error::CryptoError;
 pub use self::error::MasterKeyError;
-pub use self::masterkey::MasterKey;
+pub use self::masterkey::{MasterKey, MasterKeyJson};

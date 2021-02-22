@@ -1,4 +1,4 @@
-use cryptomator::crypto::{Cryptor, MasterKey};
+use cryptomator::crypto::{Cryptor, MasterKey, MasterKeyJson};
 use cryptomator::cryptofs::CryptoFS;
 use cryptomator::frontends::webdav::WebDav;
 use cryptomator::logging::init_logger;
@@ -8,37 +8,146 @@ use std::convert::Infallible;
 use log::info;
 use webdav_handler::{fakels::FakeLs, DavHandler};
 
+use clap::Clap;
+use std::env;
+use std::net::SocketAddr;
+
+const DEFAULT_MASTER_KEY_FILE: &str = "masterkey.cryptomator";
+const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
+
+#[derive(Clap)]
+#[clap(version = "0.1.0", author = "pr0n00gler <pr0n00gler@yandex.ru>")]
+struct Opts {
+    /// Path to a storage
+    #[clap(short, long)]
+    storage_path: String,
+
+    /// Path to a masterkey file. By default in the storage directory
+    #[clap(short, long)]
+    master_key_path: Option<String>,
+
+    /// Log level
+    #[clap(short, long, default_value = "info")]
+    log_level: String,
+
+    #[clap(subcommand)]
+    subcmd: Command,
+}
+
+#[derive(Clap)]
+enum Command {
+    /// Unlocks a vault
+    Unlock(Unlock),
+
+    /// Creates a new vault at the given path
+    Create(Create),
+}
+
+#[derive(Clap)]
+struct Create {
+    /// The Scrypt parameter N
+    #[clap(default_value = "16384")]
+    scrypt_cost: u64,
+
+    /// The Scrypt parameter r
+    #[clap(default_value = "8")]
+    scrypt_block_size: u32,
+}
+
+#[derive(Clap)]
+struct Unlock {
+    /// Webdav-server listen address
+    #[clap(short, long, default_value = "127.0.0.1:4918")]
+    webdav_listen_address: String,
+}
+
 #[tokio::main]
 async fn main() {
+    let opts: Opts = Opts::parse();
+
+    env::set_var("RUST_LOG", opts.log_level);
     let _log = init_logger();
-    let local_fs = LocalFS::new();
-    let master_key =
-        MasterKey::from_file("tests/test_storage/masterkey.cryptomator", "12345678").unwrap();
-    let cryptor = Cryptor::new(master_key);
-    let crypto_fs = CryptoFS::new("tests/test_storage/d", cryptor, local_fs).unwrap();
-    let webdav = WebDav::new(crypto_fs);
 
-    let addr = ([127, 0, 0, 1], 4919).into();
+    let storage_path = std::path::Path::new(opts.storage_path.as_str()).to_path_buf();
 
-    let dav_server = DavHandler::builder()
-        .filesystem(Box::new(webdav))
-        .locksystem(FakeLs::new())
-        .build_handler();
+    let mk_path = match opts.master_key_path {
+        Some(m) => std::path::Path::new(m.as_str()).to_path_buf(),
+        None => storage_path.join(DEFAULT_MASTER_KEY_FILE),
+    };
 
-    let make_service = hyper::service::make_service_fn(move |_| {
-        let dav_server = dav_server.clone();
-        async move {
-            let func = move |req| {
-                let dav_server = dav_server.clone();
-                async move { Ok::<_, Infallible>(dav_server.handle(req).await) }
-            };
-            Ok::<_, Infallible>(hyper::service::service_fn(func))
+    let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
+
+    match opts.subcmd {
+        Command::Create(c) => {
+            let pass = rpassword::prompt_password_stdout("Master key password: ")
+                .expect("Unable to read password");
+
+            info!("Generating master key...");
+            let mk_json = MasterKeyJson::create(pass.as_str(), c.scrypt_cost, c.scrypt_block_size)
+                .expect("Failed to generate master key file");
+            info!("Master key generated!");
+
+            info!("Saving master key to a file...");
+            let mk_file =
+                std::fs::File::create(mk_path).expect("Failed to create file for the master key");
+            serde_json::to_writer(mk_file, &mk_json).expect("Failed to write master key file");
+            info!("Master key saved!");
+
+            std::fs::create_dir(full_storage_path)
+                .expect("Failed to create folder for the storage");
         }
-    });
+        Command::Unlock(u) => {
+            let local_fs = LocalFS::new();
+            let pass = rpassword::prompt_password_stdout("Master key password: ")
+                .expect("Unable to read password");
+            info!("Unlocking the storage...");
 
-    info!("Listening on {:?}", addr);
-    let _ = hyper::Server::bind(&addr)
-        .serve(make_service)
-        .await
-        .map_err(|e| eprintln!("server error: {}", e));
+            info!("Deriving keys...");
+
+            let mk_file = std::fs::File::open(mk_path).unwrap();
+            let master_key = MasterKey::from_reader(mk_file, pass.as_str())
+                .expect("Failed to decrypt master key file");
+            info!("Keys derived!");
+
+            let cryptor = Cryptor::new(master_key);
+            let crypto_fs = CryptoFS::new(
+                full_storage_path
+                    .to_str()
+                    .expect("Failed to convert Path to &str"),
+                cryptor,
+                local_fs,
+            )
+            .expect("Failed to unblock storage");
+            info!("Storage unlocked!");
+
+            info!("Starting WebDav server...");
+            let webdav = WebDav::new(crypto_fs);
+
+            let addr: SocketAddr = u
+                .webdav_listen_address
+                .parse()
+                .expect("Unable to parse webdav listen address");
+            let dav_server = DavHandler::builder()
+                .filesystem(Box::new(webdav))
+                .locksystem(FakeLs::new())
+                .build_handler();
+
+            let make_service = hyper::service::make_service_fn(move |_| {
+                let dav_server = dav_server.clone();
+                async move {
+                    let func = move |req| {
+                        let dav_server = dav_server.clone();
+                        async move { Ok::<_, Infallible>(dav_server.handle(req).await) }
+                    };
+                    Ok::<_, Infallible>(hyper::service::service_fn(func))
+                }
+            });
+
+            info!("WebDav server started on {:?}", addr);
+            let _ = hyper::Server::bind(&addr)
+                .serve(make_service)
+                .await
+                .map_err(|e| eprintln!("server error: {}", e));
+        }
+    }
 }

@@ -14,7 +14,8 @@ const VFS_STORAGE_PATH: &str = "/";
 
 #[test]
 fn test_crypto_fs_seek_and_read() {
-    let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
+    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = LocalFS::new();
@@ -73,7 +74,8 @@ fn test_crypto_fs_write() {
 
 fn crypto_fs_write<P: AsRef<Path>>(filename: P) {
     let test_write_file: P = filename;
-    let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
+    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
@@ -125,7 +127,8 @@ fn test_crypto_fs_exists() {
 }
 
 fn crypto_fs_exists<P: AsRef<Path>>(filename: P) {
-    let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
+    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
@@ -168,7 +171,8 @@ fn test_crypto_fs_remove_dir() {
 
 fn crypto_fs_remove_dir<P: AsRef<Path>>(files: Vec<P>, dir_to_remove: P, parent_dir: P) {
     //TODO: remake this test
-    let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
+    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
@@ -224,7 +228,8 @@ fn test_crypto_fs_copy_file() {
 }
 
 fn crypto_fs_copy_file<P: AsRef<Path>>(src_file: P, dst_file: P, dir: P) {
-    let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
+    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
@@ -290,7 +295,8 @@ fn test_crypto_fs_move_file() {
 }
 
 fn crypto_fs_move_file<P: AsRef<Path>>(src_file: P, dst_file: P, dst_dir: P) {
-    let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
+    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();
@@ -360,7 +366,8 @@ fn test_crypto_fs_move_dir() {
 }
 
 fn crypto_fs_move_dir<P: AsRef<Path>>(dir1: P, child_dir: P, file: P, dst_dir: P) {
-    let mk = crypto::MasterKey::from_file(PATH_TO_MASTER_KEY, DEFAULT_PASSWORD).unwrap();
+    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
+    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
     let local_fs = MemoryFS::new();

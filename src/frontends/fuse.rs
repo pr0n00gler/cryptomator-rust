@@ -3,7 +3,7 @@ use fuse::{
     FileAttr, FileType, Filesystem as FuseFS, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
     Request, FUSE_ROOT_ID,
 };
-use libc::ENOENT;
+use libc::{ENOENT, EOF};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::{Read, SeekFrom};
@@ -24,6 +24,7 @@ fn systime_to_timespec(s: SystemTime) -> Timespec {
 pub struct FUSE<FS: FileSystem> {
     free_inodes: Vec<u64>,
     inode_to_entry: HashMap<u64, PathBuf>,
+    entry_to_inode: HashMap<PathBuf, u64>,
     crypto_fs: CryptoFS<FS>,
     last_inode: u64,
 }
@@ -31,10 +32,15 @@ pub struct FUSE<FS: FileSystem> {
 impl<FS: FileSystem> FUSE<FS> {
     pub fn new(crypto_fs: CryptoFS<FS>) -> FUSE<FS> {
         let mut inode_to_entry: HashMap<u64, PathBuf> = HashMap::new();
-        inode_to_entry.insert(FUSE_ROOT_ID, PathBuf::new());
+        inode_to_entry.insert(FUSE_ROOT_ID, std::path::Path::new("/").to_path_buf());
+
+        let mut entry_to_inode: HashMap<PathBuf, u64> = HashMap::new();
+        entry_to_inode.insert(std::path::Path::new("/").to_path_buf(), FUSE_ROOT_ID);
+
         FUSE {
             free_inodes: vec![],
-            inode_to_entry: inode_to_entry.clone(),
+            inode_to_entry,
+            entry_to_inode,
             crypto_fs,
             last_inode: 1,
         }
@@ -43,9 +49,8 @@ impl<FS: FileSystem> FUSE<FS> {
 
 impl<FS: FileSystem> FuseFS for FUSE<FS> {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        println!("LOOKUP {} {}", parent, name.to_str().unwrap());
         let entry_name = if let Some(e) = self.inode_to_entry.get(&parent) {
-            e
+            e.clone()
         } else {
             reply.error(ENOENT);
             return;
@@ -68,7 +73,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                 true => FileType::RegularFile,
                 false => FileType::Directory,
             },
-            perm: 0,
+            perm: 0o755,
             nlink: 0,
             uid: 0,
             gid: 0,
@@ -76,11 +81,14 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             flags: 0,
         };
         self.last_inode += 1;
+        self.inode_to_entry
+            .insert(self.last_inode, entry_name.join(name));
+        self.entry_to_inode
+            .insert(entry_name.join(name), self.last_inode);
         reply.entry(&TTL, &attr, 0);
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        println!("GETATTR {}", ino);
         let entry_name = if let Some(e) = self.inode_to_entry.get(&ino) {
             e
         } else {
@@ -100,7 +108,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                 true => FileType::RegularFile,
                 false => FileType::Directory,
             },
-            perm: 0,
+            perm: 0o777,
             nlink: 0,
             uid: 0,
             gid: 0,
@@ -119,7 +127,6 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
         _size: u32,
         reply: ReplyData,
     ) {
-        println!("READ {}", ino);
         let entry_name = if let Some(e) = self.inode_to_entry.get(&ino) {
             e
         } else {
@@ -129,13 +136,12 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
         let mut f = self.crypto_fs.open_file(entry_name).unwrap();
         f.seek(SeekFrom::Start(offset as u64)).unwrap();
         let mut data = vec![0u8; _size as usize];
-        if let Err(e) = f.read_exact(data.as_mut_slice()) {
-            if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                reply.error(libc::EOF);
-                return;
-            }
-        }
-        reply.data(data.as_slice());
+        if let Ok(n) = f.read(data.as_mut_slice()) {
+            reply.data(&data.as_slice()[..n]);
+        } else {
+            reply.error(EOF);
+            return;
+        };
     }
 
     fn readdir(
@@ -146,7 +152,6 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        println!("READDIR {}", ino);
         let entry_name = if let Some(e) = self.inode_to_entry.get(&ino) {
             e.clone()
         } else {
@@ -154,11 +159,21 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             return;
         };
         let entries = self.crypto_fs.read_dir(&entry_name).unwrap();
-        for (i, entry) in entries.enumerate() {
-            self.inode_to_entry
-                .insert(self.last_inode + 1, entry_name.join(&entry.file_name));
+        for (i, entry) in entries.enumerate().skip(offset as usize) {
+            let inode: u64;
+
+            if let Some(i) = self.entry_to_inode.get(&entry_name.join(&entry.file_name)) {
+                inode = *i;
+            } else {
+                inode = self.last_inode + 1;
+                self.inode_to_entry
+                    .insert(inode, entry_name.join(&entry.file_name));
+                self.entry_to_inode
+                    .insert(entry_name.join(&entry.file_name), inode);
+                self.last_inode += 1;
+            }
             reply.add(
-                self.last_inode + 1,
+                inode,
                 (i + 1) as i64,
                 match entry.metadata.is_file {
                     true => FileType::RegularFile,
@@ -166,7 +181,6 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                 },
                 entry.file_name,
             );
-            self.last_inode += 1;
         }
         reply.ok()
     }

@@ -1,16 +1,14 @@
 use cryptomator::crypto::{Cryptor, MasterKey, MasterKeyJson};
 use cryptomator::cryptofs::CryptoFS;
-use cryptomator::frontends::webdav::WebDav;
 use cryptomator::logging::init_logger;
 use cryptomator::providers::LocalFS;
-use std::convert::Infallible;
 
 use log::info;
-use webdav_handler::{fakels::FakeLs, DavHandler};
 
 use clap::Clap;
+
+use cryptomator::frontends::mount::*;
 use std::env;
-use std::net::SocketAddr;
 
 const DEFAULT_MASTER_KEY_FILE: &str = "masterkey.cryptomator";
 const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
@@ -59,6 +57,16 @@ struct Unlock {
     /// Webdav-server listen address
     #[clap(short, long, default_value = "127.0.0.1:4918")]
     webdav_listen_address: String,
+
+    /// Mountpoint for mounting FUSE filesystem (and Dokan in the future)
+    #[cfg(unix)]
+    #[clap(short, long)]
+    mountpoint: Option<String>,
+
+    /// Options for the FUSE module
+    #[cfg(unix)]
+    #[clap(short, long, default_value = "-o ro -o fsname=hello")]
+    fuse_options: String,
 }
 
 #[tokio::main]
@@ -120,34 +128,14 @@ async fn main() {
             .expect("Failed to unblock storage");
             info!("Storage unlocked!");
 
+            #[cfg(unix)]
+            if let Some(mountpoint) = u.mountpoint {
+                mount_fuse(mountpoint, u.fuse_options, crypto_fs);
+                return;
+            }
+
             info!("Starting WebDav server...");
-            let webdav = WebDav::new(crypto_fs);
-
-            let addr: SocketAddr = u
-                .webdav_listen_address
-                .parse()
-                .expect("Unable to parse webdav listen address");
-            let dav_server = DavHandler::builder()
-                .filesystem(Box::new(webdav))
-                .locksystem(FakeLs::new())
-                .build_handler();
-
-            let make_service = hyper::service::make_service_fn(move |_| {
-                let dav_server = dav_server.clone();
-                async move {
-                    let func = move |req| {
-                        let dav_server = dav_server.clone();
-                        async move { Ok::<_, Infallible>(dav_server.handle(req).await) }
-                    };
-                    Ok::<_, Infallible>(hyper::service::service_fn(func))
-                }
-            });
-
-            info!("WebDav server started on {:?}", addr);
-            let _ = hyper::Server::bind(&addr)
-                .serve(make_service)
-                .await
-                .map_err(|e| eprintln!("server error: {}", e));
+            mount_webdav(u.webdav_listen_address, crypto_fs).await;
         }
     }
 }

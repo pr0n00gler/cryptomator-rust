@@ -1,9 +1,10 @@
 use crate::cryptofs::{CryptoFS, FileSystem};
+use failure::AsFail;
 use fuse::{
     FileAttr, FileType, Filesystem as FuseFS, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
     Request, FUSE_ROOT_ID,
 };
-use libc::{ENOENT, EOF};
+use libc::{EIO, ENOENT, EOF};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::{Read, SeekFrom};
@@ -22,7 +23,6 @@ fn systime_to_timespec(s: SystemTime) -> Timespec {
 }
 
 pub struct FUSE<FS: FileSystem> {
-    free_inodes: Vec<u64>,
     inode_to_entry: HashMap<u64, PathBuf>,
     entry_to_inode: HashMap<PathBuf, u64>,
     crypto_fs: CryptoFS<FS>,
@@ -38,7 +38,6 @@ impl<FS: FileSystem> FUSE<FS> {
         entry_to_inode.insert(std::path::Path::new("/").to_path_buf(), FUSE_ROOT_ID);
 
         FUSE {
-            free_inodes: vec![],
             inode_to_entry,
             entry_to_inode,
             crypto_fs,
@@ -52,14 +51,21 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
         let entry_name = if let Some(e) = self.inode_to_entry.get(&parent) {
             e.clone()
         } else {
+            error!("Inode {} does not exist", parent);
             reply.error(ENOENT);
             return;
         };
-        let entry = if let Ok(m) = self.crypto_fs.metadata(entry_name.join(name)) {
-            m
-        } else {
-            reply.error(ENOENT);
-            return;
+        let entry = match self.crypto_fs.metadata(entry_name.join(name)) {
+            Ok(m) => m,
+            Err(e) => {
+                error!(
+                    "Failed to get metadata of a file {}: {}",
+                    entry_name.join(name).display(),
+                    e.as_fail()
+                );
+                reply.error(ENOENT);
+                return;
+            }
         };
         let attr = FileAttr {
             ino: self.last_inode + 1,
@@ -92,10 +98,22 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
         let entry_name = if let Some(e) = self.inode_to_entry.get(&ino) {
             e
         } else {
+            error!("Inode {} does not exist", ino);
             reply.error(ENOENT);
             return;
         };
-        let entry = self.crypto_fs.metadata(entry_name).unwrap();
+        let entry = match self.crypto_fs.metadata(entry_name) {
+            Ok(m) => m,
+            Err(e) => {
+                error!(
+                    "Failed to get metadata of a file {}: {}",
+                    entry_name.display(),
+                    e.as_fail()
+                );
+                reply.error(ENOENT);
+                return;
+            }
+        };
         let attr = FileAttr {
             ino,
             size: entry.len,
@@ -130,18 +148,35 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
         let entry_name = if let Some(e) = self.inode_to_entry.get(&ino) {
             e
         } else {
+            error!("Inode {} does not exist", ino);
             reply.error(ENOENT);
             return;
         };
-        let mut f = self.crypto_fs.open_file(entry_name).unwrap();
-        f.seek(SeekFrom::Start(offset as u64)).unwrap();
-        let mut data = vec![0u8; _size as usize];
-        if let Ok(n) = f.read(data.as_mut_slice()) {
-            reply.data(&data.as_slice()[..n]);
-        } else {
-            reply.error(EOF);
-            return;
+        let mut f = match self.crypto_fs.open_file(entry_name) {
+            Ok(f) => f,
+            Err(e) => {
+                error!(
+                    "Failed to open file {}: {}",
+                    entry_name.display(),
+                    e.as_fail()
+                );
+                reply.error(ENOENT);
+                return;
+            }
         };
+        if let Some(e) = f.seek(SeekFrom::Start(offset as u64)).err() {
+            error!("Failed to seek file: {}", e.as_fail());
+            reply.error(EIO);
+            return;
+        }
+        let mut data = vec![0u8; _size as usize];
+        match f.read(data.as_mut_slice()) {
+            Ok(n) => reply.data(&data.as_slice()[..n]),
+            Err(e) => {
+                error!("Failed to read file: {}", e.as_fail());
+                reply.error(EOF);
+            }
+        }
     }
 
     fn readdir(
@@ -155,10 +190,22 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
         let entry_name = if let Some(e) = self.inode_to_entry.get(&ino) {
             e.clone()
         } else {
+            error!("Inode {} does not exist", ino);
             reply.error(ENOENT);
             return;
         };
-        let entries = self.crypto_fs.read_dir(&entry_name).unwrap();
+        let entries = match self.crypto_fs.read_dir(&entry_name) {
+            Ok(e) => e,
+            Err(e) => {
+                error!(
+                    "Failed to read dir {}: {}",
+                    entry_name.display(),
+                    e.as_fail()
+                );
+                reply.error(ENOENT);
+                return;
+            }
+        };
         for (i, entry) in entries.enumerate().skip(offset as usize) {
             let inode: u64;
 

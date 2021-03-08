@@ -1,10 +1,12 @@
 use crate::cryptofs::{CryptoFS, FileSystem};
 use crate::frontends::webdav::WebDav;
 use std::convert::Infallible;
-use std::ffi::OsStr;
 use std::net::SocketAddr;
 use webdav_handler::fakels::FakeLs;
 use webdav_handler::DavHandler;
+
+#[cfg(unix)]
+use std::ffi::OsStr;
 
 #[cfg(unix)]
 use crate::frontends::fuse::FUSE;

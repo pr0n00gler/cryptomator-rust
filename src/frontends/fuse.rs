@@ -1,13 +1,13 @@
 use crate::cryptofs::{CryptoFS, FileSystem};
 use failure::AsFail;
 use fuse::{
-    FileAttr, FileType, Filesystem as FuseFS, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
-    Request, FUSE_ROOT_ID,
+    FileAttr, FileType, Filesystem as FuseFS, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    ReplyEntry, ReplyStatfs, ReplyWrite, Request, FUSE_ROOT_ID,
 };
 use libc::{EIO, ENOENT, EOF};
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::io::{Read, SeekFrom};
+use std::io::{Read, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use time::Timespec;
@@ -79,7 +79,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                 true => FileType::RegularFile,
                 false => FileType::Directory,
             },
-            perm: 0o755,
+            perm: 0o777,
             nlink: 0,
             uid: 0,
             gid: 0,
@@ -230,5 +230,89 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             );
         }
         reply.ok()
+    }
+
+    fn write(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        data: &[u8],
+        _flags: u32,
+        reply: ReplyWrite,
+    ) {
+        let entry_name = if let Some(e) = self.inode_to_entry.get(&ino) {
+            e
+        } else {
+            error!("Inode {} does not exist", ino);
+            reply.error(ENOENT);
+            return;
+        };
+        let mut f = match self.crypto_fs.open_file(entry_name) {
+            Ok(f) => f,
+            Err(e) => {
+                error!(
+                    "Failed to open file {}: {}",
+                    entry_name.display(),
+                    e.as_fail()
+                );
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        if let Some(e) = f.seek(SeekFrom::Start(offset as u64)).err() {
+            error!("Failed to seek file: {}", e.as_fail());
+            reply.error(EIO);
+            return;
+        }
+        match f.write(data) {
+            Ok(n) => reply.written(n as u32),
+            Err(e) => {
+                error!("Failed to read file: {}", e.as_fail());
+                reply.error(EOF);
+            }
+        }
+    }
+
+    fn create(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _flags: u32,
+        reply: ReplyCreate,
+    ) {
+        let parent_path = if let Some(p) = self.inode_to_entry.get(&parent) {
+            p
+        } else {
+            error!("Inode {} does not exist", parent);
+            reply.error(ENOENT);
+            return;
+        };
+        let entry_path = parent_path.join(name);
+        let f = self.crypto_fs.create_file(entry_path).unwrap();
+        let attr = FileAttr {
+            ino: self.last_inode + 1,
+            size: f.metadata().unwrap().len,
+            blocks: 0,
+            atime: systime_to_timespec(f.metadata().unwrap().accessed),
+            mtime: systime_to_timespec(f.metadata().unwrap().modified),
+            ctime: systime_to_timespec(f.metadata().unwrap().created),
+            crtime: Timespec::new(0, 0),
+            kind: FileType::RegularFile,
+            perm: 0o777,
+            nlink: 0,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            flags: 0,
+        };
+        reply.created(&TTL, &attr, 0, 0, _flags);
+    }
+
+    fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
+        reply.statfs(0, 1000000000000, 10000000000000, 0, 0, 512, 255, 0);
     }
 }

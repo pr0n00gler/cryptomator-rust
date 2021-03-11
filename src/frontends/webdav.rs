@@ -14,11 +14,8 @@ impl From<FileSystemError> for FsError {
     fn from(fse: FileSystemError) -> Self {
         match fse {
             FileSystemError::PathIsNotExist(_) => FsError::NotFound,
-            FileSystemError::CryptoError(s) => match s {
-                CryptoError::IOError(i) => match i.kind() {
-                    ErrorKind::NotFound => FsError::NotFound,
-                    _ => FsError::GeneralFailure,
-                },
+            FileSystemError::CryptoError(CryptoError::IOError(i)) => match i.kind() {
+                ErrorKind::NotFound => FsError::NotFound,
                 _ => FsError::GeneralFailure,
             },
             FileSystemError::IOError(s) => match s.kind() {

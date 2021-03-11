@@ -1,4 +1,5 @@
-use crate::cryptofs::{DirEntry, File, FileSystem, FileSystemError, Metadata};
+use crate::cryptofs::{DirEntry, File, FileSystem, FileSystemError, Metadata, Stats};
+use fs2::statvfs;
 use std::fs;
 use std::path::Path;
 
@@ -103,5 +104,15 @@ impl FileSystem for LocalFS {
     fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
         let metadata = fs::metadata(path)?;
         Ok(Metadata::from(metadata))
+    }
+
+    fn stats<P: AsRef<Path>>(&self, path: P) -> Result<Stats, FileSystemError> {
+        let stats = statvfs(path)?;
+        Ok(Stats {
+            free_space: stats.free_space(),
+            available_space: stats.available_space(),
+            total_space: stats.total_space(),
+            allocation_granularity: stats.allocation_granularity(),
+        })
     }
 }

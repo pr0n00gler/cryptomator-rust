@@ -366,6 +366,7 @@ dependencies = [
  "bytes 1.0.1",
  "clap",
  "failure",
+ "fs2",
  "fuse",
  "futures",
  "hmac 0.10.1",
@@ -515,6 +516,16 @@ checksum = "5fc25a87fa4fd2094bffb06925852034d90a17f0d1e05197d4956d3555752191"
 dependencies = [
  "matches",
  "percent-encoding 2.1.0",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]

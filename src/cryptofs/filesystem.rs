@@ -51,6 +51,9 @@ pub trait FileSystem: Sync + Send + Clone {
 
     /// Returns metadata of an entry by the given path
     fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError>;
+
+    /// Returns the stats of the file system containing the provided path
+    fn stats<P: AsRef<Path>>(&self, path: P) -> Result<Stats, FileSystemError>;
 }
 
 /// File metadata. Not much more than type, length, and some timestamps
@@ -133,6 +136,33 @@ impl Default for DirEntry {
             path: Default::default(),
             metadata: Default::default(),
             file_name: Default::default(),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+/// Contains some common stats about a file system.
+pub struct Stats {
+    /// Number of free bytes
+    pub free_space: u64,
+
+    /// Available space in bytes to non-priveleged users
+    pub available_space: u64,
+
+    /// Total space in bytes
+    pub total_space: u64,
+
+    /// Filesystem's disk space allocation granularity in bytes
+    pub allocation_granularity: u64,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Stats {
+            free_space: 0,
+            available_space: 0,
+            total_space: 0,
+            allocation_granularity: 0,
         }
     }
 }

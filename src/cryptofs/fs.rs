@@ -6,7 +6,7 @@ use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist};
 use crate::cryptofs::filesystem::Metadata;
 use crate::cryptofs::{
     component_to_string, last_path_component, parent_path, DirEntry, File, FileSystem,
-    FileSystemError,
+    FileSystemError, Stats,
 };
 use failure::AsFail;
 use lru::LruCache;
@@ -488,6 +488,13 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
         }
         Ok(self.file_system_provider.metadata(real_path)?)
     }
+
+    fn stats<P: AsRef<Path>>(&self, path: P) -> Result<Stats, FileSystemError> {
+        let dir_id = self.dir_id_from_path(path)?;
+        let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
+
+        Ok(self.file_system_provider.stats(real_path)?)
+    }
 }
 
 /// 'Virtual' file implementation of the File trait
@@ -645,7 +652,7 @@ impl Read for CryptoFSFile {
             if chunk.is_empty() {
                 break;
             }
-            if offset == chunk.len() {
+            if offset >= chunk.len() {
                 break;
             }
 

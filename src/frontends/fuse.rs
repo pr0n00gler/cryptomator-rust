@@ -1,4 +1,4 @@
-use crate::cryptofs::{CryptoFS, FileSystem};
+use crate::cryptofs::{unix_error_code_from_filesystem_error, CryptoFS, FileSystem};
 use failure::AsFail;
 use fuse::{
     FileAttr, FileType, Filesystem as FuseFS, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
@@ -46,7 +46,6 @@ impl<FS: FileSystem> FUSE<FS> {
     }
 }
 
-//TODO: error codes
 impl<FS: FileSystem> FuseFS for FUSE<FS> {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let entry_name = if let Some(e) = self.inode_to_entry.get(&parent) {
@@ -64,7 +63,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                     entry_name.join(name).display(),
                     e.as_fail()
                 );
-                reply.error(ENOENT);
+                reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
         };
@@ -111,7 +110,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                     entry_name.display(),
                     e.as_fail()
                 );
-                reply.error(ENOENT);
+                reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
         };
@@ -153,7 +152,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                 entry_path.display(),
                 e.as_fail()
             );
-            reply.error(ENOENT);
+            reply.error(unix_error_code_from_filesystem_error(e));
             return;
         }
 
@@ -165,7 +164,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                     entry_path.display(),
                     e.as_fail()
                 );
-                reply.error(ENOENT);
+                reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
         };
@@ -209,7 +208,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                 entry_path.display(),
                 e.as_fail()
             );
-            reply.error(ENOENT);
+            reply.error(unix_error_code_from_filesystem_error(e));
             return;
         }
 
@@ -236,7 +235,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                 entry_path.display(),
                 e.as_fail()
             );
-            reply.error(ENOENT);
+            reply.error(unix_error_code_from_filesystem_error(e));
             return;
         }
 
@@ -294,7 +293,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                     entry_path.display(),
                     e.as_fail()
                 );
-                reply.error(ENOENT);
+                reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
         } else if let Some(e) = self.crypto_fs.move_file(&entry_path, &new_entry_path).err() {
@@ -303,7 +302,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                 entry_path.display(),
                 e.as_fail()
             );
-            reply.error(ENOENT);
+            reply.error(unix_error_code_from_filesystem_error(e));
             return;
         }
 
@@ -338,7 +337,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                     entry_name.display(),
                     e.as_fail()
                 );
-                reply.error(ENOENT);
+                reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
         };
@@ -382,7 +381,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                     entry_name.display(),
                     e.as_fail()
                 );
-                reply.error(ENOENT);
+                reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
         };
@@ -423,7 +422,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                     entry_name.display(),
                     e.as_fail()
                 );
-                reply.error(ENOENT);
+                reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
         };
@@ -484,7 +483,18 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             return;
         };
         let entry_path = parent_path.join(name);
-        let f = self.crypto_fs.create_file(&entry_path).unwrap();
+        let f = match self.crypto_fs.create_file(&entry_path) {
+            Ok(f) => f,
+            Err(e) => {
+                error!(
+                    "Failed to create file {}: {}",
+                    entry_path.display(),
+                    e.as_fail()
+                );
+                reply.error(unix_error_code_from_filesystem_error(e));
+                return;
+            }
+        };
         let attr = FileAttr {
             ino: self.last_inode + 1,
             size: f.metadata().unwrap().len,

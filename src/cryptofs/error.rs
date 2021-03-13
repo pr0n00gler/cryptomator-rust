@@ -2,6 +2,9 @@ use crate::crypto::{CryptoError, MasterKeyError};
 use failure::Fail;
 use failure::_core::fmt::Debug;
 
+#[cfg(unix)]
+use libc::{c_int, EIO, ENOENT};
+
 #[derive(Debug, Fail)]
 pub enum FileSystemError {
     #[fail(display = "Input/Output error")]
@@ -56,5 +59,35 @@ impl From<std::string::FromUtf8Error> for FileSystemError {
 impl From<uuid::Error> for FileSystemError {
     fn from(err: uuid::Error) -> FileSystemError {
         FileSystemError::UUIDParseError(err)
+    }
+}
+
+#[cfg(unix)]
+pub fn unix_error_code_from_filesystem_error(fs: FileSystemError) -> c_int {
+    match fs {
+        FileSystemError::IOError(io) => {
+            if let Some(e) = io.raw_os_error() {
+                e
+            } else {
+                EIO
+            }
+        }
+        FileSystemError::CryptoError(CryptoError::IOError(io)) => {
+            if let Some(e) = io.raw_os_error() {
+                e
+            } else {
+                EIO
+            }
+        }
+        FileSystemError::MasterKeyError(MasterKeyError::IOError(io)) => {
+            if let Some(e) = io.raw_os_error() {
+                e
+            } else {
+                EIO
+            }
+        }
+        FileSystemError::InvalidPathError(_) => ENOENT,
+        FileSystemError::PathIsNotExist(_) => ENOENT,
+        _ => EIO,
     }
 }

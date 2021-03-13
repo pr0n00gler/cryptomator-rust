@@ -3,6 +3,7 @@ use crate::cryptofs::{CryptoFS, DirEntry, File, FileSystem, FileSystemError, Met
 use bytes::{Buf, Bytes};
 use futures::{future, future::FutureExt};
 use std::io::{ErrorKind, Read, SeekFrom, Write};
+use std::path::{Component, Path};
 use std::time::SystemTime;
 use webdav_handler::davpath::DavPath;
 use webdav_handler::fs::{
@@ -194,6 +195,17 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
             Ok(self
                 .crypto_fs
                 .copy_file(from.as_pathbuf(), to.as_pathbuf())?)
+        }
+        .boxed()
+    }
+
+    fn get_quota(&self) -> FsFuture<(u64, Option<u64>)> {
+        async move {
+            let stats = self.crypto_fs.stats(Path::new(&Component::RootDir))?;
+            Ok((
+                stats.total_space - stats.free_space,
+                Some(stats.total_space),
+            ))
         }
         .boxed()
     }

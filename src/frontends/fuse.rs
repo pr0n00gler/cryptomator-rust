@@ -25,6 +25,7 @@ fn systime_to_timespec(s: SystemTime) -> Timespec {
 pub struct FUSE<FS: FileSystem> {
     inode_to_entry: HashMap<u64, PathBuf>,
     entry_to_inode: HashMap<PathBuf, u64>,
+    free_inodes: Vec<u64>,
     crypto_fs: CryptoFS<FS>,
     last_inode: u64,
 }
@@ -40,6 +41,7 @@ impl<FS: FileSystem> FUSE<FS> {
         FUSE {
             inode_to_entry,
             entry_to_inode,
+            free_inodes: vec![],
             crypto_fs,
             last_inode: 1,
         }
@@ -67,8 +69,15 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                 return;
             }
         };
+
+        let inode = if let Some(i) = self.free_inodes.pop() {
+            i
+        } else {
+            self.last_inode += 1;
+            self.last_inode
+        };
         let attr = FileAttr {
-            ino: self.last_inode + 1,
+            ino: inode,
             size: entry.len,
             blocks: 0,
             atime: systime_to_timespec(entry.accessed),
@@ -86,11 +95,10 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             rdev: 0,
             flags: 0,
         };
-        self.last_inode += 1;
-        self.inode_to_entry
-            .insert(self.last_inode, entry_name.join(name));
-        self.entry_to_inode
-            .insert(entry_name.join(name), self.last_inode);
+
+        self.inode_to_entry.insert(inode, entry_name.join(name));
+        self.entry_to_inode.insert(entry_name.join(name), inode);
+
         reply.entry(&TTL, &attr, 0);
     }
 
@@ -168,8 +176,16 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                 return;
             }
         };
+
+        let inode = if let Some(i) = self.free_inodes.pop() {
+            i
+        } else {
+            self.last_inode += 1;
+            self.last_inode
+        };
+
         let attr = FileAttr {
-            ino: self.last_inode + 1,
+            ino: inode,
             size: metadata.len,
             blocks: 0,
             atime: systime_to_timespec(metadata.accessed),
@@ -185,9 +201,8 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             flags: 0,
         };
 
-        self.inode_to_entry
-            .insert(self.last_inode + 1, entry_path.clone());
-        self.entry_to_inode.insert(entry_path, self.last_inode + 1);
+        self.inode_to_entry.insert(inode, entry_path.clone());
+        self.entry_to_inode.insert(entry_path, inode);
 
         reply.entry(&TTL, &attr, 0);
     }
@@ -214,6 +229,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
 
         if let Some(inode) = self.entry_to_inode.get(&entry_path) {
             self.inode_to_entry.remove(inode);
+            self.free_inodes.push(*inode);
             self.entry_to_inode.remove(&entry_path);
         }
 
@@ -241,6 +257,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
 
         if let Some(inode) = self.entry_to_inode.get(&entry_path) {
             self.inode_to_entry.remove(inode);
+            self.free_inodes.push(*inode);
             self.entry_to_inode.remove(&entry_path);
         }
 
@@ -432,7 +449,12 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             if let Some(i) = self.entry_to_inode.get(&entry_name.join(&entry.file_name)) {
                 inode = *i;
             } else {
-                inode = self.last_inode + 1;
+                inode = if let Some(i) = self.free_inodes.pop() {
+                    i
+                } else {
+                    self.last_inode += 1;
+                    self.last_inode
+                };
                 self.inode_to_entry
                     .insert(inode, entry_name.join(&entry.file_name));
                 self.entry_to_inode
@@ -459,7 +481,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             stats.free_space / stats.allocation_granularity,
             stats.available_space / stats.allocation_granularity,
             self.inode_to_entry.len() as u64,
-            (usize::MAX - self.inode_to_entry.len()) as u64,
+            (usize::MAX - self.inode_to_entry.len() + self.free_inodes.len()) as u64,
             stats.allocation_granularity as u32,
             255,
             stats.allocation_granularity as u32,
@@ -495,8 +517,16 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                 return;
             }
         };
+
+        let inode = if let Some(i) = self.free_inodes.pop() {
+            i
+        } else {
+            self.last_inode += 1;
+            self.last_inode
+        };
+
         let attr = FileAttr {
-            ino: self.last_inode + 1,
+            ino: inode,
             size: f.metadata().unwrap().len,
             blocks: 0,
             atime: systime_to_timespec(f.metadata().unwrap().accessed),
@@ -512,9 +542,8 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             flags: 0,
         };
 
-        self.inode_to_entry
-            .insert(self.last_inode + 1, entry_path.clone());
-        self.entry_to_inode.insert(entry_path, self.last_inode + 1);
+        self.inode_to_entry.insert(inode, entry_path.clone());
+        self.entry_to_inode.insert(entry_path, inode);
 
         reply.created(&TTL, &attr, 0, 0, _flags);
     }

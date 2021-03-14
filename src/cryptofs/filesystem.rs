@@ -77,11 +77,11 @@ impl From<std::fs::Metadata> for Metadata {
                 Ok(st) => st,
                 Err(_) => SystemTime::UNIX_EPOCH,
             },
-            accessed: match m.modified() {
+            accessed: match m.accessed() {
                 Ok(st) => st,
                 Err(_) => SystemTime::UNIX_EPOCH,
             },
-            created: match m.modified() {
+            created: match m.created() {
                 Ok(st) => st,
                 Err(_) => SystemTime::UNIX_EPOCH,
             },

@@ -2,6 +2,9 @@ use failure::Fail;
 
 #[derive(Debug, Fail)]
 pub enum MasterKeyError {
+    #[fail(display = "Unsupported vault version")]
+    VaultVersion,
+
     #[fail(display = "Input/Output error")]
     IOError(std::io::Error),
 
@@ -19,6 +22,12 @@ pub enum MasterKeyError {
 
     #[fail(display = "AES key error")]
     AESKeyError(openssl::aes::KeyError),
+
+    #[fail(display = "HMac error")]
+    HMacError(hmac::crypto_mac::MacError),
+
+    #[fail(display = "HMac invalid key length error")]
+    HMacInvalidKeyLengthError(hmac::crypto_mac::InvalidKeyLength),
 }
 
 impl From<std::io::Error> for MasterKeyError {
@@ -48,6 +57,18 @@ impl From<scrypt::errors::InvalidParams> for MasterKeyError {
 impl From<scrypt::errors::InvalidOutputLen> for MasterKeyError {
     fn from(err: scrypt::errors::InvalidOutputLen) -> MasterKeyError {
         MasterKeyError::ScryptInvalidOutputLengthError(err)
+    }
+}
+
+impl From<hmac::crypto_mac::MacError> for MasterKeyError {
+    fn from(err: hmac::crypto_mac::MacError) -> MasterKeyError {
+        MasterKeyError::HMacError(err)
+    }
+}
+
+impl From<hmac::crypto_mac::InvalidKeyLength> for MasterKeyError {
+    fn from(err: hmac::crypto_mac::InvalidKeyLength) -> MasterKeyError {
+        MasterKeyError::HMacInvalidKeyLengthError(err)
     }
 }
 

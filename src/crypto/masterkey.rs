@@ -4,13 +4,20 @@ use crate::crypto::error::MasterKeyError;
 
 use rand::Rng;
 
+use hmac::{Hmac, Mac, NewMac};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
+
 const P: u32 = 1;
 const DEFAULT_IV: [u8; 8] = [0xA6; 8];
+
+const SUPPORTED_VAULT_VERSION: u32 = 7;
 
 #[derive(Serialize, Deserialize)]
 #[allow(non_snake_case)]
 pub struct MasterKeyJson {
-    version: u8,
+    version: u32,
     scryptSalt: String,
     scryptCostParam: u64,
     scryptBlockSize: u32,
@@ -55,14 +62,19 @@ impl MasterKeyJson {
             &hmac_master_key,
         )?;
 
+        let mut version_mac = HmacSha256::new_varkey(&hmac_master_key)?;
+        version_mac.update(&SUPPORTED_VAULT_VERSION.to_be_bytes());
+
+        let version_mac_bytes = version_mac.finalize().into_bytes();
+
         Ok(MasterKeyJson {
-            version: 7,
+            version: SUPPORTED_VAULT_VERSION,
             scryptSalt: base64::encode(scrypt_salt),
             scryptCostParam: scrypt_cost_param,
             scryptBlockSize: scrypt_block_size,
             primaryMasterKey: base64::encode(wrapped_master_key),
             hmacMasterKey: base64::encode(wrapped_hmac_master_key),
-            versionMac: "".to_string(), // TODO
+            versionMac: base64::encode(version_mac_bytes),
         })
     }
 }
@@ -82,9 +94,6 @@ impl MasterKey {
         password: &str,
     ) -> Result<MasterKey, MasterKeyError> {
         let mk_json: MasterKeyJson = serde_json::from_reader(file)?;
-
-        //TODO: check version
-        let _version = mk_json.version;
 
         let scrypt_salt = base64::decode(mk_json.scryptSalt)?;
         let primary_master_key = base64::decode(mk_json.primaryMasterKey)?;
@@ -121,6 +130,13 @@ impl MasterKey {
             &mut unwrapped_hmac_master_key,
             hmac_master_key.as_slice(),
         )?;
+
+        let version = mk_json.version;
+        let version_mac = base64::decode(mk_json.versionMac)?;
+
+        let mut calculated_version_mac = HmacSha256::new_varkey(&unwrapped_hmac_master_key)?;
+        calculated_version_mac.update(&version.to_be_bytes());
+        calculated_version_mac.verify(version_mac.as_slice())?;
 
         Ok(MasterKey {
             primary_master_key: unwrapped_master_key,

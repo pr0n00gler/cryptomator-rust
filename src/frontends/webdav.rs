@@ -145,11 +145,11 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
     ) -> FsFuture<'_, FsStream<Box<dyn DavDirEntry>>> {
         async move {
             let entries = self.crypto_fs.read_dir(path.as_pathbuf())?;
-            let mut v: Vec<Box<dyn DavDirEntry>> = Vec::new();
-            for entry in entries {
-                v.push(Box::new(entry));
-            }
-            let strm = futures::stream::iter(v.into_iter());
+            let strm = futures::stream::iter(
+                entries
+                    .map(|e| Box::new(e) as Box<dyn DavDirEntry>)
+                    .collect::<Vec<Box<dyn DavDirEntry>>>(),
+            );
             Ok(Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>)
         }
         .boxed()

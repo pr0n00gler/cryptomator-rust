@@ -1,10 +1,11 @@
-use crate::cryptofs::{unix_error_code_from_filesystem_error, CryptoFS, FileSystem};
+use crate::cryptofs::{unix_error_code_from_filesystem_error, CryptoFS, DirEntry, FileSystem};
 use failure::AsFail;
 use fuse::{
     FileAttr, FileType, Filesystem as FuseFS, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyWrite, Request, FUSE_ROOT_ID,
 };
 use libc::{EIO, ENOENT, EOF};
+use lru::LruCache;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::{Read, SeekFrom, Write};
@@ -13,6 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use time::Timespec;
 
 const TTL: Timespec = Timespec { sec: 1, nsec: 0 };
+
+const DIR_ENTRIES_CACHE_CAP: usize = 2;
 
 fn systime_to_timespec(s: SystemTime) -> Timespec {
     Timespec::new(
@@ -28,6 +31,8 @@ pub struct FUSE<FS: FileSystem> {
     free_inodes: Vec<u64>,
     crypto_fs: CryptoFS<FS>,
     last_inode: u64,
+
+    dir_entries_cache: lru::LruCache<u64, Vec<DirEntry>>,
 }
 
 impl<FS: FileSystem> FUSE<FS> {
@@ -44,6 +49,7 @@ impl<FS: FileSystem> FUSE<FS> {
             free_inodes: vec![],
             crypto_fs,
             last_inode: 1,
+            dir_entries_cache: LruCache::new(DIR_ENTRIES_CACHE_CAP),
         }
     }
 }
@@ -60,7 +66,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
         let entry = match self.crypto_fs.metadata(entry_name.join(name)) {
             Ok(m) => m,
             Err(e) => {
-                error!(
+                debug!(
                     "Failed to get metadata of a file {}: {}",
                     entry_name.join(name).display(),
                     e.as_fail()
@@ -431,8 +437,28 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             reply.error(ENOENT);
             return;
         };
+
+        if offset != 0 && self.dir_entries_cache.contains(&ino) {
+            let cached_entries = self.dir_entries_cache.get(&ino).unwrap();
+            for (i, entry) in cached_entries.iter().enumerate().skip(offset as usize) {
+                reply.add(
+                    *self
+                        .entry_to_inode
+                        .get(&entry_name.join(&entry.file_name))
+                        .unwrap(),
+                    (i + 1) as i64,
+                    match entry.metadata.is_file {
+                        true => FileType::RegularFile,
+                        false => FileType::Directory,
+                    },
+                    &entry.file_name,
+                );
+            }
+            reply.ok();
+            return;
+        }
         let entries = match self.crypto_fs.read_dir(&entry_name) {
-            Ok(e) => e,
+            Ok(e) => e.collect::<Vec<DirEntry>>(),
             Err(e) => {
                 error!(
                     "Failed to read dir {}: {}",
@@ -443,7 +469,8 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                 return;
             }
         };
-        for (i, entry) in entries.enumerate().skip(offset as usize) {
+
+        for (i, entry) in entries.iter().enumerate().skip(offset as usize) {
             let inode: u64;
 
             if let Some(i) = self.entry_to_inode.get(&entry_name.join(&entry.file_name)) {
@@ -468,9 +495,12 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                     true => FileType::RegularFile,
                     false => FileType::Directory,
                 },
-                entry.file_name,
+                &entry.file_name,
             );
         }
+
+        self.dir_entries_cache.put(ino, entries);
+
         reply.ok()
     }
 

@@ -17,6 +17,7 @@ use aes_ctr::Aes256Ctr;
 use crate::crypto::common::clone_into_array;
 
 use crate::crypto::error::CryptoError::{InvalidFileChunkLength, InvalidFileHeaderLength};
+use futures::AsyncWriteExt;
 use hmac::{Hmac, Mac, NewMac};
 use sha2::Sha256;
 
@@ -329,38 +330,30 @@ impl Cryptor {
         chunk_number: u64,
         chunk_data: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        let chunk_nonce = rand::thread_rng().gen::<[u8; 16]>();
+        let chunk_nonce = rand::thread_rng().gen::<[u8; FILE_CHUNK_CONTENT_NONCE_LENGTH]>();
+
+        let mut encrypted_chunk: Vec<u8> = Vec::with_capacity(
+            chunk_nonce.len() + chunk_data.len() + FILE_CHUNK_CONTENT_MAC_LENGTH,
+        );
+        encrypted_chunk.extend_from_slice(&chunk_nonce);
+        encrypted_chunk.extend_from_slice(&chunk_data);
 
         let mut cipher = Aes256Ctr::new(
             GenericArray::from_slice(file_key),
-            GenericArray::from_slice(chunk_nonce.as_ref()),
+            GenericArray::from_slice(&chunk_nonce),
         );
-        let mut encrypted_chunk_data = Vec::from(chunk_data);
-        cipher.apply_keystream(&mut encrypted_chunk_data);
+        cipher.apply_keystream(&mut encrypted_chunk[FILE_CHUNK_CONTENT_NONCE_LENGTH..]);
 
-        let mut chunk_number_big_endian = Vec::with_capacity(8);
-        chunk_number_big_endian.write_u64::<BigEndian>(chunk_number as u64)?;
-
-        let mut mac_payload: Vec<u8> = Vec::with_capacity(
-            header_nonce.len()
-                + chunk_number_big_endian.len()
-                + chunk_nonce.len()
-                + encrypted_chunk_data.len(),
-        );
+        let mut mac_payload: Vec<u8> =
+            Vec::with_capacity(header_nonce.len() + 8 + chunk_nonce.len() + chunk_data.len());
         mac_payload.extend_from_slice(&header_nonce);
-        mac_payload.extend(&chunk_number_big_endian);
-        mac_payload.extend_from_slice(&chunk_nonce);
-        mac_payload.extend(&encrypted_chunk_data);
+        mac_payload.write_u64::<BigEndian>(chunk_number)?;
+        mac_payload.extend_from_slice(&encrypted_chunk);
 
         let mut mac = HmacSha256::new_varkey(&self.master_key.hmac_master_key)?;
         mac.update(mac_payload.as_slice());
         let mac_bytes = mac.finalize().into_bytes();
 
-        let mut encrypted_chunk: Vec<u8> = Vec::with_capacity(
-            chunk_nonce.len() + encrypted_chunk_data.len() + mac_bytes.as_slice().len(),
-        );
-        encrypted_chunk.extend_from_slice(&chunk_nonce);
-        encrypted_chunk.extend(encrypted_chunk_data);
         encrypted_chunk.extend_from_slice(mac_bytes.as_slice());
 
         Ok(encrypted_chunk)

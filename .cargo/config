@@ -1,2 +1,5 @@
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-feature=+aes,+ssse3"]
+
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static,+aes,+ssse3"]

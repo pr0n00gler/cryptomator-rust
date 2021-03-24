@@ -103,8 +103,8 @@ fn crypto_encrypt_chunk(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    // crypto_fs_write,
-    // crypto_fs_read,
+    crypto_fs_write,
+    crypto_fs_read,
     crypto_encrypt_chunk
 );
 criterion_main!(benches);

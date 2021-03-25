@@ -1,8 +1,5 @@
-use std::iter;
-
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use cryptomator::crypto;
-use cryptomator::crypto::Cryptor;
 use cryptomator::cryptofs::{CryptoFS, FileSystem};
 use cryptomator::providers::MemoryFS;
 use std::io::{Read, SeekFrom};
@@ -105,6 +102,6 @@ criterion_group!(
     benches,
     crypto_fs_write,
     crypto_fs_read,
-    crypto_encrypt_chunk
+    crypto_encrypt_chunk,
 );
 criterion_main!(benches);

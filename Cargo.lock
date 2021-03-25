@@ -474,7 +474,7 @@ dependencies = [
  "scrypt",
  "serde",
  "serde_json",
- "sha1",
+ "sha-1 0.9.4",
  "sha2 0.9.3",
  "slog",
  "slog-async",
@@ -860,7 +860,7 @@ dependencies = [
  "headers-core",
  "http 0.2.3",
  "mime",
- "sha-1",
+ "sha-1 0.8.2",
  "time 0.1.43",
 ]
 
@@ -1408,7 +1408,7 @@ checksum = "54be6e404f5317079812fc8f9f5279de376d8856929e21c184ecf6bbd692a11d"
 dependencies = [
  "maplit",
  "pest",
- "sha-1",
+ "sha-1 0.8.2",
 ]
 
 [[package]]
@@ -1850,10 +1850,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha-1"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfebf75d25bd900fd1e7d11501efab59bc846dbc76196839663e6637bba9f25f"
+dependencies = [
+ "block-buffer 0.9.0",
+ "cfg-if",
+ "cpuid-bool",
+ "digest 0.9.0",
+ "libc",
+ "opaque-debug 0.3.0",
+ "sha1-asm",
+]
+
+[[package]]
 name = "sha1"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2579985fda508104f7587689507983eadd6a6e84dd35d6d115361f530916fa0d"
+
+[[package]]
+name = "sha1-asm"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9dae2289dd5f5dc67fb0f341a5676c5c197415c51ce7345ae1bd0d36a6cbbfc"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "sha2"
@@ -1877,7 +1901,18 @@ dependencies = [
  "cfg-if",
  "cpuid-bool",
  "digest 0.9.0",
+ "libc",
  "opaque-debug 0.3.0",
+ "sha2-asm",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7c2f225be6502f2134e6bbb35bb5e2957e41ffa0495ed08bce2e2b4ca885da4"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

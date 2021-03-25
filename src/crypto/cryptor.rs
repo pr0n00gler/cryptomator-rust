@@ -17,8 +17,8 @@ use aes_ctr::Aes256Ctr;
 use crate::crypto::common::clone_into_array;
 
 use crate::crypto::error::CryptoError::{InvalidFileChunkLength, InvalidFileHeaderLength};
-use futures::AsyncWriteExt;
 use hmac::{Hmac, Mac, NewMac};
+use sha1::{Digest, Sha1};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -69,9 +69,9 @@ pub fn calculate_cleartext_size(ciphertext_size: u64) -> u64 {
 }
 
 pub fn shorten_name<P: AsRef<str>>(name: P) -> String {
-    let mut hasher = sha1::Sha1::new();
+    let mut hasher = Sha1::new();
     hasher.update(name.as_ref().as_bytes());
-    base64::encode_config(hasher.digest().bytes(), base64::URL_SAFE)
+    base64::encode_config(hasher.finalize().as_slice(), base64::URL_SAFE)
 }
 
 /// Contains reserved bytes and content key
@@ -112,12 +112,12 @@ impl Cryptor {
         let mut cipher = Aes256Siv::new(aes_siv_key);
         let encrypted_dir_id = cipher.encrypt(iter::empty::<&[u8]>(), dir_id)?;
 
-        let mut sha1_hasher = sha1::Sha1::new();
+        let mut sha1_hasher = Sha1::new();
         sha1_hasher.update(encrypted_dir_id.as_slice());
-        let sha1_hash = sha1_hasher.digest().bytes();
+        let sha1_hash = sha1_hasher.finalize();
         let dir_id_hash_base32_encoded = base32::encode(
             base32::Alphabet::RFC4648 { padding: false },
-            sha1_hash.as_ref(),
+            sha1_hash.as_slice(),
         );
         Ok(dir_id_hash_base32_encoded)
     }

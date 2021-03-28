@@ -605,10 +605,9 @@ impl<'gc> CryptoFSFile {
         let decrypted_chunk = self.cryptor.decrypt_chunk(
             &self.header.nonce,
             &self.header.payload.content_key,
-            chunk_index as usize,
+            chunk_index,
             &chunk[..read_bytes],
         )?;
-        self.chunk_cache.put(chunk_index, decrypted_chunk.clone());
         Ok(decrypted_chunk)
     }
 }
@@ -664,6 +663,8 @@ impl Read for CryptoFSFile {
             buf[n..n + slice_len].copy_from_slice(&chunk[offset..offset + slice_len]);
             n += slice_len;
 
+            self.chunk_cache.put(chunk_index, chunk);
+
             self.current_pos += slice_len as u64;
             chunk_index += 1;
         }
@@ -709,26 +710,25 @@ impl Write for CryptoFSFile {
 
                 let offset = (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize;
                 slice_len = if offset + buf.len() - n > FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
-                    FILE_CHUNK_CONTENT_PAYLOAD_LENGTH - offset - n
+                    FILE_CHUNK_CONTENT_PAYLOAD_LENGTH - offset
                 } else {
                     buf.len() - n
                 };
 
                 let chunk_len = buf_chunk.len();
                 if chunk_len == 0 || chunk_len - offset < slice_len {
-                    buf_chunk.extend_from_slice(vec![0; chunk_len - offset + slice_len].as_slice());
+                    buf_chunk.resize(buf_chunk.len() + chunk_len - offset + slice_len, 0u8);
                 }
                 buf_chunk[offset..offset + slice_len].copy_from_slice(&buf[n..n + slice_len]);
                 n += slice_len;
                 chunk = buf_chunk;
             }
 
-            self.chunk_cache.put(chunk_index, chunk.clone());
             let encrypted_chunk = match self.cryptor.encrypt_chunk(
                 &self.header.nonce,
                 &self.header.payload.content_key,
-                chunk_index as usize,
-                chunk.as_slice(),
+                chunk_index,
+                &chunk,
             ) {
                 Ok(c) => c,
                 Err(e) => {
@@ -738,12 +738,14 @@ impl Write for CryptoFSFile {
             };
             encrypted_data.extend_from_slice(encrypted_chunk.as_slice());
             self.current_pos += slice_len as u64;
+
+            self.chunk_cache.put(chunk_index, chunk);
             chunk_index += 1;
         }
         self.rfs_file.seek(SeekFrom::Start(
             (start_chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
         ))?;
-        self.rfs_file.write_all(encrypted_data.as_ref())?;
+        self.rfs_file.write_all(&encrypted_data)?;
         Ok(n)
     }
 

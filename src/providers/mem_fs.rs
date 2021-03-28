@@ -1,5 +1,5 @@
 use crate::cryptofs::{
-    last_path_component, parent_path, DirEntry, File, FileSystem, FileSystemError, Metadata,
+    last_path_component, parent_path, DirEntry, File, FileSystem, FileSystemError, Metadata, Stats,
 };
 use rsfs::mem::FS;
 use rsfs::{DirEntry as DE, GenFS, OpenOptions};
@@ -159,5 +159,9 @@ impl FileSystem for MemoryFS {
     fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
         let metadata = self.fs.metadata(path)?;
         Ok(metadata_from_rsfs(metadata))
+    }
+
+    fn stats<P: AsRef<Path>>(&self, _path: P) -> Result<Stats, FileSystemError> {
+        Ok(Default::default())
     }
 }

@@ -3,6 +3,7 @@ use crate::cryptofs::{CryptoFS, DirEntry, File, FileSystem, FileSystemError, Met
 use bytes::{Buf, Bytes};
 use futures::{future, future::FutureExt};
 use std::io::{ErrorKind, Read, SeekFrom, Write};
+use std::path::{Component, Path};
 use std::time::SystemTime;
 use webdav_handler::davpath::DavPath;
 use webdav_handler::fs::{
@@ -144,11 +145,11 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
     ) -> FsFuture<'_, FsStream<Box<dyn DavDirEntry>>> {
         async move {
             let entries = self.crypto_fs.read_dir(path.as_pathbuf())?;
-            let mut v: Vec<Box<dyn DavDirEntry>> = Vec::new();
-            for entry in entries {
-                v.push(Box::new(entry));
-            }
-            let strm = futures::stream::iter(v.into_iter());
+            let strm = futures::stream::iter(
+                entries
+                    .map(|e| Box::new(e) as Box<dyn DavDirEntry>)
+                    .collect::<Vec<Box<dyn DavDirEntry>>>(),
+            );
             Ok(Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>)
         }
         .boxed()
@@ -194,6 +195,17 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
             Ok(self
                 .crypto_fs
                 .copy_file(from.as_pathbuf(), to.as_pathbuf())?)
+        }
+        .boxed()
+    }
+
+    fn get_quota(&self) -> FsFuture<(u64, Option<u64>)> {
+        async move {
+            let stats = self.crypto_fs.stats(Path::new(&Component::RootDir))?;
+            Ok((
+                stats.total_space - stats.free_space,
+                Some(stats.total_space),
+            ))
         }
         .boxed()
     }

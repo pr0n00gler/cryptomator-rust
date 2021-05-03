@@ -22,8 +22,8 @@ byteorder = "1"
 sha-1 = { version = "0.9.4", features = ["asm"] }
 rand = "0.7.3"
 uuid = { version = "0.8.2", features = ["serde", "v4"] }
-rsfs = { git = "https://github.com/programmer10110/rsfs" }
-webdav-handler = { git = "https://github.com/programmer10110/webdav-handler-rs", branch = "win"}
+rsfs = { git = "https://github.com/pr0n00gler/rsfs" }
+webdav-handler = { git = "https://github.com/pr0n00gler/webdav-handler-rs", branch = "win"}
 futures = "0.3.12"
 http = "0.1.17"
 hyper = { version = "0.14.2", features = [ "http1", "http2", "server", "stream", "runtime" ] }

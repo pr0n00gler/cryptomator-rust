@@ -1719,7 +1719,7 @@ dependencies = [
 [[package]]
 name = "rsfs"
 version = "0.4.1"
-source = "git+https://github.com/programmer10110/rsfs#1104c41d0f9cd4fdec21c930d72b977b68dd71f5"
+source = "git+https://github.com/pr0n00gler/rsfs#1104c41d0f9cd4fdec21c930d72b977b68dd71f5"
 dependencies = [
  "parking_lot 0.4.8",
 ]
@@ -2533,7 +2533,7 @@ dependencies = [
 [[package]]
 name = "webdav-handler"
 version = "0.2.0-alpha.6"
-source = "git+https://github.com/programmer10110/webdav-handler-rs?branch=win#37eb72cab6bf6d34638623ba405032bca7e0a6b4"
+source = "git+https://github.com/pr0n00gler/webdav-handler-rs?branch=win#37eb72cab6bf6d34638623ba405032bca7e0a6b4"
 dependencies = [
  "bytes 1.0.1",
  "futures",

@@ -14,7 +14,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use time::Timespec;
 use tracing::{debug, error};
 
-
 const TTL: Timespec = Timespec { sec: 1, nsec: 0 };
 
 const DIR_ENTRIES_CACHE_CAP: usize = 2;

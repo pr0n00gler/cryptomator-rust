@@ -1,6 +1,6 @@
 use crate::cryptofs::{unix_error_code_from_filesystem_error, CryptoFS, DirEntry, FileSystem};
 use failure::AsFail;
-use fuse::{
+use fuser::{
     FileAttr, FileType, Filesystem as FuseFS, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyWrite, Request, FUSE_ROOT_ID,
 };
@@ -10,22 +10,13 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::{Read, SeekFrom, Write};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-use time::Timespec;
+use std::time::Duration;
 
-const TTL: Timespec = Timespec { sec: 1, nsec: 0 };
+const TTL: Duration = Duration::from_secs(1);
 
 const DIR_ENTRIES_CACHE_CAP: usize = 2;
 
-fn systime_to_timespec(s: SystemTime) -> Timespec {
-    Timespec::new(
-        s.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64,
-        //TODO: nsec
-        0,
-    )
-}
-
-pub struct FUSE<FS: FileSystem> {
+pub struct Fuse<FS: FileSystem> {
     inode_to_entry: HashMap<u64, PathBuf>,
     entry_to_inode: HashMap<PathBuf, u64>,
     free_inodes: Vec<u64>,
@@ -35,15 +26,15 @@ pub struct FUSE<FS: FileSystem> {
     dir_entries_cache: lru::LruCache<u64, Vec<DirEntry>>,
 }
 
-impl<FS: FileSystem> FUSE<FS> {
-    pub fn new(crypto_fs: CryptoFS<FS>) -> FUSE<FS> {
+impl<FS: FileSystem> Fuse<FS> {
+    pub fn new(crypto_fs: CryptoFS<FS>) -> Fuse<FS> {
         let mut inode_to_entry: HashMap<u64, PathBuf> = HashMap::new();
         inode_to_entry.insert(FUSE_ROOT_ID, std::path::Path::new("/").to_path_buf());
 
         let mut entry_to_inode: HashMap<PathBuf, u64> = HashMap::new();
         entry_to_inode.insert(std::path::Path::new("/").to_path_buf(), FUSE_ROOT_ID);
 
-        FUSE {
+        Fuse {
             inode_to_entry,
             entry_to_inode,
             free_inodes: vec![],
@@ -54,7 +45,7 @@ impl<FS: FileSystem> FUSE<FS> {
     }
 }
 
-impl<FS: FileSystem> FuseFS for FUSE<FS> {
+impl<FS: FileSystem> FuseFS for Fuse<FS> {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let entry_name = if let Some(e) = self.inode_to_entry.get(&parent) {
             e.clone()
@@ -86,10 +77,10 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             ino: inode,
             size: entry.len,
             blocks: 0,
-            atime: systime_to_timespec(entry.accessed),
-            mtime: systime_to_timespec(entry.modified),
-            ctime: systime_to_timespec(entry.created),
-            crtime: Timespec::new(0, 0),
+            atime: entry.accessed,
+            mtime: entry.modified,
+            ctime: entry.modified,
+            crtime: entry.created,
             kind: match entry.is_file {
                 true => FileType::RegularFile,
                 false => FileType::Directory,
@@ -99,6 +90,8 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             uid: 0,
             gid: 0,
             rdev: 0,
+            blksize: 512,
+            padding: 0,
             flags: 0,
         };
 
@@ -132,10 +125,10 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             ino,
             size: entry.len,
             blocks: 0,
-            atime: systime_to_timespec(entry.accessed),
-            mtime: systime_to_timespec(entry.modified),
-            ctime: systime_to_timespec(entry.created),
-            crtime: Timespec::new(0, 0),
+            atime: entry.accessed,
+            mtime: entry.modified,
+            ctime: entry.modified,
+            crtime: entry.created,
             kind: match entry.is_file {
                 true => FileType::RegularFile,
                 false => FileType::Directory,
@@ -145,12 +138,22 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             uid: 0,
             gid: 0,
             rdev: 0,
+            blksize: 512,
+            padding: 0,
             flags: 0,
         };
         reply.attr(&TTL, &attr);
     }
 
-    fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, reply: ReplyEntry) {
+    fn mkdir(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
         let parent_path = if let Some(p) = self.inode_to_entry.get(&parent) {
             p
         } else {
@@ -194,16 +197,18 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
             ino: inode,
             size: metadata.len,
             blocks: 0,
-            atime: systime_to_timespec(metadata.accessed),
-            mtime: systime_to_timespec(metadata.modified),
-            ctime: systime_to_timespec(metadata.created),
-            crtime: Timespec::new(0, 0),
+            atime: metadata.accessed,
+            mtime: metadata.modified,
+            ctime: metadata.modified,
+            crtime: metadata.created,
             kind: FileType::Directory,
             perm: 0o777,
             nlink: 0,
             uid: 0,
             gid: 0,
             rdev: 0,
+            blksize: 512,
+            padding: 0,
             flags: 0,
         };
 
@@ -277,6 +282,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
         name: &OsStr,
         newparent: u64,
         newname: &OsStr,
+        _flags: u32,
         reply: ReplyEmpty,
     ) {
         let parent_path = if let Some(p) = self.inode_to_entry.get(&parent) {
@@ -343,6 +349,8 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
         _fh: u64,
         offset: i64,
         _size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
         let entry_name = if let Some(e) = self.inode_to_entry.get(&ino) {
@@ -386,7 +394,9 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
         _fh: u64,
         offset: i64,
         data: &[u8],
-        _flags: u32,
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
         let entry_name = if let Some(e) = self.inode_to_entry.get(&ino) {
@@ -441,7 +451,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
         if offset != 0 && self.dir_entries_cache.contains(&ino) {
             let cached_entries = self.dir_entries_cache.get(&ino).unwrap();
             for (i, entry) in cached_entries.iter().enumerate().skip(offset as usize) {
-                reply.add(
+                if reply.add(
                     *self
                         .entry_to_inode
                         .get(&entry_name.join(&entry.file_name))
@@ -452,7 +462,9 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                         false => FileType::Directory,
                     },
                     &entry.file_name,
-                );
+                ) {
+                    break;
+                }
             }
             reply.ok();
             return;
@@ -488,7 +500,7 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                     .insert(entry_name.join(&entry.file_name), inode);
                 self.last_inode += 1;
             }
-            reply.add(
+            if reply.add(
                 inode,
                 (i + 1) as i64,
                 match entry.metadata.is_file {
@@ -496,7 +508,9 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
                     false => FileType::Directory,
                 },
                 &entry.file_name,
-            );
+            ) {
+                break;
+            }
         }
 
         self.dir_entries_cache.put(ino, entries);
@@ -524,7 +538,8 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
         parent: u64,
         name: &OsStr,
         _mode: u32,
-        _flags: u32,
+        _umask: u32,
+        _flags: i32,
         reply: ReplyCreate,
     ) {
         let parent_path = if let Some(p) = self.inode_to_entry.get(&parent) {
@@ -557,24 +572,26 @@ impl<FS: FileSystem> FuseFS for FUSE<FS> {
 
         let attr = FileAttr {
             ino: inode,
-            size: f.metadata().unwrap().len,
+            size: f.metadata().unwrap_or_default().len,
             blocks: 0,
-            atime: systime_to_timespec(f.metadata().unwrap().accessed),
-            mtime: systime_to_timespec(f.metadata().unwrap().modified),
-            ctime: systime_to_timespec(f.metadata().unwrap().created),
-            crtime: Timespec::new(0, 0),
+            atime: f.metadata().unwrap_or_default().accessed,
+            mtime: f.metadata().unwrap_or_default().modified,
+            ctime: f.metadata().unwrap_or_default().created,
+            crtime: f.metadata().unwrap_or_default().created,
             kind: FileType::RegularFile,
             perm: 0o777,
             nlink: 0,
             uid: 0,
             gid: 0,
             rdev: 0,
+            blksize: 512,
+            padding: 0,
             flags: 0,
         };
 
         self.inode_to_entry.insert(inode, entry_path.clone());
         self.entry_to_inode.insert(entry_path, inode);
 
-        reply.created(&TTL, &attr, 0, 0, _flags);
+        reply.created(&TTL, &attr, 0, 0, _flags as u32);
     }
 }

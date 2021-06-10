@@ -9,7 +9,7 @@ use webdav_handler::DavHandler;
 use std::ffi::OsStr;
 
 #[cfg(unix)]
-use crate::frontends::fuse::FUSE;
+use crate::frontends::fuse::Fuse;
 
 pub async fn mount_webdav<FS: 'static + FileSystem>(
     listen_address: String,
@@ -45,10 +45,10 @@ pub async fn mount_webdav<FS: 'static + FileSystem>(
 
 #[cfg(unix)]
 pub fn mount_fuse<FS: FileSystem>(mountpoint: String, options: String, crypto_fs: CryptoFS<FS>) {
-    let fuse_fs = FUSE::new(crypto_fs);
+    let fuse_fs = Fuse::new(crypto_fs);
     let options = options
         .split_whitespace()
         .map(|o| o.as_ref())
         .collect::<Vec<&OsStr>>();
-    fuse::mount(fuse_fs, &mountpoint, &options).unwrap();
+    fuser::mount(fuse_fs, &mountpoint, &options).unwrap();
 }

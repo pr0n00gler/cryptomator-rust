@@ -634,11 +634,7 @@ impl Read for CryptoFSFile {
         let mut chunk_index = self.current_pos / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
         let mut n: usize = 0;
         while n < buf.len() {
-            let offset = if n > 0 {
-                0
-            } else {
-                (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize
-            };
+            let offset = (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize;
 
             let chunk = match self.read_chunk(chunk_index) {
                 Ok(c) => c,
@@ -715,9 +711,8 @@ impl Write for CryptoFSFile {
                     buf.len() - n
                 };
 
-                let chunk_len = buf_chunk.len();
-                if chunk_len == 0 || chunk_len - offset < slice_len {
-                    buf_chunk.resize(buf_chunk.len() + chunk_len - offset + slice_len, 0u8);
+                if buf_chunk.is_empty() || buf_chunk.len() - offset < slice_len {
+                    buf_chunk.resize(offset + slice_len, 0u8);
                 }
                 buf_chunk[offset..offset + slice_len].copy_from_slice(&buf[n..n + slice_len]);
                 n += slice_len;

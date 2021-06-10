@@ -13,6 +13,8 @@ use lru::LruCache;
 use std::cmp::Ordering;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use tracing::error;
+
 
 /// Extension of encrypted filename
 const ENCRYPTED_FILE_EXT: &str = ".c9r";

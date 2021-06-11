@@ -173,19 +173,6 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
             return;
         }
 
-        let metadata = match self.crypto_fs.metadata(&entry_path) {
-            Ok(m) => m,
-            Err(e) => {
-                error!(
-                    "Failed to get metadata of a file {}: {}",
-                    entry_path.display(),
-                    e.as_fail()
-                );
-                reply.error(unix_error_code_from_filesystem_error(e));
-                return;
-            }
-        };
-
         let inode = if let Some(i) = self.free_inodes.pop() {
             i
         } else {
@@ -195,12 +182,12 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
 
         let attr = FileAttr {
             ino: inode,
-            size: metadata.len,
+            size: 0,
             blocks: 0,
-            atime: metadata.accessed,
-            mtime: metadata.modified,
-            ctime: metadata.modified,
-            crtime: metadata.created,
+            atime: std::time::SystemTime::now(),
+            mtime: std::time::SystemTime::now(),
+            ctime: std::time::SystemTime::now(),
+            crtime: std::time::SystemTime::now(),
             kind: FileType::Directory,
             perm: 0o777,
             nlink: 0,
@@ -539,7 +526,7 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         name: &OsStr,
         _mode: u32,
         _umask: u32,
-        _flags: i32,
+        flags: i32,
         reply: ReplyCreate,
     ) {
         let parent_path = if let Some(p) = self.inode_to_entry.get(&parent) {
@@ -586,12 +573,12 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
             rdev: 0,
             blksize: 512,
             padding: 0,
-            flags: 0,
+            flags: flags as u32,
         };
 
         self.inode_to_entry.insert(inode, entry_path.clone());
         self.entry_to_inode.insert(entry_path, inode);
 
-        reply.created(&TTL, &attr, 0, 0, _flags as u32);
+        reply.created(&TTL, &attr, 0, 0, flags as u32);
     }
 }

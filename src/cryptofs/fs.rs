@@ -711,9 +711,10 @@ impl Write for CryptoFSFile {
                     buf.len() - n
                 };
 
-                if buf_chunk.is_empty() || buf_chunk.len() - offset < slice_len {
-                    buf_chunk.resize(offset + slice_len, 0u8);
+                if buf_chunk.len() < offset + slice_len {
+                    buf_chunk.resize(slice_len + offset, 0u8);
                 }
+
                 buf_chunk[offset..offset + slice_len].copy_from_slice(&buf[n..n + slice_len]);
                 n += slice_len;
                 chunk = buf_chunk;

@@ -360,7 +360,7 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
     }
 
     fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
-        Ok(self.create_dir(path)?)
+        self.create_dir(path)
     }
 
     fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
@@ -397,9 +397,9 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
     fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
         if real_path.is_shorten {
-            return Ok(self.file_system_provider.remove_dir(real_path)?);
+            return self.file_system_provider.remove_dir(real_path);
         }
-        Ok(self.file_system_provider.remove_file(real_path)?)
+        self.file_system_provider.remove_file(real_path)
     }
 
     fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
@@ -419,7 +419,7 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
                 self.file_system_provider.remove_file(real_path)?;
             }
         }
-        Ok(self.file_system_provider.remove_dir(real_dir_path)?)
+        self.file_system_provider.remove_dir(real_dir_path)
     }
 
     fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
@@ -438,14 +438,13 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
             dst_real_path.full_path = dst_real_path.full_path.join(CONTENTS_FILENAME);
         }
 
-        Ok(self
-            .file_system_provider
-            .copy_file(src_real_path, dst_real_path)?)
+        self.file_system_provider
+            .copy_file(src_real_path, dst_real_path)
     }
 
     fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
         self.copy_file(&_src, &_dest)?;
-        Ok(self.remove_file(&_src)?)
+        self.remove_file(&_src)
     }
 
     fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
@@ -475,7 +474,7 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
                 self.move_file(src_full_path, dst_full_path)?;
             }
         }
-        Ok(self.remove_dir(_src)?)
+        self.remove_dir(_src)
     }
 
     fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
@@ -483,17 +482,17 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
         if real_path.is_shorten {
             let contents_file = real_path.full_path.join(CONTENTS_FILENAME);
             if self.file_system_provider.exists(&contents_file) {
-                return Ok(self.file_system_provider.metadata(&contents_file)?);
+                return self.file_system_provider.metadata(&contents_file);
             }
         }
-        Ok(self.file_system_provider.metadata(real_path)?)
+        self.file_system_provider.metadata(real_path)
     }
 
     fn stats<P: AsRef<Path>>(&self, path: P) -> Result<Stats, FileSystemError> {
         let dir_id = self.dir_id_from_path(path)?;
         let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
 
-        Ok(self.file_system_provider.stats(real_path)?)
+        self.file_system_provider.stats(real_path)
     }
 }
 
@@ -746,7 +745,7 @@ impl Write for CryptoFSFile {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        Ok(self.rfs_file.flush()?)
+        self.rfs_file.flush()
     }
 }
 

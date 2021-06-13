@@ -10,6 +10,7 @@ use std::ffi::OsStr;
 use std::io::{Read, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
+use tracing::error;
 
 const TTL: Duration = Duration::from_secs(1);
 

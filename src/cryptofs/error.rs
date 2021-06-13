@@ -1,6 +1,7 @@
 use crate::crypto::{CryptoError, MasterKeyError};
 use failure::Fail;
 use failure::_core::fmt::Debug;
+use tracing::error;
 
 #[cfg(unix)]
 use libc::{c_int, EIO, ENOENT};

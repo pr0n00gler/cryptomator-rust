@@ -2,6 +2,7 @@ use crate::cryptofs::{CryptoFS, FileSystem};
 use crate::frontends::webdav::WebDav;
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use tracing::info;
 use webdav_handler::fakels::FakeLs;
 use webdav_handler::DavHandler;
 

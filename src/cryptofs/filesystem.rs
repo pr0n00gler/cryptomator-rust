@@ -5,10 +5,10 @@ use std::io::{Read, Seek, Write};
 use std::path::Path;
 use std::time::SystemTime;
 
+#[cfg(target_os = "linux")]
+use std::os::linux::fs::MetadataExt;
 #[cfg(target_os = "macos")]
 use std::os::macos::fs::MetadataExt;
-#[cfg(target_os = "unix")]
-use std::os::unix::fs::MetadataExt;
 
 /// A File should be readable/writeable/seekable, and be able to return its metadata
 pub trait File: Seek + Read + Write + Sync + Send + Debug {

@@ -1,8 +1,7 @@
 use crate::cryptofs::{unix_error_code_from_filesystem_error, CryptoFS, DirEntry, FileSystem};
-use failure::AsFail;
 use fuser::{
     FileAttr, FileType, Filesystem as FuseFS, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
-    ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyWrite, Request, FUSE_ROOT_ID,
+    ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyWrite, Request, TimeOrNow, FUSE_ROOT_ID,
 };
 use libc::{EIO, ENOENT, EOF};
 use lru::LruCache;
@@ -10,7 +9,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::{Read, SeekFrom, Write};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -57,10 +56,10 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         let entry = match self.crypto_fs.metadata(entry_name.join(name)) {
             Ok(m) => m,
             Err(e) => {
-                debug!(
-                    "Failed to get metadata of a file {}: {}",
-                    entry_name.join(name).display(),
-                    e.as_fail()
+                error!(
+                    "Failed to get metadata of a file {:?}: {:?}",
+                    entry_name.join(name),
+                    e
                 );
                 reply.error(unix_error_code_from_filesystem_error(e));
                 return;
@@ -87,8 +86,8 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
             },
             perm: 0o777,
             nlink: 0,
-            uid: 0,
-            gid: 0,
+            uid: entry.uid,
+            gid: entry.gid,
             rdev: 0,
             blksize: 512,
             padding: 0,
@@ -99,6 +98,30 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         self.entry_to_inode.insert(entry_name.join(name), inode);
 
         reply.entry(&TTL, &attr, 0);
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        _size: Option<u64>,
+        _atime: Option<TimeOrNow>,
+        _mtime: Option<TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        // just a mock
+        // getattr call to reply fileattr of a file
+        // TODO: do a real changing of attributes
+        self.getattr(_req, _ino, reply)
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
@@ -112,11 +135,7 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         let entry = match self.crypto_fs.metadata(entry_name) {
             Ok(m) => m,
             Err(e) => {
-                error!(
-                    "Failed to get metadata of a file {}: {}",
-                    entry_name.display(),
-                    e.as_fail()
-                );
+                error!("Failed to get metadata of a file {:?}: {:?}", entry_name, e);
                 reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
@@ -135,8 +154,8 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
             },
             perm: 0o777,
             nlink: 0,
-            uid: 0,
-            gid: 0,
+            uid: entry.uid,
+            gid: entry.gid,
             rdev: 0,
             blksize: 512,
             padding: 0,
@@ -164,14 +183,19 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         let entry_path = parent_path.join(name);
 
         if let Some(e) = self.crypto_fs.create_dir_all(&entry_path).err() {
-            error!(
-                "Failed to create dir {}: {}",
-                entry_path.display(),
-                e.as_fail()
-            );
+            error!("Failed to create dir {:?}: {:?}", entry_path, e);
             reply.error(unix_error_code_from_filesystem_error(e));
             return;
         }
+
+        let metadata = match self.crypto_fs.metadata(&entry_path) {
+            Ok(m) => m,
+            Err(e) => {
+                error!("Failed to get metadata of a file {:?}: {:?}", entry_path, e);
+                reply.error(unix_error_code_from_filesystem_error(e));
+                return;
+            }
+        };
 
         let inode = if let Some(i) = self.free_inodes.pop() {
             i
@@ -182,19 +206,19 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
 
         let attr = FileAttr {
             ino: inode,
-            size: 0,
+            size: metadata.len,
             blocks: 0,
-            atime: std::time::SystemTime::now(),
-            mtime: std::time::SystemTime::now(),
-            ctime: std::time::SystemTime::now(),
-            crtime: std::time::SystemTime::now(),
+            atime: metadata.accessed,
+            mtime: metadata.modified,
+            ctime: metadata.modified,
+            crtime: metadata.created,
             kind: FileType::Directory,
             perm: 0o777,
             nlink: 0,
-            uid: 0,
-            gid: 0,
+            uid: metadata.uid,
+            gid: metadata.gid,
             rdev: 0,
-            blksize: 512,
+            blksize: 0,
             padding: 0,
             flags: 0,
         };
@@ -216,11 +240,7 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         let entry_path = parent_path.join(name);
 
         if let Some(e) = self.crypto_fs.remove_file(&entry_path).err() {
-            error!(
-                "Failed to remove file {}: {}",
-                entry_path.display(),
-                e.as_fail()
-            );
+            error!("Failed to remove file {:?}: {:?}", entry_path, e);
             reply.error(unix_error_code_from_filesystem_error(e));
             return;
         }
@@ -244,11 +264,7 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         };
         let entry_path = parent_path.join(name);
         if let Some(e) = self.crypto_fs.remove_dir(&entry_path).err() {
-            error!(
-                "Failed to remove dir {}: {}",
-                entry_path.display(),
-                e.as_fail()
-            );
+            error!("Failed to remove dir {:?}: {:?}", entry_path, e);
             reply.error(unix_error_code_from_filesystem_error(e));
             return;
         }
@@ -284,9 +300,8 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
             Ok(m) => m,
             Err(e) => {
                 error!(
-                    "Failed to get metadata of an entry {}: {}",
-                    entry_path.display(),
-                    e.as_fail()
+                    "Failed to get metadata of an entry {:?}: {:?}",
+                    entry_path, e
                 );
                 reply.error(ENOENT);
                 return;
@@ -304,20 +319,12 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
 
         if entry_metadata.is_dir {
             if let Some(e) = self.crypto_fs.move_dir(&entry_path, &new_entry_path).err() {
-                error!(
-                    "Failed to rename dir {}: {}",
-                    entry_path.display(),
-                    e.as_fail()
-                );
+                error!("Failed to rename dir {:?}: {:?}", entry_path, e);
                 reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
         } else if let Some(e) = self.crypto_fs.move_file(&entry_path, &new_entry_path).err() {
-            error!(
-                "Failed to rename file {}: {}",
-                entry_path.display(),
-                e.as_fail()
-            );
+            error!("Failed to rename file {:?}: {:?}", entry_path, e);
             reply.error(unix_error_code_from_filesystem_error(e));
             return;
         }
@@ -350,17 +357,13 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         let mut f = match self.crypto_fs.open_file(entry_name) {
             Ok(f) => f,
             Err(e) => {
-                error!(
-                    "Failed to open file {}: {}",
-                    entry_name.display(),
-                    e.as_fail()
-                );
+                error!("Failed to open file {:?}: {:?}", entry_name, e);
                 reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
         };
         if let Some(e) = f.seek(SeekFrom::Start(offset as u64)).err() {
-            error!("Failed to seek file: {}", e.as_fail());
+            error!("Failed to seek file: {:?}", e);
             reply.error(EIO);
             return;
         }
@@ -368,7 +371,7 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         match f.read(data.as_mut_slice()) {
             Ok(n) => reply.data(&data.as_slice()[..n]),
             Err(e) => {
-                error!("Failed to read file: {}", e.as_fail());
+                error!("Failed to read file: {:?}", e);
                 reply.error(EOF);
             }
         }
@@ -396,24 +399,20 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         let mut f = match self.crypto_fs.open_file(entry_name) {
             Ok(f) => f,
             Err(e) => {
-                error!(
-                    "Failed to open file {}: {}",
-                    entry_name.display(),
-                    e.as_fail()
-                );
+                error!("Failed to open file {:?}: {:?}", entry_name, e);
                 reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
         };
         if let Some(e) = f.seek(SeekFrom::Start(offset as u64)).err() {
-            error!("Failed to seek file: {}", e.as_fail());
+            error!("Failed to seek file: {:?}", e);
             reply.error(EIO);
             return;
         }
         match f.write(data) {
             Ok(n) => reply.written(n as u32),
             Err(e) => {
-                error!("Failed to read file: {}", e.as_fail());
+                error!("Failed to read file: {:?}", e);
                 reply.error(EOF);
             }
         }
@@ -459,11 +458,7 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         let entries = match self.crypto_fs.read_dir(&entry_name) {
             Ok(e) => e.collect::<Vec<DirEntry>>(),
             Err(e) => {
-                error!(
-                    "Failed to read dir {}: {}",
-                    entry_name.display(),
-                    e.as_fail()
-                );
+                error!("Failed to read dir {}: {:?}", entry_name.display(), e);
                 reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
@@ -540,11 +535,7 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         let f = match self.crypto_fs.create_file(&entry_path) {
             Ok(f) => f,
             Err(e) => {
-                error!(
-                    "Failed to create file {}: {}",
-                    entry_path.display(),
-                    e.as_fail()
-                );
+                error!("Failed to create file {}: {:?}", entry_path.display(), e);
                 reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
@@ -557,19 +548,32 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
             self.last_inode
         };
 
+        let metadata = match f.metadata() {
+            Ok(m) => m,
+            Err(e) => {
+                error!(
+                    "Failed to get metadata of an entry {}: {:?}",
+                    entry_path.display(),
+                    e
+                );
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
         let attr = FileAttr {
             ino: inode,
-            size: f.metadata().unwrap_or_default().len,
+            size: metadata.len,
             blocks: 0,
-            atime: f.metadata().unwrap_or_default().accessed,
-            mtime: f.metadata().unwrap_or_default().modified,
-            ctime: f.metadata().unwrap_or_default().created,
-            crtime: f.metadata().unwrap_or_default().created,
+            atime: metadata.accessed,
+            mtime: metadata.modified,
+            ctime: metadata.modified,
+            crtime: metadata.created,
             kind: FileType::RegularFile,
             perm: 0o777,
             nlink: 0,
-            uid: 0,
-            gid: 0,
+            uid: metadata.uid,
+            gid: metadata.gid,
             rdev: 0,
             blksize: 512,
             padding: 0,

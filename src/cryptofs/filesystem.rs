@@ -2,6 +2,7 @@ use crate::cryptofs::FileSystemError;
 use std::ffi::OsString;
 use std::fmt::Debug;
 use std::io::{Read, Seek, Write};
+use std::os::macos::fs::MetadataExt;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -65,6 +66,11 @@ pub struct Metadata {
     pub modified: SystemTime,
     pub accessed: SystemTime,
     pub created: SystemTime,
+
+    #[cfg(unix)]
+    pub uid: u32,
+    #[cfg(unix)]
+    pub gid: u32,
 }
 
 impl From<std::fs::Metadata> for Metadata {
@@ -85,6 +91,11 @@ impl From<std::fs::Metadata> for Metadata {
                 Ok(st) => st,
                 Err(_) => SystemTime::UNIX_EPOCH,
             },
+
+            #[cfg(unix)]
+            uid: m.st_uid(),
+            #[cfg(unix)]
+            gid: m.st_gid(),
         }
     }
 }
@@ -98,6 +109,11 @@ impl Default for Metadata {
             modified: SystemTime::UNIX_EPOCH,
             accessed: SystemTime::UNIX_EPOCH,
             created: SystemTime::UNIX_EPOCH,
+
+            #[cfg(unix)]
+            uid: 0,
+            #[cfg(unix)]
+            gid: 0,
         }
     }
 }

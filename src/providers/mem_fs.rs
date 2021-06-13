@@ -69,6 +69,11 @@ fn metadata_from_rsfs<M: rsfs::Metadata>(m: M) -> Metadata {
         modified: m.modified().unwrap_or(SystemTime::UNIX_EPOCH),
         accessed: m.accessed().unwrap_or(SystemTime::UNIX_EPOCH),
         created: m.created().unwrap_or(SystemTime::UNIX_EPOCH),
+
+        #[cfg(unix)]
+        uid: 0,
+        #[cfg(unix)]
+        gid: 0,
     }
 }
 

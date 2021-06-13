@@ -8,7 +8,6 @@ use crate::cryptofs::{
     component_to_string, last_path_component, parent_path, DirEntry, File, FileSystem,
     FileSystemError, Stats,
 };
-use failure::AsFail;
 use lru::LruCache;
 use std::cmp::Ordering;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -347,9 +346,9 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
                     }
                     _ => {
                         error!(
-                            "Failed to get dir_id from path {}: {}",
+                            "Failed to get dir_id from path {}: {:?}",
                             path_buf.to_str().unwrap_or_default(),
-                            e.as_fail()
+                            e
                         );
                         return Err(e);
                     }
@@ -619,7 +618,7 @@ impl Seek for CryptoFSFile {
             SeekFrom::End(p) => match self.get_file_size() {
                 Ok(s) => self.current_pos = (s as i64 + p) as u64,
                 Err(e) => {
-                    error!("Failed to determine cleartext file size: {}", e.as_fail());
+                    error!("Failed to determine cleartext file size: {:?}", e);
                     return Err(std::io::Error::from(std::io::ErrorKind::Other));
                 }
             },
@@ -638,7 +637,7 @@ impl Read for CryptoFSFile {
             let chunk = match self.read_chunk(chunk_index) {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("Failed to read chunk: {}", e.as_fail());
+                    error!("Failed to read chunk: {:?}", e);
                     return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                 }
             };
@@ -674,7 +673,7 @@ impl Write for CryptoFSFile {
         let file_size = match self.get_real_file_size() {
             Ok(s) => s,
             Err(e) => {
-                error!("Failed to determine cleartext file size: {}", e.as_fail());
+                error!("Failed to determine cleartext file size: {:?}", e);
                 return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
             }
         };
@@ -698,7 +697,7 @@ impl Write for CryptoFSFile {
                 let mut buf_chunk = match self.read_chunk(chunk_index) {
                     Ok(c) => c,
                     Err(e) => {
-                        error!("Failed to read chunk: {}", e.as_fail());
+                        error!("Failed to read chunk: {:?}", e);
                         return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                     }
                 };
@@ -727,7 +726,7 @@ impl Write for CryptoFSFile {
             ) {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("Failed to encrypt chunk: {}", e.as_fail());
+                    error!("Failed to encrypt chunk: {:?}", e);
                     return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                 }
             };

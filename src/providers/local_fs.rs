@@ -91,7 +91,7 @@ impl FileSystem for LocalFS {
 
     fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
         self.copy_file(&_src, &_dest)?;
-        Ok(self.remove_file(_src)?)
+        self.remove_file(_src)
     }
 
     fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {

@@ -8,7 +8,6 @@ use crate::cryptofs::{
     component_to_string, last_path_component, parent_path, DirEntry, File, FileSystem,
     FileSystemError, Stats,
 };
-use failure::AsFail;
 use lru::LruCache;
 use std::cmp::Ordering;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -348,9 +347,9 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
                     }
                     _ => {
                         error!(
-                            "Failed to get dir_id from path {}: {}",
+                            "Failed to get dir_id from path {}: {:?}",
                             path_buf.to_str().unwrap_or_default(),
-                            e.as_fail()
+                            e
                         );
                         return Err(e);
                     }
@@ -361,7 +360,7 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
     }
 
     fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
-        Ok(self.create_dir(path)?)
+        self.create_dir(path)
     }
 
     fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
@@ -398,9 +397,9 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
     fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
         if real_path.is_shorten {
-            return Ok(self.file_system_provider.remove_dir(real_path)?);
+            return self.file_system_provider.remove_dir(real_path);
         }
-        Ok(self.file_system_provider.remove_file(real_path)?)
+        self.file_system_provider.remove_file(real_path)
     }
 
     fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
@@ -420,7 +419,7 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
                 self.file_system_provider.remove_file(real_path)?;
             }
         }
-        Ok(self.file_system_provider.remove_dir(real_dir_path)?)
+        self.file_system_provider.remove_dir(real_dir_path)
     }
 
     fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
@@ -439,14 +438,13 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
             dst_real_path.full_path = dst_real_path.full_path.join(CONTENTS_FILENAME);
         }
 
-        Ok(self
-            .file_system_provider
-            .copy_file(src_real_path, dst_real_path)?)
+        self.file_system_provider
+            .copy_file(src_real_path, dst_real_path)
     }
 
     fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
         self.copy_file(&_src, &_dest)?;
-        Ok(self.remove_file(&_src)?)
+        self.remove_file(&_src)
     }
 
     fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
@@ -476,7 +474,7 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
                 self.move_file(src_full_path, dst_full_path)?;
             }
         }
-        Ok(self.remove_dir(_src)?)
+        self.remove_dir(_src)
     }
 
     fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
@@ -484,17 +482,17 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
         if real_path.is_shorten {
             let contents_file = real_path.full_path.join(CONTENTS_FILENAME);
             if self.file_system_provider.exists(&contents_file) {
-                return Ok(self.file_system_provider.metadata(&contents_file)?);
+                return self.file_system_provider.metadata(&contents_file);
             }
         }
-        Ok(self.file_system_provider.metadata(real_path)?)
+        self.file_system_provider.metadata(real_path)
     }
 
     fn stats<P: AsRef<Path>>(&self, path: P) -> Result<Stats, FileSystemError> {
         let dir_id = self.dir_id_from_path(path)?;
         let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
 
-        Ok(self.file_system_provider.stats(real_path)?)
+        self.file_system_provider.stats(real_path)
     }
 }
 
@@ -621,7 +619,7 @@ impl Seek for CryptoFSFile {
             SeekFrom::End(p) => match self.get_file_size() {
                 Ok(s) => self.current_pos = (s as i64 + p) as u64,
                 Err(e) => {
-                    error!("Failed to determine cleartext file size: {}", e.as_fail());
+                    error!("Failed to determine cleartext file size: {:?}", e);
                     return Err(std::io::Error::from(std::io::ErrorKind::Other));
                 }
             },
@@ -635,16 +633,12 @@ impl Read for CryptoFSFile {
         let mut chunk_index = self.current_pos / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
         let mut n: usize = 0;
         while n < buf.len() {
-            let offset = if n > 0 {
-                0
-            } else {
-                (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize
-            };
+            let offset = (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize;
 
             let chunk = match self.read_chunk(chunk_index) {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("Failed to read chunk: {}", e.as_fail());
+                    error!("Failed to read chunk: {:?}", e);
                     return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                 }
             };
@@ -680,7 +674,7 @@ impl Write for CryptoFSFile {
         let file_size = match self.get_real_file_size() {
             Ok(s) => s,
             Err(e) => {
-                error!("Failed to determine cleartext file size: {}", e.as_fail());
+                error!("Failed to determine cleartext file size: {:?}", e);
                 return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
             }
         };
@@ -704,7 +698,7 @@ impl Write for CryptoFSFile {
                 let mut buf_chunk = match self.read_chunk(chunk_index) {
                     Ok(c) => c,
                     Err(e) => {
-                        error!("Failed to read chunk: {}", e.as_fail());
+                        error!("Failed to read chunk: {:?}", e);
                         return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                     }
                 };
@@ -716,10 +710,10 @@ impl Write for CryptoFSFile {
                     buf.len() - n
                 };
 
-                let chunk_len = buf_chunk.len();
-                if chunk_len == 0 || chunk_len - offset < slice_len {
-                    buf_chunk.resize(buf_chunk.len() + chunk_len - offset + slice_len, 0u8);
+                if buf_chunk.len() < offset + slice_len {
+                    buf_chunk.resize(slice_len + offset, 0u8);
                 }
+
                 buf_chunk[offset..offset + slice_len].copy_from_slice(&buf[n..n + slice_len]);
                 n += slice_len;
                 chunk = buf_chunk;
@@ -733,7 +727,7 @@ impl Write for CryptoFSFile {
             ) {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("Failed to encrypt chunk: {}", e.as_fail());
+                    error!("Failed to encrypt chunk: {:?}", e);
                     return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                 }
             };
@@ -751,7 +745,7 @@ impl Write for CryptoFSFile {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        Ok(self.rfs_file.flush()?)
+        self.rfs_file.flush()
     }
 }
 

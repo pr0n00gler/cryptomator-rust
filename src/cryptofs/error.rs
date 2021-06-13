@@ -64,6 +64,7 @@ impl From<uuid::Error> for FileSystemError {
 
 #[cfg(unix)]
 pub fn unix_error_code_from_filesystem_error(fs: FileSystemError) -> c_int {
+    error!("Error occurred: {:?}", fs);
     match fs {
         FileSystemError::IOError(io) => {
             if let Some(e) = io.raw_os_error() {

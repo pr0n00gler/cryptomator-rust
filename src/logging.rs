@@ -1,18 +1,10 @@
-use slog::Drain;
-use std::env;
+use tracing_subscriber::{prelude::*, EnvFilter};
 
-pub fn init_logger() -> (slog_scope::GlobalLoggerGuard, slog_async::AsyncGuard) {
-    if env::var("RUST_LOG").is_err() {
-        env::set_var("RUST_LOG", "info")
-    }
-    let decorator = slog_term::TermDecorator::new().build();
-    let term_drain = slog_term::FullFormat::new(decorator).build().fuse();
-    let drain = slog_envlogger::new(term_drain);
-    let (drain, async_guard) = slog_async::Async::new(drain)
-        .thread_name("cryptomator_logger".to_string())
-        .build_with_guard();
-    let log = slog::Logger::root(drain.fuse(), slog::slog_o!());
-    let scope_guard = slog_scope::set_global_logger(log);
-    slog_stdlog::init().unwrap();
-    (scope_guard, async_guard)
+pub fn init_logger() -> tracing_appender::non_blocking::WorkerGuard {
+    let registry = tracing_subscriber::registry();
+    let (non_blocking, guard) = tracing_appender::non_blocking(std::io::stdout());
+    let stdout_subscriber = tracing_subscriber::fmt::subscriber().with_writer(non_blocking);
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    registry.with(stdout_subscriber).with(filter).init();
+    guard
 }

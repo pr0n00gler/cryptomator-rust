@@ -3,7 +3,7 @@ use cryptomator::cryptofs::CryptoFS;
 use cryptomator::logging::init_logger;
 use cryptomator::providers::LocalFS;
 
-use log::info;
+use tracing::info;
 
 use clap::Clap;
 
@@ -74,7 +74,7 @@ async fn main() {
     let opts: Opts = Opts::parse();
 
     env::set_var("RUST_LOG", opts.log_level);
-    let _log = init_logger();
+    let _guard = init_logger();
 
     let storage_path = std::path::Path::new(opts.storage_path.as_str()).to_path_buf();
 

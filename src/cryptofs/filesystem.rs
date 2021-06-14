@@ -5,6 +5,11 @@ use std::io::{Read, Seek, Write};
 use std::path::Path;
 use std::time::SystemTime;
 
+#[cfg(target_os = "linux")]
+use std::os::linux::fs::MetadataExt;
+#[cfg(target_os = "macos")]
+use std::os::macos::fs::MetadataExt;
+
 /// A File should be readable/writeable/seekable, and be able to return its metadata
 pub trait File: Seek + Read + Write + Sync + Send + Debug {
     fn metadata(&self) -> Result<Metadata, FileSystemError>;
@@ -65,6 +70,11 @@ pub struct Metadata {
     pub modified: SystemTime,
     pub accessed: SystemTime,
     pub created: SystemTime,
+
+    #[cfg(unix)]
+    pub uid: u32,
+    #[cfg(unix)]
+    pub gid: u32,
 }
 
 impl From<std::fs::Metadata> for Metadata {
@@ -85,6 +95,11 @@ impl From<std::fs::Metadata> for Metadata {
                 Ok(st) => st,
                 Err(_) => SystemTime::UNIX_EPOCH,
             },
+
+            #[cfg(unix)]
+            uid: m.st_uid(),
+            #[cfg(unix)]
+            gid: m.st_gid(),
         }
     }
 }
@@ -98,6 +113,11 @@ impl Default for Metadata {
             modified: SystemTime::UNIX_EPOCH,
             accessed: SystemTime::UNIX_EPOCH,
             created: SystemTime::UNIX_EPOCH,
+
+            #[cfg(unix)]
+            uid: 0,
+            #[cfg(unix)]
+            gid: 0,
         }
     }
 }

@@ -483,7 +483,7 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
                     .insert(entry_name.join(&entry.file_name), inode);
                 self.last_inode += 1;
             }
-            if reply.add(
+            let _ = reply.add(
                 inode,
                 (i + 1) as i64,
                 match entry.metadata.is_file {
@@ -491,9 +491,7 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
                     false => FileType::Directory,
                 },
                 &entry.file_name,
-            ) {
-                break;
-            }
+            );
         }
 
         self.dir_entries_cache.put(ino, entries);

@@ -3,7 +3,6 @@ use crate::cryptofs::{
 };
 use rsfs::mem::FS;
 use rsfs::{DirEntry as DE, GenFS, OpenOptions};
-use std::ffi::OsString;
 use std::fmt::Debug;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -133,7 +132,7 @@ impl FileSystem for MemoryFs {
     fn exists<P: AsRef<Path>>(&self, path: P) -> bool {
         let last_element = last_path_component(&path).unwrap();
         let mut entries = self.fs.read_dir(parent_path(&path)).unwrap();
-        entries.any(|de| de.unwrap().file_name() == OsString::from(&last_element))
+        entries.any(|de| de.unwrap().file_name() == *last_element)
     }
 
     fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {

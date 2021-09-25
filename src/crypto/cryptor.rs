@@ -351,7 +351,7 @@ impl Cryptor {
             chunk_nonce.len() + chunk_data.len() + FILE_CHUNK_CONTENT_MAC_LENGTH,
         );
         encrypted_chunk.extend_from_slice(&chunk_nonce);
-        encrypted_chunk.extend_from_slice(&chunk_data);
+        encrypted_chunk.extend_from_slice(chunk_data);
 
         let mut cipher = Aes256Ctr::new(
             GenericArray::from_slice(file_key),
@@ -362,7 +362,7 @@ impl Cryptor {
         let mut mac_payload: Vec<u8> = Vec::with_capacity(
             header_nonce.len() + U64_SIZE + chunk_nonce.len() + chunk_data.len(),
         );
-        mac_payload.extend_from_slice(&header_nonce);
+        mac_payload.extend_from_slice(header_nonce);
         mac_payload.write_u64::<BigEndian>(chunk_number)?;
         mac_payload.extend_from_slice(&encrypted_chunk);
 

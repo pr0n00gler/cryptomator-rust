@@ -136,8 +136,8 @@ fn crypto_fs_exists<P: AsRef<Path>>(filename: P) {
 
     crypto_fs.create_file(&filename).unwrap();
 
-    assert_eq!(crypto_fs.exists(&filename), true);
-    assert_eq!(crypto_fs.exists("/404.file"), false);
+    assert!(crypto_fs.exists(&filename));
+    assert!(!crypto_fs.exists("/404.file"));
 }
 
 #[test]
@@ -184,9 +184,9 @@ fn crypto_fs_remove_dir<P: AsRef<Path>>(files: Vec<P>, dir_to_remove: P, parent_
     }
     crypto_fs.remove_dir(&parent_dir).unwrap();
 
-    assert_eq!(crypto_fs.exists(dir_to_remove), false);
+    assert!(!crypto_fs.exists(dir_to_remove));
     for f in files.iter() {
-        assert_eq!(crypto_fs.exists(f), false);
+        assert!(!crypto_fs.exists(f));
     }
 }
 

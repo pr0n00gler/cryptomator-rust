@@ -1,4 +1,4 @@
-use crate::cryptofs::{CryptoFS, FileSystem};
+use crate::cryptofs::{CryptoFs, FileSystem};
 use crate::frontends::webdav::WebDav;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -14,7 +14,7 @@ use crate::frontends::fuse::Fuse;
 
 pub async fn mount_webdav<FS: 'static + FileSystem>(
     listen_address: String,
-    crypto_fs: CryptoFS<FS>,
+    crypto_fs: CryptoFs<FS>,
 ) {
     let webdav = WebDav::new(crypto_fs);
 
@@ -45,11 +45,13 @@ pub async fn mount_webdav<FS: 'static + FileSystem>(
 }
 
 #[cfg(unix)]
-pub fn mount_fuse<FS: FileSystem>(mountpoint: String, options: String, crypto_fs: CryptoFS<FS>) {
+pub fn mount_fuse<FS: FileSystem>(mountpoint: String, options: String, crypto_fs: CryptoFs<FS>) {
     let fuse_fs = Fuse::new(crypto_fs);
     let options = options
         .split_whitespace()
         .map(|o| o.as_ref())
         .collect::<Vec<&OsStr>>();
+
+    #[allow(deprecated)]
     fuser::mount(fuse_fs, &mountpoint, &options).unwrap();
 }

@@ -6,7 +6,7 @@ pub enum MasterKeyError {
     VaultVersion,
 
     #[fail(display = "Input/Output error")]
-    IOError(std::io::Error),
+    IoError(std::io::Error),
 
     #[fail(display = "Json serialize error")]
     SerializationJsonError(serde_json::Error),
@@ -21,7 +21,7 @@ pub enum MasterKeyError {
     ScryptInvalidOutputLengthError(scrypt::errors::InvalidOutputLen),
 
     #[fail(display = "AES key error")]
-    AESKeyError(openssl::aes::KeyError),
+    AesKeyError(openssl::aes::KeyError),
 
     #[fail(display = "HMac error")]
     HMacError(hmac::crypto_mac::MacError),
@@ -32,7 +32,7 @@ pub enum MasterKeyError {
 
 impl From<std::io::Error> for MasterKeyError {
     fn from(err: std::io::Error) -> MasterKeyError {
-        MasterKeyError::IOError(err)
+        MasterKeyError::IoError(err)
     }
 }
 
@@ -74,20 +74,20 @@ impl From<hmac::crypto_mac::InvalidKeyLength> for MasterKeyError {
 
 impl From<openssl::aes::KeyError> for MasterKeyError {
     fn from(err: openssl::aes::KeyError) -> MasterKeyError {
-        MasterKeyError::AESKeyError(err)
+        MasterKeyError::AesKeyError(err)
     }
 }
 
 #[derive(Debug, Fail)]
 pub enum CryptoError {
     #[fail(display = "Input/Output error")]
-    IOError(std::io::Error),
+    IoError(std::io::Error),
 
     #[fail(display = "Base64 decode error")]
     Base64DecodeError(base64::DecodeError),
 
     #[fail(display = "AEAD error")]
-    AEADError(aes_siv::aead::Error),
+    AeadError(aes_siv::aead::Error),
 
     #[fail(display = "HMac error")]
     HMacError(hmac::crypto_mac::MacError),
@@ -102,12 +102,12 @@ pub enum CryptoError {
     InvalidFileChunkLength(String),
 
     #[fail(display = "String from UTF-8 error")]
-    StringFromUTF8Error(std::string::FromUtf8Error),
+    StringFromUtf8Error(std::string::FromUtf8Error),
 }
 
 impl From<std::io::Error> for CryptoError {
     fn from(err: std::io::Error) -> CryptoError {
-        CryptoError::IOError(err)
+        CryptoError::IoError(err)
     }
 }
 
@@ -119,7 +119,7 @@ impl From<base64::DecodeError> for CryptoError {
 
 impl From<aes_siv::aead::Error> for CryptoError {
     fn from(err: aes_siv::aead::Error) -> CryptoError {
-        CryptoError::AEADError(err)
+        CryptoError::AeadError(err)
     }
 }
 
@@ -137,6 +137,6 @@ impl From<hmac::crypto_mac::InvalidKeyLength> for CryptoError {
 
 impl From<std::string::FromUtf8Error> for CryptoError {
     fn from(err: std::string::FromUtf8Error) -> CryptoError {
-        CryptoError::StringFromUTF8Error(err)
+        CryptoError::StringFromUtf8Error(err)
     }
 }

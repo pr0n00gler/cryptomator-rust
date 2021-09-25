@@ -9,7 +9,7 @@ use libc::{c_int, EIO, ENOENT};
 #[derive(Debug, Fail)]
 pub enum FileSystemError {
     #[fail(display = "Input/Output error")]
-    IOError(std::io::Error),
+    IoError(std::io::Error),
 
     #[fail(display = "Crypto error")]
     CryptoError(CryptoError),
@@ -30,12 +30,12 @@ pub enum FileSystemError {
     StringConvertError(std::string::FromUtf8Error),
 
     #[fail(display = "UUID parse error")]
-    UUIDParseError(uuid::Error),
+    UuidParseError(uuid::Error),
 }
 
 impl From<std::io::Error> for FileSystemError {
     fn from(err: std::io::Error) -> FileSystemError {
-        FileSystemError::IOError(err)
+        FileSystemError::IoError(err)
     }
 }
 
@@ -59,7 +59,7 @@ impl From<std::string::FromUtf8Error> for FileSystemError {
 
 impl From<uuid::Error> for FileSystemError {
     fn from(err: uuid::Error) -> FileSystemError {
-        FileSystemError::UUIDParseError(err)
+        FileSystemError::UuidParseError(err)
     }
 }
 
@@ -67,21 +67,21 @@ impl From<uuid::Error> for FileSystemError {
 pub fn unix_error_code_from_filesystem_error(fs: FileSystemError) -> c_int {
     error!("Error occurred: {:?}", fs);
     match fs {
-        FileSystemError::IOError(io) => {
+        FileSystemError::IoError(io) => {
             if let Some(e) = io.raw_os_error() {
                 e
             } else {
                 EIO
             }
         }
-        FileSystemError::CryptoError(CryptoError::IOError(io)) => {
+        FileSystemError::CryptoError(CryptoError::IoError(io)) => {
             if let Some(e) = io.raw_os_error() {
                 e
             } else {
                 EIO
             }
         }
-        FileSystemError::MasterKeyError(MasterKeyError::IOError(io)) => {
+        FileSystemError::MasterKeyError(MasterKeyError::IoError(io)) => {
             if let Some(e) = io.raw_os_error() {
                 e
             } else {

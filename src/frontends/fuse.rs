@@ -1,4 +1,4 @@
-use crate::cryptofs::{unix_error_code_from_filesystem_error, CryptoFS, DirEntry, FileSystem};
+use crate::cryptofs::{unix_error_code_from_filesystem_error, CryptoFs, DirEntry, FileSystem};
 use fuser::{
     FileAttr, FileType, Filesystem as FuseFS, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyWrite, Request, TimeOrNow, FUSE_ROOT_ID,
@@ -20,14 +20,14 @@ pub struct Fuse<FS: FileSystem> {
     inode_to_entry: HashMap<u64, PathBuf>,
     entry_to_inode: HashMap<PathBuf, u64>,
     free_inodes: Vec<u64>,
-    crypto_fs: CryptoFS<FS>,
+    crypto_fs: CryptoFs<FS>,
     last_inode: u64,
 
     dir_entries_cache: lru::LruCache<u64, Vec<DirEntry>>,
 }
 
 impl<FS: FileSystem> Fuse<FS> {
-    pub fn new(crypto_fs: CryptoFS<FS>) -> Fuse<FS> {
+    pub fn new(crypto_fs: CryptoFs<FS>) -> Fuse<FS> {
         let mut inode_to_entry: HashMap<u64, PathBuf> = HashMap::new();
         inode_to_entry.insert(FUSE_ROOT_ID, std::path::Path::new("/").to_path_buf());
 
@@ -91,7 +91,6 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
             gid: entry.gid,
             rdev: 0,
             blksize: 512,
-            padding: 0,
             flags: 0,
         };
 
@@ -159,7 +158,6 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
             gid: entry.gid,
             rdev: 0,
             blksize: 512,
-            padding: 0,
             flags: 0,
         };
         reply.attr(&TTL, &attr);
@@ -220,7 +218,6 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
             gid: metadata.gid,
             rdev: 0,
             blksize: 0,
-            padding: 0,
             flags: 0,
         };
 
@@ -575,7 +572,6 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
             gid: metadata.gid,
             rdev: 0,
             blksize: 512,
-            padding: 0,
             flags: flags as u32,
         };
 
@@ -583,5 +579,18 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         self.entry_to_inode.insert(entry_path, inode);
 
         reply.created(&TTL, &attr, 0, 0, flags as u32);
+    }
+
+    fn setxattr(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _name: &OsStr,
+        _value: &[u8],
+        _flags: i32,
+        _position: u32,
+        reply: ReplyEmpty,
+    ) {
+        reply.ok()
     }
 }

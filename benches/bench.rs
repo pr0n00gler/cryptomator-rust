@@ -1,7 +1,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use cryptomator::crypto;
-use cryptomator::cryptofs::{CryptoFS, FileSystem};
-use cryptomator::providers::MemoryFS;
+use cryptomator::cryptofs::{CryptoFs, FileSystem};
+use cryptomator::providers::MemoryFs;
 use std::io::{Read, SeekFrom};
 
 const PATH_TO_MASTER_KEY: &str = "tests/test_storage/masterkey.cryptomator";
@@ -16,8 +16,8 @@ fn crypto_fs_write(c: &mut Criterion) {
     let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
-    let local_fs = MemoryFS::new();
-    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
     let sizes = [10 * MB];
 
@@ -48,8 +48,8 @@ fn crypto_fs_read(c: &mut Criterion) {
     let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
-    let local_fs = MemoryFS::new();
-    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
     let random_data: Vec<u8> = (0..10 * MB).map(|_| rand::random::<u8>()).collect();
     let mut bench_file = crypto_fs.create_file("/bench.dat").unwrap();

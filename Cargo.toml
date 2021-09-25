@@ -40,7 +40,7 @@ rpassword = "5.0"
 fs2 = "0.4.3"
 
 [target.'cfg(unix)'.dependencies]
-fuser = "0.7"
+fuser = "0.9.1"
 libc = "0.2.51"
 
 

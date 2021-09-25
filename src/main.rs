@@ -1,7 +1,7 @@
 use cryptomator::crypto::{Cryptor, MasterKey, MasterKeyJson};
-use cryptomator::cryptofs::CryptoFS;
+use cryptomator::cryptofs::CryptoFs;
 use cryptomator::logging::init_logger;
-use cryptomator::providers::LocalFS;
+use cryptomator::providers::LocalFs;
 
 use tracing::info;
 
@@ -105,7 +105,7 @@ async fn main() {
                 .expect("Failed to create folder for the storage");
         }
         Command::Unlock(u) => {
-            let local_fs = LocalFS::new();
+            let local_fs = LocalFs::new();
             let pass = rpassword::prompt_password_stdout("Master key password: ")
                 .expect("Unable to read password");
             info!("Unlocking the storage...");
@@ -118,7 +118,7 @@ async fn main() {
             info!("Keys derived!");
 
             let cryptor = Cryptor::new(master_key);
-            let crypto_fs = CryptoFS::new(
+            let crypto_fs = CryptoFs::new(
                 full_storage_path
                     .to_str()
                     .expect("Failed to convert Path to &str"),

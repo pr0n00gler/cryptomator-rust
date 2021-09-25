@@ -5,15 +5,15 @@ use std::path::Path;
 
 /// Provides access to a local filesystem
 #[derive(Clone)]
-pub struct LocalFS {}
+pub struct LocalFs {}
 
-impl LocalFS {
-    pub fn new() -> LocalFS {
-        LocalFS {}
+impl LocalFs {
+    pub fn new() -> LocalFs {
+        LocalFs {}
     }
 }
 
-impl Default for LocalFS {
+impl Default for LocalFs {
     fn default() -> Self {
         Self::new()
     }
@@ -25,7 +25,7 @@ impl File for std::fs::File {
     }
 }
 
-impl FileSystem for LocalFS {
+impl FileSystem for LocalFs {
     fn read_dir<P: AsRef<Path>>(
         &self,
         path: P,

@@ -150,7 +150,7 @@ pub mod tests {
     use crate::crypto::masterkey::MasterKeyJson;
     use crate::crypto::MasterKey;
     use crate::cryptofs::FileSystem;
-    use crate::providers::MemoryFS;
+    use crate::providers::MemoryFs;
 
     const DEFAULT_PASSWORD: &str = "12345678";
     const DEFAULT_MK_FILE: &str = "masterkey.cryptomator";
@@ -159,7 +159,7 @@ pub mod tests {
 
     #[test]
     fn create_master_key() {
-        let memory_fs = MemoryFS::new();
+        let memory_fs = MemoryFs::new();
         let mk_json =
             MasterKeyJson::create(DEFAULT_PASSWORD, SCRYPT_COST, SCRYPT_BLOCK_SIZE).unwrap();
 

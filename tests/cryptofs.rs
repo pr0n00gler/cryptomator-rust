@@ -1,6 +1,6 @@
 use cryptomator::crypto;
-use cryptomator::cryptofs::{CryptoFS, FileSystem};
-use cryptomator::providers::{LocalFS, MemoryFS};
+use cryptomator::cryptofs::{CryptoFs, FileSystem};
+use cryptomator::providers::{LocalFs, MemoryFs};
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 use std::io::Read;
@@ -18,8 +18,8 @@ fn test_crypto_fs_seek_and_read() {
     let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
-    let local_fs = LocalFS::new();
-    let crypto_fs = CryptoFS::new(TEST_STORAGE_PATH, cryptor, local_fs.clone()).unwrap();
+    let local_fs = LocalFs::new();
+    let crypto_fs = CryptoFs::new(TEST_STORAGE_PATH, cryptor, local_fs.clone()).unwrap();
 
     let mut cleartext_test_file = local_fs.open_file(TEST_FILE_PATH).unwrap();
     let cleartext_file_size = cleartext_test_file.seek(std::io::SeekFrom::End(0)).unwrap();
@@ -78,8 +78,8 @@ fn crypto_fs_write<P: AsRef<Path>>(filename: P) {
     let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
-    let local_fs = MemoryFS::new();
-    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
     let mut random_data: Vec<u8> = (0..32 * 1024 * 3 + 2465)
         .map(|_| rand::random::<u8>())
@@ -131,8 +131,8 @@ fn crypto_fs_exists<P: AsRef<Path>>(filename: P) {
     let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
-    let local_fs = MemoryFS::new();
-    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
     crypto_fs.create_file(&filename).unwrap();
 
@@ -175,8 +175,8 @@ fn crypto_fs_remove_dir<P: AsRef<Path>>(files: Vec<P>, dir_to_remove: P, parent_
     let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
-    let local_fs = MemoryFS::new();
-    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
     crypto_fs.create_dir(&dir_to_remove).unwrap();
     for f in files.iter() {
@@ -232,8 +232,8 @@ fn crypto_fs_copy_file<P: AsRef<Path>>(src_file: P, dst_file: P, dir: P) {
     let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
-    let local_fs = MemoryFS::new();
-    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
     let file_to_copy = &src_file;
     let copied_file = &dst_file;
@@ -299,8 +299,8 @@ fn crypto_fs_move_file<P: AsRef<Path>>(src_file: P, dst_file: P, dst_dir: P) {
     let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
-    let local_fs = MemoryFS::new();
-    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
     let root = Path::new("/");
     let file_to_move = &src_file;
@@ -370,8 +370,8 @@ fn crypto_fs_move_dir<P: AsRef<Path>>(dir1: P, child_dir: P, file: P, dst_dir: P
     let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
     let cryptor = crypto::Cryptor::new(mk);
 
-    let local_fs = MemoryFS::new();
-    let crypto_fs = CryptoFS::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
     let root = Path::new("/");
 

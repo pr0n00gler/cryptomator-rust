@@ -12,11 +12,11 @@ use std::time::SystemTime;
 /// Simple implementation of in-memory filesystem
 /// Only for testing purposes
 #[derive(Clone)]
-pub struct MemoryFS {
+pub struct MemoryFs {
     fs: FS,
 }
 
-impl Default for MemoryFS {
+impl Default for MemoryFs {
     fn default() -> Self {
         Self::new()
     }
@@ -85,13 +85,13 @@ fn dir_entry_from_rsfs<D: rsfs::DirEntry>(d: D) -> DirEntry {
     }
 }
 
-impl MemoryFS {
+impl MemoryFs {
     pub fn new() -> Self {
-        MemoryFS { fs: FS::new() }
+        MemoryFs { fs: FS::new() }
     }
 }
 
-impl FileSystem for MemoryFS {
+impl FileSystem for MemoryFs {
     fn read_dir<P: AsRef<Path>>(
         &self,
         path: P,

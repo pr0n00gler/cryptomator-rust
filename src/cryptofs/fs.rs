@@ -49,7 +49,7 @@ impl AsRef<Path> for CryptoPath {
 /// In a nutshell, translates all the 'virtual' paths, like '/some_folder/file.txt', to real paths,
 /// like /d/DR/RW3L6XRAPFC2UCK5QY37Q2U552IRPE/eZdOa_B9fRqncpYjZmKXfJEz81LgRUbT0yWdE0wyNTMd.c9r
 #[derive(Clone)]
-pub struct CryptoFS<FS: FileSystem> {
+pub struct CryptoFs<FS: FileSystem> {
     /// Instance of the Cryptor - does all work with cryptography
     cryptor: Cryptor,
 
@@ -60,14 +60,14 @@ pub struct CryptoFS<FS: FileSystem> {
     file_system_provider: FS,
 }
 
-impl<FS: FileSystem> CryptoFS<FS> {
+impl<FS: FileSystem> CryptoFs<FS> {
     /// Returns a new instance of CryptoFS
     pub fn new(
         folder: &str,
         cryptor: Cryptor,
         fs_provider: FS,
-    ) -> Result<CryptoFS<FS>, FileSystemError> {
-        let crypto_fs = CryptoFS {
+    ) -> Result<CryptoFs<FS>, FileSystemError> {
+        let crypto_fs = CryptoFs {
             cryptor,
             root_folder: String::from(folder),
             file_system_provider: fs_provider,
@@ -265,7 +265,7 @@ impl<FS: FileSystem> CryptoFS<FS> {
     }
 }
 
-impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
+impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
     /// Returns an iterator of DirEntries for the given path
     fn read_dir<P: AsRef<Path>>(
         &self,
@@ -368,7 +368,7 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
         if real_path.is_shorten {
             real_path.full_path = real_path.full_path.join(CONTENTS_FILENAME);
         }
-        let crypto_file = CryptoFSFile::open(real_path, self.cryptor, &self.file_system_provider)?;
+        let crypto_file = CryptoFsFile::open(real_path, self.cryptor, &self.file_system_provider)?;
         Ok(Box::new(crypto_file))
     }
 
@@ -383,7 +383,7 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
             real_path.full_path = real_path.full_path.join(CONTENTS_FILENAME);
         }
         let rfs_file = self.file_system_provider.create_file(real_path)?;
-        Ok(Box::new(CryptoFSFile::create_file(self.cryptor, rfs_file)?))
+        Ok(Box::new(CryptoFsFile::create_file(self.cryptor, rfs_file)?))
     }
 
     fn exists<P: AsRef<Path>>(&self, path: P) -> bool {
@@ -498,7 +498,7 @@ impl<FS: FileSystem> FileSystem for CryptoFS<FS> {
 
 /// 'Virtual' file implementation of the File trait
 #[derive(Debug)]
-pub struct CryptoFSFile {
+pub struct CryptoFsFile {
     /// A Cryptor instance used to encrypt/decrypt data
     cryptor: Cryptor,
 
@@ -518,7 +518,7 @@ pub struct CryptoFSFile {
     chunk_cache: lru::LruCache<u64, Vec<u8>>,
 }
 
-impl<'gc> CryptoFSFile {
+impl<'gc> CryptoFsFile {
     /// Opens a file at the given real path (so the path must be translated from 'virtual' to real before the
     /// function call) for reading/writing.
     /// Read/Write implementations for the traits works with a cleartext data, so CryptoFSFile instance
@@ -527,7 +527,7 @@ impl<'gc> CryptoFSFile {
         real_path: P,
         cryptor: Cryptor,
         real_file_system_provider: &FS,
-    ) -> Result<CryptoFSFile, FileSystemError> {
+    ) -> Result<CryptoFsFile, FileSystemError> {
         let mut reader = real_file_system_provider.open_file(real_path)?;
         let mut encrypted_header: [u8; FILE_HEADER_LENGTH] = [0; FILE_HEADER_LENGTH];
 
@@ -535,7 +535,7 @@ impl<'gc> CryptoFSFile {
 
         let header = cryptor.decrypt_file_header(&encrypted_header)?;
         let metadata = reader.metadata()?;
-        Ok(CryptoFSFile {
+        Ok(CryptoFsFile {
             cryptor,
             rfs_file: reader,
             current_pos: 0,
@@ -555,13 +555,13 @@ impl<'gc> CryptoFSFile {
     pub fn create_file(
         cryptor: Cryptor,
         mut rfs_file: Box<dyn File>,
-    ) -> Result<CryptoFSFile, FileSystemError> {
+    ) -> Result<CryptoFsFile, FileSystemError> {
         let header = cryptor.create_file_header();
         let encrypted_header = cryptor.encrypt_file_header(&header)?;
         rfs_file.write_all(encrypted_header.as_slice())?;
         rfs_file.flush()?;
         let metadata = rfs_file.metadata()?;
-        Ok(CryptoFSFile {
+        Ok(CryptoFsFile {
             cryptor,
             rfs_file,
             current_pos: 0,
@@ -572,7 +572,7 @@ impl<'gc> CryptoFSFile {
     }
 
     /// Returns a cleartext size of the file
-    pub fn get_file_size(&mut self) -> Result<u64, FileSystemError> {
+    pub fn file_size(&mut self) -> Result<u64, FileSystemError> {
         let current_pos = self.rfs_file.seek(SeekFrom::Current(0))?;
         let real_file_size = self.rfs_file.seek(SeekFrom::End(0))?;
         self.rfs_file.seek(SeekFrom::Start(current_pos))?;
@@ -580,7 +580,7 @@ impl<'gc> CryptoFSFile {
     }
 
     /// Return a real size of the file
-    pub fn get_real_file_size(&mut self) -> Result<u64, FileSystemError> {
+    pub fn real_file_size(&mut self) -> Result<u64, FileSystemError> {
         let current_pos = self.rfs_file.seek(SeekFrom::Current(0))?;
         let real_file_size = self.rfs_file.seek(SeekFrom::End(0))?;
         self.rfs_file.seek(SeekFrom::Start(current_pos))?;
@@ -611,12 +611,12 @@ impl<'gc> CryptoFSFile {
     }
 }
 
-impl Seek for CryptoFSFile {
+impl Seek for CryptoFsFile {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
         match pos {
             SeekFrom::Start(p) => self.current_pos = p,
             SeekFrom::Current(p) => self.current_pos = (self.current_pos as i64 + p) as u64,
-            SeekFrom::End(p) => match self.get_file_size() {
+            SeekFrom::End(p) => match self.file_size() {
                 Ok(s) => self.current_pos = (s as i64 + p) as u64,
                 Err(e) => {
                     error!("Failed to determine cleartext file size: {:?}", e);
@@ -628,7 +628,7 @@ impl Seek for CryptoFSFile {
     }
 }
 
-impl Read for CryptoFSFile {
+impl Read for CryptoFsFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let mut chunk_index = self.current_pos / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
         let mut n: usize = 0;
@@ -667,11 +667,11 @@ impl Read for CryptoFSFile {
     }
 }
 
-impl Write for CryptoFSFile {
+impl Write for CryptoFsFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let mut encrypted_data: Vec<u8> = vec![];
         let mut chunk_index = self.current_pos / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
-        let file_size = match self.get_real_file_size() {
+        let file_size = match self.real_file_size() {
             Ok(s) => s,
             Err(e) => {
                 error!("Failed to determine cleartext file size: {:?}", e);
@@ -749,7 +749,7 @@ impl Write for CryptoFSFile {
     }
 }
 
-impl File for CryptoFSFile {
+impl File for CryptoFsFile {
     fn metadata(&self) -> Result<Metadata, FileSystemError> {
         Ok(self.metadata)
     }

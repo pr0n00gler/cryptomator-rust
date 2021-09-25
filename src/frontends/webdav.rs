@@ -1,5 +1,5 @@
 use crate::crypto::CryptoError;
-use crate::cryptofs::{CryptoFS, DirEntry, File, FileSystem, FileSystemError, Metadata};
+use crate::cryptofs::{CryptoFs, DirEntry, File, FileSystem, FileSystemError, Metadata};
 use bytes::{Buf, Bytes};
 use futures::{future, future::FutureExt};
 use std::io::{ErrorKind, Read, SeekFrom, Write};
@@ -15,11 +15,11 @@ impl From<FileSystemError> for FsError {
     fn from(fse: FileSystemError) -> Self {
         match fse {
             FileSystemError::PathIsNotExist(_) => FsError::NotFound,
-            FileSystemError::CryptoError(CryptoError::IOError(i)) => match i.kind() {
+            FileSystemError::CryptoError(CryptoError::IoError(i)) => match i.kind() {
                 ErrorKind::NotFound => FsError::NotFound,
                 _ => FsError::GeneralFailure,
             },
-            FileSystemError::IOError(s) => match s.kind() {
+            FileSystemError::IoError(s) => match s.kind() {
                 ErrorKind::NotFound => FsError::NotFound,
                 _ => FsError::GeneralFailure,
             },
@@ -104,11 +104,11 @@ impl DavFile for DFile {
 
 #[derive(Clone)]
 pub struct WebDav<FS: 'static + FileSystem> {
-    crypto_fs: CryptoFS<FS>,
+    crypto_fs: CryptoFs<FS>,
 }
 
 impl<FS: 'static + FileSystem> WebDav<FS> {
-    pub fn new(crypto_fs: CryptoFS<FS>) -> WebDav<FS> {
+    pub fn new(crypto_fs: CryptoFs<FS>) -> WebDav<FS> {
         WebDav { crypto_fs }
     }
 }

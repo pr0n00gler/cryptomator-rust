@@ -10,6 +10,7 @@ use crate::cryptofs::{
 };
 use lru::LruCache;
 use std::cmp::Ordering;
+use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tracing::error;
@@ -93,12 +94,21 @@ impl<FS: FileSystem> CryptoFs<FS> {
         for c in components {
             dir_id = match c {
                 std::path::Component::RootDir => vec![],
-                std::path::Component::Normal(p) => {
+                std::path::Component::Normal(path_name) => {
                     let mut dir_uuid = vec![];
                     let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
+
+                    let cleartext_name = if let Some(name) = path_name.to_str() {
+                        name
+                    } else {
+                        return Err(FileSystemError::UnknownError(
+                            "failed to convert OsStr to str".to_string(),
+                        ));
+                    };
+
                     let encrypted_name = self
                         .cryptor
-                        .encrypt_filename(p.to_str().unwrap_or_default(), dir_id.as_slice())?;
+                        .encrypt_filename(cleartext_name, dir_id.as_slice())?;
                     let mut full_encrypted_name = encrypted_name + ENCRYPTED_FILE_EXT;
 
                     if full_encrypted_name.len() > MAX_FILENAME_LENGTH {
@@ -117,10 +127,7 @@ impl<FS: FileSystem> CryptoFs<FS> {
                         reader.read_to_end(&mut dir_uuid)?;
                     }
                     if dir_uuid.is_empty() {
-                        error!(
-                            "Path {} doesn't exist",
-                            c.as_os_str().to_str().unwrap_or_default()
-                        );
+                        error!("Path {:?} doesn't exist", c);
                         return Err(PathDoesNotExist(String::from(
                             c.as_os_str().to_str().unwrap_or_default(),
                         )));
@@ -128,10 +135,7 @@ impl<FS: FileSystem> CryptoFs<FS> {
                     dir_uuid
                 }
                 _ => {
-                    error!(
-                        "Invalid path {}",
-                        c.as_os_str().to_str().unwrap_or_default()
-                    );
+                    error!("Invalid path {:?}", c);
                     return Err(InvalidPathError(String::from(
                         c.as_os_str().to_str().unwrap_or_default(),
                     )));
@@ -170,9 +174,17 @@ impl<FS: FileSystem> CryptoFs<FS> {
             });
         }
 
+        let filename_str = if let Some(fname) = filename.to_str() {
+            fname
+        } else {
+            return Err(FileSystemError::InvalidPathError(
+                "failed to convert PathBuf to str".to_string(),
+            ));
+        };
+
         let real_filename = self
             .cryptor
-            .encrypt_filename(filename.to_str().unwrap_or_default(), dir_id.as_slice())?;
+            .encrypt_filename(filename_str, dir_id.as_slice())?;
         let mut full_name = real_filename + ENCRYPTED_FILE_EXT;
 
         let mut is_shorten = false;
@@ -204,11 +216,14 @@ impl<FS: FileSystem> CryptoFs<FS> {
                 .open_file(de.path.join(FULL_NAME_FILENAME))?;
             fname_file.read_to_end(&mut read_name)?;
             ciphertext_filename = String::from_utf8(read_name)?;
-            ciphertext_filename = String::from(
-                ciphertext_filename
-                    .strip_suffix(ENCRYPTED_FILE_EXT)
-                    .unwrap_or_default(),
-            );
+            ciphertext_filename =
+                if let Some(filename) = ciphertext_filename.strip_suffix(ENCRYPTED_FILE_EXT) {
+                    filename.to_string()
+                } else {
+                    return Err(FileSystemError::UnknownError(String::from(
+                        "shorten file consists invalid ciphertext filename",
+                    )));
+                };
 
             let contents_file = self
                 .file_system_provider
@@ -221,11 +236,7 @@ impl<FS: FileSystem> CryptoFs<FS> {
         Ok(DirEntry {
             path: Default::default(), //TODO
             metadata,
-            file_name: self
-                .cryptor
-                .decrypt_filename(ciphertext_filename, dir_id)?
-                .parse()
-                .unwrap(),
+            file_name: OsString::from(self.cryptor.decrypt_filename(ciphertext_filename, dir_id)?),
         })
     }
 
@@ -249,11 +260,18 @@ impl<FS: FileSystem> CryptoFs<FS> {
         let mut full_name_file = self
             .file_system_provider
             .create_file(real_path.as_ref().join(FULL_NAME_FILENAME))?;
+
+        let virtual_filename = last_path_component(&virtual_path)?;
+        let virtual_filename_str = if let Some(name) = virtual_filename.to_str() {
+            name
+        } else {
+            return Err(FileSystemError::UnknownError(
+                "failed to convert PathBuf to str".to_string(),
+            ));
+        };
+
         let full_encrypted_name = self.cryptor.encrypt_filename(
-            last_path_component(&virtual_path)?
-                .as_path()
-                .to_str()
-                .unwrap_or_default(),
+            virtual_filename_str,
             self.dir_id_from_path(parent_path(&virtual_path))?
                 .as_slice(),
         )?;
@@ -339,11 +357,7 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
                         parent_dir_id = Vec::from(dir_uuid.to_string().as_bytes());
                     }
                     _ => {
-                        error!(
-                            "Failed to get dir_id from path {}: {:?}",
-                            path_buf.to_str().unwrap_or_default(),
-                            e
-                        );
+                        error!("Failed to get dir_id from path {:?}: {:?}", path_buf, e);
                         return Err(e);
                     }
                 },

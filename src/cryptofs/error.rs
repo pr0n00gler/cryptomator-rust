@@ -23,8 +23,8 @@ pub enum FileSystemError {
     #[fail(display = "Invalid path error")]
     InvalidPathError(String),
 
-    #[fail(display = "Path is not exist error")]
-    PathIsNotExist(String),
+    #[fail(display = "Path does not exist error")]
+    PathDoesNotExist(String),
 
     #[fail(display = "String from UTF-8 error")]
     StringConvertError(std::string::FromUtf8Error),
@@ -89,7 +89,7 @@ pub fn unix_error_code_from_filesystem_error(fs: FileSystemError) -> c_int {
             }
         }
         FileSystemError::InvalidPathError(_) => ENOENT,
-        FileSystemError::PathIsNotExist(_) => ENOENT,
+        FileSystemError::PathDoesNotExist(_) => ENOENT,
         _ => EIO,
     }
 }

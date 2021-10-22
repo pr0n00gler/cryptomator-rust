@@ -1,4 +1,4 @@
-use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist, UnknownError};
+use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist, UnknownError};
 use crate::cryptofs::FileSystemError;
 use std::path::{Component, Path, PathBuf};
 
@@ -32,7 +32,7 @@ pub fn last_path_component<S: AsRef<Path>>(path: S) -> Result<PathBuf, FileSyste
     Ok(match components.last() {
         Some(c) => PathBuf::new().join(c),
         None => {
-            return Err(PathIsNotExist(format!(
+            return Err(PathDoesNotExist(format!(
                 "invalid path: {}",
                 path.as_ref().display()
             )))

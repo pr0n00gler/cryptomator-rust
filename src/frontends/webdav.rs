@@ -14,7 +14,7 @@ use webdav_handler::fs::{
 impl From<FileSystemError> for FsError {
     fn from(fse: FileSystemError) -> Self {
         match fse {
-            FileSystemError::PathIsNotExist(_) => FsError::NotFound,
+            FileSystemError::PathDoesNotExist(_) => FsError::NotFound,
             FileSystemError::CryptoError(CryptoError::IoError(i)) => match i.kind() {
                 ErrorKind::NotFound => FsError::NotFound,
                 _ => FsError::GeneralFailure,

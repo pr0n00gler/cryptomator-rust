@@ -2,7 +2,7 @@ use crate::crypto::{
     calculate_cleartext_size, shorten_name, Cryptor, FileHeader, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH,
     FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH,
 };
-use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathIsNotExist};
+use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist};
 use crate::cryptofs::filesystem::Metadata;
 use crate::cryptofs::{
     component_to_string, last_path_component, parent_path, DirEntry, File, FileSystem,
@@ -99,7 +99,7 @@ impl<FS: FileSystem> CryptoFs<FS> {
                     let encrypted_name = self
                         .cryptor
                         .encrypt_filename(p.to_str().unwrap_or_default(), dir_id.as_slice())?;
-                    let mut full_encrypted_name = encrypted_name.clone() + ENCRYPTED_FILE_EXT;
+                    let mut full_encrypted_name = encrypted_name + ENCRYPTED_FILE_EXT;
 
                     if full_encrypted_name.len() > MAX_FILENAME_LENGTH {
                         full_encrypted_name =
@@ -110,10 +110,7 @@ impl<FS: FileSystem> CryptoFs<FS> {
                         .join(real_path)
                         .join(full_encrypted_name);
 
-                    if self
-                        .file_system_provider
-                        .exists(full_path.to_str().unwrap_or_default())
-                    {
+                    if self.file_system_provider.exists(&full_path) {
                         let mut reader = self
                             .file_system_provider
                             .open_file(Path::new(full_path.as_path()).join(DIR_FILENAME))?;
@@ -121,10 +118,10 @@ impl<FS: FileSystem> CryptoFs<FS> {
                     }
                     if dir_uuid.is_empty() {
                         error!(
-                            "Path {} isn't exist",
+                            "Path {} doesn't exist",
                             c.as_os_str().to_str().unwrap_or_default()
                         );
-                        return Err(PathIsNotExist(String::from(
+                        return Err(PathDoesNotExist(String::from(
                             c.as_os_str().to_str().unwrap_or_default(),
                         )));
                     }
@@ -273,16 +270,12 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
     ) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError> {
         let dir_id = self.dir_id_from_path(path)?;
         let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
-        Ok(Box::new(
-            self.file_system_provider
-                .read_dir(real_path)?
-                .map(|de| {
-                    self.virtual_dir_entry_from_real(de, dir_id.as_slice())
-                        .unwrap()
-                })
-                .collect::<Vec<DirEntry>>()
-                .into_iter(),
-        ))
+        let dir_entries: Result<Vec<DirEntry>, FileSystemError> = self
+            .file_system_provider
+            .read_dir(real_path)?
+            .map(|de| self.virtual_dir_entry_from_real(de, dir_id.as_slice()))
+            .collect();
+        Ok(Box::new(dir_entries?.into_iter()))
     }
 
     /// Creates the directory at this path
@@ -300,7 +293,7 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
             match dir_id {
                 Ok(id) => parent_dir_id = id,
                 Err(e) => match e {
-                    PathIsNotExist(_) => {
+                    PathDoesNotExist(_) => {
                         let encrypted_name = self
                             .cryptor
                             .encrypt_filename(path, parent_dir_id.as_slice())?;

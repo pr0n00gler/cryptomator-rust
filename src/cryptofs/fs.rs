@@ -33,7 +33,7 @@ const MAX_FILENAME_LENGTH: usize = 220;
 
 // TODO: make configurable
 /// Chunk cache capacity for per files
-const CHUNK_CACHE_CAP: usize = 2;
+const CHUNK_CACHE_CAP: usize = 500;
 
 pub struct CryptoPath {
     full_path: PathBuf,
@@ -567,7 +567,8 @@ impl<'gc> CryptoFsFile {
         let encrypted_header = cryptor.encrypt_file_header(&header)?;
         rfs_file.write_all(encrypted_header.as_slice())?;
         rfs_file.flush()?;
-        let metadata = rfs_file.metadata()?;
+        let mut metadata = rfs_file.metadata()?;
+        metadata.len = 0;
         Ok(CryptoFsFile {
             cryptor,
             rfs_file,
@@ -594,9 +595,18 @@ impl<'gc> CryptoFsFile {
         Ok(real_file_size)
     }
 
+    /// Updates metadata according to a real file
+    fn update_metadata(&mut self) -> Result<(), FileSystemError> {
+        self.metadata = self.rfs_file.metadata()?;
+        self.metadata.len = self.real_file_size()?;
+        Ok(())
+    }
+
     /// Reads and returns cleartext chunk of the data.
     fn read_chunk(&mut self, chunk_index: u64) -> Result<Vec<u8>, FileSystemError> {
-        if self.chunk_cache.contains(&chunk_index) {
+        if self.metadata.modified >= self.rfs_file.metadata()?.modified
+            && self.chunk_cache.contains(&chunk_index)
+        {
             let chunk = self.chunk_cache.get(&chunk_index).unwrap();
             return Ok(chunk.clone());
         }
@@ -614,6 +624,9 @@ impl<'gc> CryptoFsFile {
             chunk_index,
             &chunk[..read_bytes],
         )?;
+
+        self.chunk_cache.put(chunk_index, decrypted_chunk.clone());
+
         Ok(decrypted_chunk)
     }
 }
@@ -664,8 +677,6 @@ impl Read for CryptoFsFile {
             };
             buf[n..n + slice_len].copy_from_slice(&chunk[offset..offset + slice_len]);
             n += slice_len;
-
-            self.chunk_cache.put(chunk_index, chunk);
 
             self.current_pos += slice_len as u64;
             chunk_index += 1;
@@ -742,12 +753,17 @@ impl Write for CryptoFsFile {
             self.current_pos += slice_len as u64;
 
             self.chunk_cache.put(chunk_index, chunk);
+
             chunk_index += 1;
         }
         self.rfs_file.seek(SeekFrom::Start(
             (start_chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
         ))?;
         self.rfs_file.write_all(&encrypted_data)?;
+        if self.update_metadata().is_err() {
+            error!("Failed to update metadata for a file");
+            return Err(std::io::Error::from(std::io::ErrorKind::Other));
+        }
         Ok(n)
     }
 

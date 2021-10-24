@@ -687,7 +687,6 @@ impl Read for CryptoFsFile {
 
 impl Write for CryptoFsFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut encrypted_data: Vec<u8> = vec![];
         let mut chunk_index = self.current_pos / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
         let file_size = match self.real_file_size() {
             Ok(s) => s,
@@ -698,7 +697,6 @@ impl Write for CryptoFsFile {
         };
 
         let chunks_count = file_size / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
-        let start_chunk_index = chunk_index;
 
         let mut n: usize = 0;
         while n < buf.len() {
@@ -749,17 +747,18 @@ impl Write for CryptoFsFile {
                     return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                 }
             };
-            encrypted_data.extend_from_slice(encrypted_chunk.as_slice());
+            
+            self.rfs_file.seek(SeekFrom::Start(
+                (chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
+            ))?;
+            self.rfs_file.write_all(&encrypted_chunk)?;
+
             self.current_pos += slice_len as u64;
 
             self.chunk_cache.put(chunk_index, chunk);
 
             chunk_index += 1;
         }
-        self.rfs_file.seek(SeekFrom::Start(
-            (start_chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
-        ))?;
-        self.rfs_file.write_all(&encrypted_data)?;
         if self.update_metadata().is_err() {
             error!("Failed to update metadata for a file");
             return Err(std::io::Error::from(std::io::ErrorKind::Other));

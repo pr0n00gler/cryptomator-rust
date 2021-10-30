@@ -33,7 +33,7 @@ tracing = { git = "https://github.com/tokio-rs/tracing", rev = "0e8f920" }
 tracing-appender = { git = "https://github.com/tokio-rs/tracing", rev = "0e8f920" }
 tracing-futures = { git = "https://github.com/tokio-rs/tracing", rev = "0e8f920" }
 tracing-subscriber = { git = "https://github.com/tokio-rs/tracing", features = ["json"], rev = "0e8f920" }
-lru = "0.6.5"
+lru-cache = "0.1.2"
 time = { version = "0.1.43" }
 clap = "3.0.0-beta.2"
 rpassword = "5.0"

@@ -6,7 +6,7 @@ use failure::_core::fmt::Debug;
 use libc::{c_int, EIO, ENOENT};
 
 #[cfg(unix)]
-use tracing::error;
+use tracing::debug;
 
 #[derive(Debug, Fail)]
 pub enum FileSystemError {
@@ -67,7 +67,7 @@ impl From<uuid::Error> for FileSystemError {
 
 #[cfg(unix)]
 pub fn unix_error_code_from_filesystem_error(fs: FileSystemError) -> c_int {
-    error!("Error occurred: {:?}", fs);
+    debug!("Error occurred: {:?}", fs);
     match fs {
         FileSystemError::IoError(io) => {
             if let Some(e) = io.raw_os_error() {

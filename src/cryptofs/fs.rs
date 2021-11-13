@@ -126,7 +126,7 @@ impl<FS: FileSystem> CryptoFs<FS> {
                         .join(real_path)
                         .join(full_encrypted_name);
 
-                    let mut guard = self.dir_uuids_cache.lock().unwrap();
+                    let mut guard = self.dir_uuids_cache.lock()?;
 
                     if guard.contains_key(&full_path) {
                         dir_uuid = guard.get_mut(&full_path).unwrap().clone();
@@ -222,7 +222,7 @@ impl<FS: FileSystem> CryptoFs<FS> {
         de: DirEntry,
         dir_id: &[u8],
     ) -> Result<DirEntry, FileSystemError> {
-        let mut guard = self.dir_entries_cache.lock().unwrap();
+        let mut guard = self.dir_entries_cache.lock()?;
         if guard.contains_key(&de.path) {
             let virtual_dir_entry = guard.get_mut(&de.path).unwrap();
             return Ok(virtual_dir_entry.clone());
@@ -434,7 +434,7 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
         }
 
         let key = path.as_ref().to_path_buf();
-        let mut guard = self.dir_entries_cache.lock().unwrap();
+        let mut guard = self.dir_entries_cache.lock()?;
         guard.remove(&key);
 
         self.file_system_provider.remove_file(real_path)
@@ -458,10 +458,10 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
             }
         }
 
-        let mut guard = self.dir_uuids_cache.lock().unwrap();
+        let mut guard = self.dir_uuids_cache.lock()?;
         guard.clear();
 
-        let mut guard = self.dir_entries_cache.lock().unwrap();
+        let mut guard = self.dir_entries_cache.lock()?;
         guard.clear();
 
         self.file_system_provider.remove_dir(real_dir_path)

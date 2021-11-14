@@ -62,6 +62,9 @@ const U64_SIZE: usize = 8;
 
 /// Calculates the size of the cleartext payload by ciphertext
 pub fn calculate_cleartext_size(ciphertext_size: u64) -> u64 {
+    if ciphertext_size < (FILE_HEADER_LENGTH as u64) {
+        return 0;
+    }
     let ciphertext_size = ciphertext_size - FILE_HEADER_LENGTH as u64;
     let overhead_per_chunk =
         (FILE_CHUNK_CONTENT_MAC_LENGTH + FILE_CHUNK_CONTENT_NONCE_LENGTH) as u64;

@@ -19,7 +19,7 @@ fn crypto_fs_write(c: &mut Criterion) {
     let local_fs = MemoryFs::new();
     let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
-    let sizes = [10 * MB];
+    let sizes = [10 * KB, 5 * MB, 10 * MB];
 
     let mut group = c.benchmark_group("crypto_write");
     for size in sizes.iter() {
@@ -56,7 +56,7 @@ fn crypto_fs_read(c: &mut Criterion) {
     bench_file.write_all(&random_data).unwrap();
     bench_file.flush().unwrap();
 
-    let sizes = [5 * MB];
+    let sizes = [10 * KB, 5 * MB, 10 * MB];
     let mut group = c.benchmark_group("crypto_read");
     for size in sizes.iter() {
         let mut f = crypto_fs.open_file("/bench.dat").unwrap();

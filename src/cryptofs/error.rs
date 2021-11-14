@@ -1,10 +1,15 @@
 use crate::crypto::{CryptoError, MasterKeyError};
 use failure::Fail;
 use failure::_core::fmt::Debug;
-use tracing::error;
+use std::path::PathBuf;
 
 #[cfg(unix)]
 use libc::{c_int, EIO, ENOENT};
+use lru_cache::LruCache;
+
+use crate::cryptofs::DirEntry;
+#[cfg(unix)]
+use tracing::debug;
 
 #[derive(Debug, Fail)]
 pub enum FileSystemError {
@@ -63,9 +68,29 @@ impl From<uuid::Error> for FileSystemError {
     }
 }
 
+impl From<std::sync::PoisonError<std::sync::MutexGuard<'_, LruCache<PathBuf, Vec<u8>>>>>
+    for FileSystemError
+{
+    fn from(
+        err: std::sync::PoisonError<std::sync::MutexGuard<LruCache<PathBuf, Vec<u8>>>>,
+    ) -> FileSystemError {
+        FileSystemError::UnknownError(err.to_string())
+    }
+}
+
+impl From<std::sync::PoisonError<std::sync::MutexGuard<'_, LruCache<PathBuf, DirEntry>>>>
+    for FileSystemError
+{
+    fn from(
+        err: std::sync::PoisonError<std::sync::MutexGuard<LruCache<PathBuf, DirEntry>>>,
+    ) -> FileSystemError {
+        FileSystemError::UnknownError(err.to_string())
+    }
+}
+
 #[cfg(unix)]
 pub fn unix_error_code_from_filesystem_error(fs: FileSystemError) -> c_int {
-    error!("Error occurred: {:?}", fs);
+    debug!("Error occurred: {:?}", fs);
     match fs {
         FileSystemError::IoError(io) => {
             if let Some(e) = io.raw_os_error() {

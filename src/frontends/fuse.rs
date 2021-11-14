@@ -4,13 +4,13 @@ use fuser::{
     ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyWrite, Request, TimeOrNow, FUSE_ROOT_ID,
 };
 use libc::{EIO, ENOENT, EOF};
-use lru::LruCache;
+use lru_cache::LruCache;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::{Read, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
-use tracing::error;
+use tracing::{debug, error};
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -23,7 +23,7 @@ pub struct Fuse<FS: FileSystem> {
     crypto_fs: CryptoFs<FS>,
     last_inode: u64,
 
-    dir_entries_cache: lru::LruCache<u64, Vec<DirEntry>>,
+    dir_entries_cache: LruCache<u64, Vec<DirEntry>>,
 }
 
 impl<FS: FileSystem> Fuse<FS> {
@@ -57,11 +57,7 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         let entry = match self.crypto_fs.metadata(entry_name.join(name)) {
             Ok(m) => m,
             Err(e) => {
-                error!(
-                    "Failed to get metadata of a file {:?}: {:?}",
-                    entry_name.join(name),
-                    e
-                );
+                debug!("Failed to get metadata of a file {:?}: {:?}", entry_name, e);
                 reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
@@ -100,30 +96,6 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         reply.entry(&TTL, &attr, 0);
     }
 
-    fn setattr(
-        &mut self,
-        _req: &Request<'_>,
-        _ino: u64,
-        _mode: Option<u32>,
-        _uid: Option<u32>,
-        _gid: Option<u32>,
-        _size: Option<u64>,
-        _atime: Option<TimeOrNow>,
-        _mtime: Option<TimeOrNow>,
-        _ctime: Option<SystemTime>,
-        _fh: Option<u64>,
-        _crtime: Option<SystemTime>,
-        _chgtime: Option<SystemTime>,
-        _bkuptime: Option<SystemTime>,
-        _flags: Option<u32>,
-        reply: ReplyAttr,
-    ) {
-        // just a mock
-        // getattr call to reply fileattr of a file
-        // TODO: do a real changing of attributes
-        self.getattr(_req, _ino, reply)
-    }
-
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
         let entry_name = if let Some(e) = self.inode_to_entry.get(&ino) {
             e
@@ -135,7 +107,7 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         let entry = match self.crypto_fs.metadata(entry_name) {
             Ok(m) => m,
             Err(e) => {
-                error!("Failed to get metadata of a file {:?}: {:?}", entry_name, e);
+                debug!("Failed to get metadata of a file {:?}: {:?}", entry_name, e);
                 reply.error(unix_error_code_from_filesystem_error(e));
                 return;
             }
@@ -161,6 +133,30 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
             flags: 0,
         };
         reply.attr(&TTL, &attr);
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        _size: Option<u64>,
+        _atime: Option<TimeOrNow>,
+        _mtime: Option<TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        // just a mock
+        // getattr call to reply fileattr of a file
+        // TODO: do a real changing of attributes
+        self.getattr(_req, _ino, reply)
     }
 
     fn mkdir(
@@ -432,8 +428,8 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
             return;
         };
 
-        if offset != 0 && self.dir_entries_cache.contains(&ino) {
-            let cached_entries = self.dir_entries_cache.get(&ino).unwrap();
+        if offset != 0 && self.dir_entries_cache.contains_key(&ino) {
+            let cached_entries = self.dir_entries_cache.get_mut(&ino).unwrap();
             for (i, entry) in cached_entries.iter().enumerate().skip(offset as usize) {
                 if reply.add(
                     *self
@@ -491,7 +487,7 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
             );
         }
 
-        self.dir_entries_cache.put(ino, entries);
+        self.dir_entries_cache.insert(ino, entries);
 
         reply.ok()
     }
@@ -508,6 +504,19 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
             255,
             stats.allocation_granularity as u32,
         );
+    }
+
+    fn setxattr(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _name: &OsStr,
+        _value: &[u8],
+        _flags: i32,
+        _position: u32,
+        reply: ReplyEmpty,
+    ) {
+        reply.ok()
     }
 
     fn create(
@@ -579,18 +588,5 @@ impl<FS: FileSystem> FuseFS for Fuse<FS> {
         self.entry_to_inode.insert(entry_path, inode);
 
         reply.created(&TTL, &attr, 0, 0, flags as u32);
-    }
-
-    fn setxattr(
-        &mut self,
-        _req: &Request<'_>,
-        _ino: u64,
-        _name: &OsStr,
-        _value: &[u8],
-        _flags: i32,
-        _position: u32,
-        reply: ReplyEmpty,
-    ) {
-        reply.ok()
     }
 }

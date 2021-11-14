@@ -123,6 +123,7 @@ impl Default for Metadata {
 }
 
 /// Directory entry. Should contain a full path, metadata and name
+#[derive(Clone)]
 pub struct DirEntry {
     pub path: std::path::PathBuf,
     pub metadata: Metadata,

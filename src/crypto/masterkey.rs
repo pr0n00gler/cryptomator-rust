@@ -7,23 +7,23 @@ use rand::Rng;
 use hmac::{Hmac, Mac, NewMac};
 use sha2::Sha256;
 
-type HmacSha256 = Hmac<Sha256>;
-
 const P: u32 = 1;
 const DEFAULT_IV: [u8; 8] = [0xA6; 8];
 
-const SUPPORTED_VAULT_VERSION: u32 = 7;
+const FAKE_VAULT_VERSION: u32 = 999;
+
+pub const DEFAULT_MASTER_KEY_FILE: &str = "masterkey.cryptomator";
 
 #[derive(Serialize, Deserialize)]
 #[allow(non_snake_case)]
 pub struct MasterKeyJson {
-    version: u32,
-    scryptSalt: String,
-    scryptCostParam: u64,
-    scryptBlockSize: u32,
-    primaryMasterKey: String,
-    hmacMasterKey: String,
-    versionMac: String,
+    pub version: u32,
+    pub scryptSalt: String,
+    pub scryptCostParam: u64,
+    pub scryptBlockSize: u32,
+    pub primaryMasterKey: String,
+    pub hmacMasterKey: String,
+    pub versionMac: String,
 }
 
 impl MasterKeyJson {
@@ -62,13 +62,13 @@ impl MasterKeyJson {
             &hmac_master_key,
         )?;
 
-        let mut version_mac = HmacSha256::new_varkey(&hmac_master_key)?;
-        version_mac.update(&SUPPORTED_VAULT_VERSION.to_be_bytes());
+        let mut version_mac: Hmac<Sha256> = Hmac::new_from_slice(&hmac_master_key)?;
+        version_mac.update(&FAKE_VAULT_VERSION.to_be_bytes());
 
         let version_mac_bytes = version_mac.finalize().into_bytes();
 
         Ok(MasterKeyJson {
-            version: SUPPORTED_VAULT_VERSION,
+            version: FAKE_VAULT_VERSION,
             scryptSalt: base64::encode(scrypt_salt),
             scryptCostParam: scrypt_cost_param,
             scryptBlockSize: scrypt_block_size,
@@ -134,7 +134,8 @@ impl MasterKey {
         let version = mk_json.version;
         let version_mac = base64::decode(mk_json.versionMac)?;
 
-        let mut calculated_version_mac = HmacSha256::new_varkey(&unwrapped_hmac_master_key)?;
+        let mut calculated_version_mac: Hmac<Sha256> =
+            Hmac::new_from_slice(&unwrapped_hmac_master_key)?;
         calculated_version_mac.update(&version.to_be_bytes());
         calculated_version_mac.verify(version_mac.as_slice())?;
 

@@ -454,6 +454,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "crypto-mac"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1d1a86f49236c215f271d40892d5fc950490551400b02ef360692c29815c714"
+dependencies = [
+ "generic-array 0.14.4",
+ "subtle 2.4.0",
+]
+
+[[package]]
 name = "cryptomator"
 version = "0.1.0"
 dependencies = [
@@ -469,9 +479,10 @@ dependencies = [
  "fs2",
  "fuser",
  "futures",
- "hmac 0.10.1",
+ "hmac 0.11.0",
  "http 0.1.21",
  "hyper",
+ "jwt",
  "libc",
  "lru-cache",
  "openssl",
@@ -898,11 +909,11 @@ dependencies = [
 
 [[package]]
 name = "hmac"
-version = "0.10.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1441c6b1e930e2817404b5046f1f989899143a12bf92de603b69f4e0aee1e15"
+checksum = "2a2a2320eb7ec0ebe8da8f744d7812d9fc4cb4d09344ac01898dbcb6a20ae69b"
 dependencies = [
- "crypto-mac 0.10.0",
+ "crypto-mac 0.11.1",
  "digest 0.9.0",
 ]
 
@@ -1051,6 +1062,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83bdfbace3a0e81a4253f73b49e960b053e396a11012cbd49b9b74d6a2b67062"
 dependencies = [
  "wasm-bindgen",
+]
+
+[[package]]
+name = "jwt"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98328bb4f360e6b2ceb1f95645602c7014000ef0c3809963df8ad3a3a09f8d99"
+dependencies = [
+ "base64",
+ "crypto-mac 0.11.1",
+ "digest 0.9.0",
+ "hmac 0.11.0",
+ "serde",
+ "serde_json",
+ "sha2 0.9.5",
 ]
 
 [[package]]

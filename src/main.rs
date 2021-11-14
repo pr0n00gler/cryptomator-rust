@@ -1,5 +1,7 @@
-use cryptomator::crypto::{Cryptor, MasterKey, MasterKeyJson};
-use cryptomator::cryptofs::CryptoFs;
+use cryptomator::crypto::{
+    Cryptor, MasterKey, MasterKeyJson, Vault, DEFAULT_MASTER_KEY_FILE, DEFAULT_VAULT_FILENAME,
+};
+use cryptomator::cryptofs::{parent_path, CryptoFs};
 use cryptomator::logging::init_logger;
 use cryptomator::providers::LocalFs;
 
@@ -8,9 +10,11 @@ use tracing::info;
 use clap::Clap;
 
 use cryptomator::frontends::mount::*;
+use fs2::FileExt;
 use std::env;
+use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom, Write};
 
-const DEFAULT_MASTER_KEY_FILE: &str = "masterkey.cryptomator";
 const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
 
 #[derive(Clap)]
@@ -39,6 +43,9 @@ enum Command {
 
     /// Creates a new vault at the given path
     Create(Create),
+
+    /// Migrates a vault from v7 to v8
+    MigrateV7ToV8,
 }
 
 #[derive(Clap)]
@@ -103,6 +110,38 @@ async fn main() {
 
             std::fs::create_dir(full_storage_path)
                 .expect("Failed to create folder for the storage");
+        }
+        Command::MigrateV7ToV8 => {
+            let pass = rpassword::prompt_password_stdout("Master key password: ")
+                .expect("Unable to read password");
+
+            let vault_path = parent_path(&mk_path).join(DEFAULT_VAULT_FILENAME);
+
+            let mut mk_file = OpenOptions::new()
+                .write(true)
+                .read(true)
+                .open(mk_path)
+                .unwrap();
+
+            let mut mk_json: MasterKeyJson = serde_json::from_reader(&mk_file).unwrap();
+            mk_file.seek(SeekFrom::Start(0)).unwrap();
+
+            let masterkey = MasterKey::from_reader(&mk_file, pass.as_str())
+                .expect("Failed to decrypt master key file");
+            mk_file.seek(SeekFrom::Start(0)).unwrap();
+
+            let mut key: Vec<u8> = Vec::with_capacity(64);
+            key.extend_from_slice(&masterkey.primary_master_key);
+            key.extend_from_slice(&masterkey.hmac_master_key);
+
+            let vault = Vault::create_vault(&key, 8, "SIV_CTRMAC".to_string(), 220).unwrap();
+            mk_json.version = 999;
+
+            mk_file.set_len(0).unwrap();
+            serde_json::to_writer(mk_file, &mk_json).unwrap();
+
+            let mut vault_file = std::fs::File::create(vault_path).unwrap();
+            vault_file.write_all(vault.as_bytes()).unwrap();
         }
         Command::Unlock(u) => {
             let local_fs = LocalFs::new();

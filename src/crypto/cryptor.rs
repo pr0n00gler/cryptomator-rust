@@ -21,8 +21,6 @@ use hmac::{Hmac, Mac, NewMac};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 
-type HmacSha256 = Hmac<Sha256>;
-
 /// File header nonce used during header payload encryption
 pub const FILE_HEADER_NONCE_LENGTH: usize = 16;
 
@@ -209,7 +207,7 @@ impl Cryptor {
         let mut mac_payload: Vec<u8> = Vec::with_capacity(FILE_HEADER_MAC_LENGTH);
         mac_payload.extend_from_slice(&file_header.nonce);
         mac_payload.extend(&payload);
-        let mut mac = HmacSha256::new_varkey(&self.master_key.hmac_master_key)?;
+        let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&self.master_key.hmac_master_key)?;
         mac.update(mac_payload.as_slice());
         let mac_bytes = mac.finalize().into_bytes();
 
@@ -232,7 +230,7 @@ impl Cryptor {
         }
 
         //verify header payload
-        let mut mac = HmacSha256::new_varkey(&self.master_key.hmac_master_key)?;
+        let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&self.master_key.hmac_master_key)?;
         let mut payload_to_verify = Vec::with_capacity(FILE_HEADER_LENGTH); // nonce + ciphertext
         payload_to_verify.extend(&encrypted_header[..FILE_HEADER_NONCE_LENGTH]); // nonce
         payload_to_verify.extend(
@@ -369,7 +367,7 @@ impl Cryptor {
         mac_payload.write_u64::<BigEndian>(chunk_number)?;
         mac_payload.extend_from_slice(&encrypted_chunk);
 
-        let mut mac = HmacSha256::new_varkey(&self.master_key.hmac_master_key)?;
+        let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&self.master_key.hmac_master_key)?;
         mac.update(mac_payload.as_slice());
         let mac_bytes = mac.finalize().into_bytes();
 
@@ -401,7 +399,7 @@ impl Cryptor {
         chunk_number_big_endian.write_u64::<BigEndian>(chunk_number as u64)?;
 
         // check MAC
-        let mut mac = HmacSha256::new_varkey(&self.master_key.hmac_master_key)?;
+        let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&self.master_key.hmac_master_key)?;
         let mut payload_to_verify = Vec::with_capacity(
             header_nonce.len()
                 + chunk_number_big_endian.len()

@@ -9,6 +9,8 @@ use std::path::Path;
 
 const DEFAULT_KID: &str = "masterkeyfile:masterkey.cryptomator";
 pub const DEFAULT_VAULT_FILENAME: &str = "vault.cryptomator";
+pub const DEFAULT_FORMAT: u32 = 8;
+pub const DEFAULT_SHORTENING_THRESHOLD: u32 = 220;
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 #[allow(non_camel_case_types)]

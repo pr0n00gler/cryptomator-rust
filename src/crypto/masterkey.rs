@@ -14,7 +14,7 @@ const FAKE_VAULT_VERSION: u32 = 999;
 
 pub const DEFAULT_MASTER_KEY_FILE: &str = "masterkey.cryptomator";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 #[allow(non_snake_case)]
 pub struct MasterKeyJson {
     pub version: u32,
@@ -88,13 +88,10 @@ pub struct MasterKey {
 }
 
 impl MasterKey {
-    /// Returns a new MasterKey instance by reading io::Reader
-    pub fn from_reader<R: std::io::Read>(
-        file: R,
+    pub fn from_masterkey_json(
+        mk_json: MasterKeyJson,
         password: &str,
     ) -> Result<MasterKey, MasterKeyError> {
-        let mk_json: MasterKeyJson = serde_json::from_reader(file)?;
-
         let scrypt_salt = base64::decode(mk_json.scryptSalt)?;
         let primary_master_key = base64::decode(mk_json.primaryMasterKey)?;
         let hmac_master_key = base64::decode(mk_json.hmacMasterKey)?;
@@ -143,6 +140,15 @@ impl MasterKey {
             primary_master_key: unwrapped_master_key,
             hmac_master_key: unwrapped_hmac_master_key,
         })
+    }
+
+    /// Returns a new MasterKey instance by reading io::Reader
+    pub fn from_reader<R: std::io::Read>(
+        file: R,
+        password: &str,
+    ) -> Result<MasterKey, MasterKeyError> {
+        let mk_json: MasterKeyJson = serde_json::from_reader(file)?;
+        MasterKey::from_masterkey_json(mk_json, password)
     }
 }
 

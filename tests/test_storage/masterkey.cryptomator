@@ -1,1 +1,9 @@
-{"version":999,"scryptSalt":"BYbB5JcgjDw=","scryptCostParam":32768,"scryptBlockSize":8,"primaryMasterKey":"ndo/tHBtPwBU9emn2TOHpgo0emTsiokxQch50Iv2PvSN00lFK9RKCQ==","hmacMasterKey":"tkTLODBB3wkOAgHoztd0c498D1BhHnkC8HTw+aQUg2RCv17O/U7yrg==","versionMac":"a3kyLByQlDZ5qNB0XmJ7JSsOURaoYo7w1mdecWNCqnE="}
+{
+  "version": 999,
+  "scryptSalt": "sEklxJATDR4=",
+  "scryptCostParam": 32768,
+  "scryptBlockSize": 8,
+  "primaryMasterKey": "V4PKPzpaCsguKRuoxGLI8dOQtlOgIjpTfXiOTDfK7K2XmdEGgMC57w==",
+  "hmacMasterKey": "jP6UFLEHiaRFJZvDsny7gA6xsweVMN3rlHPIFw8MoFzCIsjCgrSBXw==",
+  "versionMac": "a3kyLByQlDZ5qNB0XmJ7JSsOURaoYo7w1mdecWNCqnE="
+}

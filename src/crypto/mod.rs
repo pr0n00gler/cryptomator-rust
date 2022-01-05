@@ -11,4 +11,7 @@ pub use self::cryptor::{
 pub use self::error::CryptoError;
 pub use self::error::MasterKeyError;
 pub use self::masterkey::{MasterKey, MasterKeyJson, DEFAULT_MASTER_KEY_FILE};
-pub use self::vault::{CipherCombo, Claims, Vault, DEFAULT_VAULT_FILENAME};
+pub use self::vault::{
+    CipherCombo, Claims, Vault, DEFAULT_FORMAT, DEFAULT_SHORTENING_THRESHOLD,
+    DEFAULT_VAULT_FILENAME,
+};

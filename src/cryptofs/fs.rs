@@ -30,8 +30,6 @@ const FULL_NAME_FILENAME: &str = "name.c9s";
 /// Name of a file that contains contents of a shorten file
 const CONTENTS_FILENAME: &str = "contents.c9r";
 
-const MAX_FILENAME_LENGTH: usize = 220;
-
 // TODO: make configurable
 /// Chunk cache capacity for per files
 const CHUNK_CACHE_CAP: usize = 500;
@@ -117,7 +115,9 @@ impl<FS: FileSystem> CryptoFs<FS> {
                         .encrypt_filename(cleartext_name, dir_id.as_slice())?;
                     let mut full_encrypted_name = encrypted_name + ENCRYPTED_FILE_EXT;
 
-                    if full_encrypted_name.len() > MAX_FILENAME_LENGTH {
+                    if full_encrypted_name.len()
+                        > self.cryptor.vault.claims.shorteningThreshold as usize
+                    {
                         full_encrypted_name =
                             shorten_name(&full_encrypted_name) + SHORTEN_FILENAME_EXT;
                     }
@@ -203,7 +203,7 @@ impl<FS: FileSystem> CryptoFs<FS> {
         let mut full_name = real_filename + ENCRYPTED_FILE_EXT;
 
         let mut is_shorten = false;
-        if full_name.len() > MAX_FILENAME_LENGTH {
+        if full_name.len() > self.cryptor.vault.claims.shorteningThreshold as usize {
             full_name = shorten_name(full_name) + SHORTEN_FILENAME_EXT;
             is_shorten = true;
         }
@@ -253,7 +253,11 @@ impl<FS: FileSystem> CryptoFs<FS> {
                 metadata = c.metadata()?;
             }
         }
-        metadata.len = calculate_cleartext_size(metadata.len);
+        metadata.len = if !metadata.is_dir {
+            calculate_cleartext_size(metadata.len)
+        } else {
+            metadata.len
+        };
 
         let virtual_dir_entry = DirEntry {
             path: Default::default(), //TODO
@@ -344,7 +348,9 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
                         let mut encrypted_folder_name = encrypted_name.clone() + ENCRYPTED_FILE_EXT;
 
                         let mut is_shorten = false;
-                        if encrypted_folder_name.len() > MAX_FILENAME_LENGTH {
+                        if encrypted_folder_name.len()
+                            > self.cryptor.vault.claims.shorteningThreshold as usize
+                        {
                             is_shorten = true;
                             encrypted_folder_name =
                                 shorten_name(&encrypted_folder_name) + SHORTEN_FILENAME_EXT;

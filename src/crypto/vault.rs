@@ -5,21 +5,40 @@ use jwt::{AlgorithmType, Header, SignWithKey, Token, VerifyWithKey};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::io::Read;
+use std::path::Path;
 
 const DEFAULT_KID: &str = "masterkeyfile:masterkey.cryptomator";
 pub const DEFAULT_VAULT_FILENAME: &str = "vault.cryptomator";
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
+#[allow(non_camel_case_types)]
+pub enum CipherCombo {
+    SIV_CTRMAC,
+}
+
+#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 #[allow(non_snake_case)]
 pub struct Claims {
-    pub jti: String,
+    pub jti: uuid::Uuid,
     pub format: u32,
-    pub cipherCombo: String,
+    pub cipherCombo: CipherCombo,
     pub shorteningThreshold: u32,
 }
 
+impl Default for Claims {
+    fn default() -> Self {
+        Claims {
+            jti: uuid::Uuid::new_v4(),
+            format: 8,
+            cipherCombo: CipherCombo::SIV_CTRMAC,
+            shorteningThreshold: 220,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
 pub struct Vault {
-    pub masterkey: MasterKey,
+    pub master_key: MasterKey,
     pub claims: Claims,
 }
 
@@ -27,7 +46,7 @@ impl Vault {
     pub fn create_vault(
         key: &[u8],
         format: u32,
-        ciphercombo: String,
+        ciphercombo: CipherCombo,
         shortening_threshold: u32,
     ) -> Result<String, MasterKeyError> {
         let header = Header {
@@ -37,7 +56,7 @@ impl Vault {
         };
 
         let claims = Claims {
-            jti: uuid::Uuid::new_v4().to_string(),
+            jti: uuid::Uuid::new_v4(),
             format,
             cipherCombo: ciphercombo,
             shorteningThreshold: shortening_threshold,
@@ -48,7 +67,10 @@ impl Vault {
         Ok(Token::new(header, claims).sign_with_key(&hmac_key)?.into())
     }
 
-    pub fn open(vault_path: String, password: &str) -> Result<Vault, MasterKeyError> {
+    pub fn open<P: AsRef<Path>, S: AsRef<str>>(
+        vault_path: P,
+        password: S,
+    ) -> Result<Vault, MasterKeyError> {
         let mut vault_file = std::fs::File::open(&vault_path)?;
         let mut jwt_bytes: Vec<u8> = vec![];
         vault_file.read_to_end(&mut jwt_bytes)?;
@@ -56,33 +78,32 @@ impl Vault {
 
         let unverified_token: Token<Header, Claims, _> = jwt::Token::parse_unverified(&jwt_string)?;
 
-        let masterkey = if let Some(kid) = &unverified_token.header().key_id {
+        let master_key = if let Some(kid) = &unverified_token.header().key_id {
             let masterkey_file_path: std::path::PathBuf;
             if kid == DEFAULT_KID {
-                let path = std::path::Path::new(&vault_path);
-                let dir_path = parent_path(&path);
+                let dir_path = parent_path(vault_path);
                 masterkey_file_path = dir_path.join(DEFAULT_MASTER_KEY_FILE);
             } else {
                 masterkey_file_path = std::path::PathBuf::from(kid)
             }
 
             let mut masterkey_file = std::fs::File::open(masterkey_file_path)?;
-            MasterKey::from_reader(&mut masterkey_file, password)?
+            MasterKey::from_reader(&mut masterkey_file, password.as_ref())?
         } else {
             return Err(MasterKeyError::JWTError(jwt::Error::NoKeyId));
         };
 
         let mut key: Vec<u8> = Vec::with_capacity(64);
-        key.extend_from_slice(&masterkey.primary_master_key);
-        key.extend_from_slice(&masterkey.hmac_master_key);
+        key.extend_from_slice(&master_key.primary_master_key);
+        key.extend_from_slice(&master_key.hmac_master_key);
 
         let hmac_key: Hmac<Sha256> = Hmac::new_from_slice(&key)?;
         let verified_token: Token<Header, Claims, _> =
             VerifyWithKey::verify_with_key(jwt_string.as_str(), &hmac_key)?;
 
         Ok(Vault {
-            masterkey,
-            claims: verified_token.claims().clone(),
+            master_key,
+            claims: *verified_token.claims(),
         })
     }
 }

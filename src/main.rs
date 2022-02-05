@@ -109,6 +109,7 @@ async fn main() {
             let mk_file = OpenOptions::new()
                 .write(true)
                 .read(true)
+                .create(true)
                 .open(mk_path)
                 .expect("Failed to open masterkey file");
             serde_json::to_writer(mk_file, &mk_json).expect("Failed to write master key file");

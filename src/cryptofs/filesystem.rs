@@ -123,7 +123,7 @@ impl Default for Metadata {
 }
 
 /// Directory entry. Should contain a full path, metadata and name
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct DirEntry {
     pub path: std::path::PathBuf,
     pub metadata: Metadata,
@@ -151,17 +151,7 @@ impl DirEntry {
     }
 }
 
-impl Default for DirEntry {
-    fn default() -> Self {
-        DirEntry {
-            path: Default::default(),
-            metadata: Default::default(),
-            file_name: Default::default(),
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 /// Contains some common stats about a file system.
 pub struct Stats {
     /// Number of free bytes
@@ -175,15 +165,4 @@ pub struct Stats {
 
     /// Filesystem's disk space allocation granularity in bytes
     pub allocation_granularity: u64,
-}
-
-impl Default for Stats {
-    fn default() -> Self {
-        Stats {
-            free_space: 0,
-            available_space: 0,
-            total_space: 0,
-            allocation_granularity: 0,
-        }
-    }
 }

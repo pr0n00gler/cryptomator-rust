@@ -28,6 +28,9 @@ pub enum MasterKeyError {
 
     #[fail(display = "HMac invalid key length error")]
     HMacInvalidKeyLengthError(hmac::crypto_mac::InvalidKeyLength),
+
+    #[fail(display = "JWT error")]
+    JWTError(jwt::Error),
 }
 
 impl From<std::io::Error> for MasterKeyError {
@@ -75,6 +78,12 @@ impl From<hmac::crypto_mac::InvalidKeyLength> for MasterKeyError {
 impl From<openssl::aes::KeyError> for MasterKeyError {
     fn from(err: openssl::aes::KeyError) -> MasterKeyError {
         MasterKeyError::AesKeyError(err)
+    }
+}
+
+impl From<jwt::Error> for MasterKeyError {
+    fn from(err: jwt::Error) -> MasterKeyError {
+        MasterKeyError::JWTError(err)
     }
 }
 

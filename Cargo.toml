@@ -39,6 +39,7 @@ clap = "3.0.0-beta.2"
 rpassword = "5.0"
 fs2 = "0.4.3"
 jwt = "0.15.0"
+dropbox-sdk = "0.14.1"
 
 [target.'cfg(unix)'.dependencies]
 fuser = "0.9.1"

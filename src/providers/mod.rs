@@ -1,3 +1,4 @@
+mod dropbox;
 mod local_fs;
 mod mem_fs;
 

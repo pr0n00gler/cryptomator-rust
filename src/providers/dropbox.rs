@@ -1,10 +1,11 @@
 use crate::cryptofs::{DirEntry, File, FileSystem, FileSystemError, Metadata, Stats};
+use bytes::Buf;
 use dropbox_sdk::default_client::UserAuthDefaultClient;
 use dropbox_sdk::files;
 use dropbox_sdk::files::ListFolderContinueArg;
 use std::ffi::OsString;
 use std::fmt::{Debug, Formatter};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -16,7 +17,7 @@ pub struct DropboxClient {
 }
 
 impl Debug for DropboxClient {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, _f: &mut Formatter<'_>) -> std::fmt::Result {
         Ok(())
     }
 }
@@ -33,6 +34,8 @@ impl DropboxFS {
         }
     }
 }
+
+// TODO: remove unwraps
 
 impl FileSystem for DropboxFS {
     fn read_dir<P: AsRef<Path>>(
@@ -66,6 +69,7 @@ impl FileSystem for DropboxFS {
                     _ => continue,
                 };
 
+                println!("{:?}", dir_entry.path);
                 entries.push(dir_entry);
             }
 
@@ -84,24 +88,23 @@ impl FileSystem for DropboxFS {
         Ok(Box::new(entries.into_iter()))
     }
 
-    fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    fn create_dir<P: AsRef<Path>>(&self, _path: P) -> Result<(), FileSystemError> {
         todo!()
     }
 
-    fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
-        todo!()
+    fn create_dir_all<P: AsRef<Path>>(&self, _path: P) -> Result<(), FileSystemError> {
+        Ok(())
     }
 
     fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
-        let download_arg = files::DownloadArg::new(String::from(path.as_ref().to_str().unwrap()));
-
+        println!("{:?}", path.as_ref());
         Ok(Box::new(DropboxFile::new(
             self.client.clone(),
             String::from(path.as_ref().to_str().unwrap()),
         )))
     }
 
-    fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
+    fn create_file<P: AsRef<Path>>(&self, _path: P) -> Result<Box<dyn File>, FileSystemError> {
         todo!()
     }
 
@@ -114,11 +117,11 @@ impl FileSystem for DropboxFS {
         result.is_ok()
     }
 
-    fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    fn remove_file<P: AsRef<Path>>(&self, _path: P) -> Result<(), FileSystemError> {
         todo!()
     }
 
-    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    fn remove_dir<P: AsRef<Path>>(&self, _path: P) -> Result<(), FileSystemError> {
         todo!()
     }
 
@@ -152,7 +155,7 @@ impl FileSystem for DropboxFS {
         }
     }
 
-    fn stats<P: AsRef<Path>>(&self, path: P) -> Result<Stats, FileSystemError> {
+    fn stats<P: AsRef<Path>>(&self, _path: P) -> Result<Stats, FileSystemError> {
         Ok(Stats::default())
     }
 }
@@ -162,6 +165,10 @@ pub struct DropboxFile {
     pub client: DropboxClient,
     pub path: String,
     pub current_pos: u64,
+
+    // dropbox-sdk doesn't support HTTP range, so we download a whole file
+    // and do range work in Cursor
+    pub data: Cursor<Vec<u8>>,
 }
 
 impl DropboxFile {
@@ -170,6 +177,7 @@ impl DropboxFile {
             client,
             path,
             current_pos: 0,
+            data: Cursor::new(vec![0u8; 0]),
         }
     }
 
@@ -210,20 +218,25 @@ impl Seek for DropboxFile {
 
 impl Read for DropboxFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if !self.data.get_ref().is_empty() {
+            return self.data.read(buf);
+        }
+
         let client = self.client.client.lock().unwrap();
 
         let download_arg = files::DownloadArg::new(self.path.clone());
-        let result = files::download(
-            client.deref(),
-            &download_arg,
-            Some(self.current_pos),
-            Some(buf.len() as u64),
-        );
+        let result = files::download(client.deref(), &download_arg, None, None);
 
         match result {
             Ok(Ok(download_result)) => {
                 let mut body = download_result.body.expect("no body received!");
-                body.read(buf)
+
+                let mut data: Vec<u8> = vec![];
+                body.read_to_end(&mut data).unwrap();
+
+                self.data = Cursor::new(data);
+
+                self.data.read(buf)
             }
             Ok(Err(download_error)) => Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -238,7 +251,7 @@ impl Read for DropboxFile {
 }
 
 impl Write for DropboxFile {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
         todo!()
     }
 
@@ -260,8 +273,8 @@ impl File for DropboxFile {
             files::Metadata::File(f) => {
                 Ok(*Metadata::default().with_is_file(true).with_len(f.size))
             }
-            files::Metadata::Folder(f) => Ok(*Metadata::default().with_is_dir(true)),
-            files::Metadata::Deleted(d) => Err(FileSystemError::InvalidPathError(
+            files::Metadata::Folder(_f) => Ok(*Metadata::default().with_is_dir(true)),
+            files::Metadata::Deleted(_d) => Err(FileSystemError::InvalidPathError(
                 "path deleted".to_string(),
             )),
         }

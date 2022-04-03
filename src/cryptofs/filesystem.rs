@@ -195,7 +195,7 @@ impl DirEntry {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug)]
 /// Contains some common stats about a file system.
 pub struct Stats {
     /// Number of free bytes
@@ -209,4 +209,15 @@ pub struct Stats {
 
     /// Filesystem's disk space allocation granularity in bytes
     pub allocation_granularity: u64,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Stats {
+            free_space: 0,
+            available_space: 0,
+            total_space: 0,
+            allocation_granularity: 512,
+        }
+    }
 }

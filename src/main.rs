@@ -2,13 +2,13 @@ use cryptomator::crypto::{
     CipherCombo, Cryptor, MasterKey, MasterKeyJson, Vault, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE,
     DEFAULT_SHORTENING_THRESHOLD, DEFAULT_VAULT_FILENAME,
 };
-use cryptomator::cryptofs::{parent_path, CryptoFs};
+use cryptomator::cryptofs::{parent_path, CryptoFs, File};
 use cryptomator::logging::init_logger;
 use cryptomator::providers::LocalFs;
 
 use tracing::info;
 
-use clap::Clap;
+use clap::{ArgEnum, Clap};
 
 use cryptomator::frontends::mount::*;
 use hmac::{Hmac, Mac, NewMac};
@@ -18,6 +18,12 @@ use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 
 const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ArgEnum)]
+enum FilesystemProvider {
+    Local,
+    Dropbox,
+}
 
 #[derive(Clap)]
 #[clap(version = "0.1.0", author = "pr0n00gler <pr0n00gler@yandex.ru>")]
@@ -29,6 +35,10 @@ struct Opts {
     /// Path to a vault file. By default in the storage directory
     #[clap(short, long)]
     vault_path: Option<String>,
+
+    /// Filesystem provider. Supported values: dropbox and local
+    #[clap(arg_enum, default_value = "local")]
+    filesystem_provider: FilesystemProvider,
 
     /// Log level
     #[clap(short, long, default_value = "info")]

@@ -685,7 +685,7 @@ impl Seek for CryptoFsFile {
                 Ok(s) => self.current_pos = (s as i64 + p) as u64,
                 Err(e) => {
                     error!("Failed to determine cleartext file size: {:?}", e);
-                    return Err(std::io::Error::from(std::io::ErrorKind::Other));
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
                 }
             },
         }
@@ -804,10 +804,12 @@ impl Write for CryptoFsFile {
 
             chunk_index += 1;
         }
-        if self.update_metadata().is_err() {
+
+        if let Err(e) = self.update_metadata() {
             error!("Failed to update metadata for a file");
-            return Err(std::io::Error::from(std::io::ErrorKind::Other));
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
         }
+
         Ok(n)
     }
 

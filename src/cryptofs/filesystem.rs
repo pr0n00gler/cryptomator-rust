@@ -122,6 +122,50 @@ impl Default for Metadata {
     }
 }
 
+impl Metadata {
+    pub fn with_is_dir(&mut self, is_dir: bool) -> &mut Self {
+        self.is_dir = is_dir;
+        self
+    }
+
+    pub fn with_is_file(&mut self, is_file: bool) -> &mut Self {
+        self.is_file = is_file;
+        self
+    }
+
+    pub fn with_len(&mut self, len: u64) -> &mut Self {
+        self.len = len;
+        self
+    }
+
+    pub fn with_modified(&mut self, modified: SystemTime) -> &mut Self {
+        self.modified = modified;
+        self
+    }
+
+    pub fn with_accessed(&mut self, accessed: SystemTime) -> &mut Self {
+        self.accessed = accessed;
+        self
+    }
+
+    pub fn with_created(&mut self, created: SystemTime) -> &mut Self {
+        self.created = created;
+        self
+    }
+
+    #[cfg(unix)]
+    pub fn with_uid(&mut self, uid: u32) -> &mut Self {
+        self.uid = uid;
+        self
+    }
+
+    #[cfg(unix)]
+    pub fn with_gid(&mut self, gid: u32) -> &mut Self {
+        self.gid = gid;
+        self
+    }
+}
+
 /// Directory entry. Should contain a full path, metadata and name
 #[derive(Clone, Default)]
 pub struct DirEntry {

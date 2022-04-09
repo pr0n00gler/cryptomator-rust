@@ -1,5 +1,4 @@
 use crate::cryptofs::{DirEntry, File, FileSystem, FileSystemError, Metadata, Stats};
-use bytes::Buf;
 use dropbox_sdk::default_client::UserAuthDefaultClient;
 use dropbox_sdk::files;
 use dropbox_sdk::files::ListFolderContinueArg;
@@ -138,9 +137,7 @@ impl FileSystem for DropboxFS {
 
         let get_metadata_arg =
             files::GetMetadataArg::new(String::from(path.as_ref().to_str().unwrap()));
-        let result = files::get_metadata(client.deref(), &get_metadata_arg)
-            .unwrap()
-            .unwrap();
+        let result = files::get_metadata(client.deref(), &get_metadata_arg)??;
 
         match result {
             files::Metadata::File(f) => {

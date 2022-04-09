@@ -421,7 +421,7 @@ impl<'a, FS: 'static + FileSystem> CryptoFs<FS> {
             real_path.full_path = real_path.full_path.join(CONTENTS_FILENAME);
         }
         let rfs_file = self.file_system_provider.create_file(real_path)?;
-        Ok(CryptoFsFile::create_file(self.cryptor, rfs_file)?)
+        CryptoFsFile::create_file(self.cryptor, rfs_file)
     }
 
     pub fn exists<P: AsRef<Path>>(&self, path: P) -> bool {

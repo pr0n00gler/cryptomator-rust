@@ -1,9 +1,9 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use cryptomator::crypto;
 use cryptomator::crypto::Vault;
-use cryptomator::cryptofs::{CryptoFs, FileSystem};
+use cryptomator::cryptofs::CryptoFs;
 use cryptomator::providers::{LocalFs, MemoryFs};
-use std::io::{Read, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 const PATH_TO_VAULT: &str = "tests/test_storage/vault.cryptomator";
 const DEFAULT_PASSWORD: &str = "12345678";

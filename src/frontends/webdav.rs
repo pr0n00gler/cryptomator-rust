@@ -73,7 +73,8 @@ impl DFile {
 
 impl DavFile for DFile {
     fn metadata(&mut self) -> FsFuture<Box<dyn DavMetaData>> {
-        async move { Ok(Box::new(self.crypto_fs_file.metadata()?) as Box<dyn DavMetaData>) }.boxed()
+        async move { Ok(Box::new(self.crypto_fs_file.metadata().unwrap()) as Box<dyn DavMetaData>) }
+            .boxed()
     }
 
     fn write_buf(&mut self, buf: Box<dyn Buf + Send>) -> FsFuture<'_, ()> {
@@ -125,15 +126,13 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
                 return Err(FsError::Exists);
             }
             if (_options.create || _options.create_new) && !exists {
-                return Ok(
-                    Box::new(DFile::new(self.crypto_fs.create_file(path.as_pathbuf())?))
-                        as Box<dyn DavFile>,
-                );
+                return Ok(Box::new(DFile::new(Box::new(
+                    self.crypto_fs.create_file(path.as_pathbuf())?,
+                ))) as Box<dyn DavFile>);
             }
-            Ok(
-                Box::new(DFile::new(self.crypto_fs.open_file(path.as_pathbuf())?))
-                    as Box<dyn DavFile>,
-            )
+            Ok(Box::new(DFile::new(Box::new(
+                self.crypto_fs.open_file(path.as_pathbuf())?,
+            ))) as Box<dyn DavFile>)
         }
         .boxed()
     }

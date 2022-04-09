@@ -1,4 +1,6 @@
-use crate::cryptofs::{unix_error_code_from_filesystem_error, CryptoFs, DirEntry, FileSystem};
+use crate::cryptofs::{
+    unix_error_code_from_filesystem_error, CryptoFs, DirEntry, File, FileSystem,
+};
 use fuser::{
     FileAttr, FileType, Filesystem as FuseFS, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyWrite, Request, TimeOrNow, FUSE_ROOT_ID,
@@ -7,7 +9,7 @@ use libc::{EIO, ENOENT, EOF};
 use lru_cache::LruCache;
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::io::{Read, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 use tracing::{debug, error};
@@ -45,7 +47,7 @@ impl<FS: FileSystem> Fuse<FS> {
     }
 }
 
-impl<FS: FileSystem> FuseFS for Fuse<FS> {
+impl<FS: 'static + FileSystem> FuseFS for Fuse<FS> {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let entry_name = if let Some(e) = self.inode_to_entry.get(&parent) {
             e.clone()

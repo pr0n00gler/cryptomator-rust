@@ -45,7 +45,11 @@ pub async fn mount_webdav<FS: 'static + FileSystem>(
 }
 
 #[cfg(unix)]
-pub fn mount_fuse<FS: FileSystem>(mountpoint: String, options: String, crypto_fs: CryptoFs<FS>) {
+pub fn mount_fuse<FS: 'static + FileSystem>(
+    mountpoint: String,
+    options: String,
+    crypto_fs: CryptoFs<FS>,
+) {
     let fuse_fs = Fuse::new(crypto_fs);
     let options = options
         .split_whitespace()

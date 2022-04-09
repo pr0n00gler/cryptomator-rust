@@ -4,7 +4,7 @@ use cryptomator::cryptofs::{CryptoFs, FileSystem};
 use cryptomator::providers::{LocalFs, MemoryFs};
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
-use std::io::Read;
+use std::io::{Read, Seek, Write};
 use std::path::Path;
 
 const TEST_STORAGE_PATH: &str = "tests/test_storage/d";

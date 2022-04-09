@@ -3,6 +3,7 @@ use bytes::Buf;
 use dropbox_sdk::default_client::UserAuthDefaultClient;
 use dropbox_sdk::files;
 use dropbox_sdk::files::ListFolderContinueArg;
+use std::error::Error;
 use std::ffi::OsString;
 use std::fmt::{Debug, Formatter};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -36,12 +37,11 @@ impl DropboxFS {
 }
 
 // TODO: remove unwraps
-
 impl FileSystem for DropboxFS {
     fn read_dir<P: AsRef<Path>>(
         &self,
         path: P,
-    ) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError> {
+    ) -> Result<Box<dyn Iterator<Item = DirEntry>>, Box<dyn Error>> {
         let client = self.client.client.lock().unwrap();
 
         let list_folder_arg =
@@ -49,9 +49,7 @@ impl FileSystem for DropboxFS {
 
         let mut entries: Vec<DirEntry> = vec![];
 
-        let mut result = files::list_folder(client.deref(), &list_folder_arg)
-            .unwrap()
-            .unwrap();
+        let mut result = files::list_folder(client.deref(), &list_folder_arg)??;
 
         loop {
             for result_entry in result.entries.iter() {
@@ -80,23 +78,21 @@ impl FileSystem for DropboxFS {
             result = files::list_folder_continue(
                 client.deref(),
                 &ListFolderContinueArg::new(result.cursor),
-            )
-            .unwrap()
-            .unwrap();
+            )??;
         }
 
         Ok(Box::new(entries.into_iter()))
     }
 
-    fn create_dir<P: AsRef<Path>>(&self, _path: P) -> Result<(), FileSystemError> {
+    fn create_dir<P: AsRef<Path>>(&self, _path: P) -> Result<(), Box<dyn Error>> {
         todo!()
     }
 
-    fn create_dir_all<P: AsRef<Path>>(&self, _path: P) -> Result<(), FileSystemError> {
+    fn create_dir_all<P: AsRef<Path>>(&self, _path: P) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
+    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, Box<dyn Error>> {
         println!("{:?}", path.as_ref());
         Ok(Box::new(DropboxFile::new(
             self.client.clone(),
@@ -104,7 +100,7 @@ impl FileSystem for DropboxFS {
         )))
     }
 
-    fn create_file<P: AsRef<Path>>(&self, _path: P) -> Result<Box<dyn File>, FileSystemError> {
+    fn create_file<P: AsRef<Path>>(&self, _path: P) -> Result<Box<dyn File>, Box<dyn Error>> {
         todo!()
     }
 
@@ -117,27 +113,27 @@ impl FileSystem for DropboxFS {
         result.is_ok()
     }
 
-    fn remove_file<P: AsRef<Path>>(&self, _path: P) -> Result<(), FileSystemError> {
+    fn remove_file<P: AsRef<Path>>(&self, _path: P) -> Result<(), Box<dyn Error>> {
         todo!()
     }
 
-    fn remove_dir<P: AsRef<Path>>(&self, _path: P) -> Result<(), FileSystemError> {
+    fn remove_dir<P: AsRef<Path>>(&self, _path: P) -> Result<(), Box<dyn Error>> {
         todo!()
     }
 
-    fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
+    fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), Box<dyn Error>> {
         todo!()
     }
 
-    fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
+    fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), Box<dyn Error>> {
         todo!()
     }
 
-    fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
+    fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), Box<dyn Error>> {
         todo!()
     }
 
-    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
+    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, Box<dyn Error>> {
         let client = self.client.client.lock().unwrap();
 
         let get_metadata_arg =
@@ -151,11 +147,13 @@ impl FileSystem for DropboxFS {
                 Ok(*Metadata::default().with_is_file(true).with_len(f.size))
             }
             files::Metadata::Folder(_) => Ok(*Metadata::default().with_is_dir(true)),
-            _ => Err(FileSystemError::UnknownError("invalid".to_string())),
+            _ => Err(Box::new(FileSystemError::UnknownError(
+                "invalid".to_string(),
+            ))),
         }
     }
 
-    fn stats<P: AsRef<Path>>(&self, _path: P) -> Result<Stats, FileSystemError> {
+    fn stats<P: AsRef<Path>>(&self, _path: P) -> Result<Stats, Box<dyn Error>> {
         Ok(Stats::default())
     }
 }
@@ -181,21 +179,19 @@ impl DropboxFile {
         }
     }
 
-    pub fn file_size(&mut self) -> Result<u64, FileSystemError> {
+    pub fn file_size(&mut self) -> Result<u64, Box<dyn Error>> {
         let client = self.client.client.lock().unwrap();
 
         let get_metadata_arg = files::GetMetadataArg::new(self.path.clone());
-        let result = files::get_metadata(client.deref(), &get_metadata_arg)
-            .unwrap()
-            .unwrap();
+        let result = files::get_metadata(client.deref(), &get_metadata_arg)??;
 
         if let files::Metadata::File(f) = result {
             return Ok(f.size);
         }
 
-        Err(FileSystemError::UnknownError(
+        Err(Box::new(FileSystemError::UnknownError(
             "path is not a file".to_string(),
-        ))
+        )))
     }
 }
 
@@ -232,7 +228,7 @@ impl Read for DropboxFile {
                 let mut body = download_result.body.expect("no body received!");
 
                 let mut data: Vec<u8> = vec![];
-                body.read_to_end(&mut data).unwrap();
+                body.read_to_end(&mut data)?;
 
                 self.data = Cursor::new(data);
 
@@ -261,22 +257,20 @@ impl Write for DropboxFile {
 }
 
 impl File for DropboxFile {
-    fn metadata(&self) -> Result<Metadata, FileSystemError> {
+    fn metadata(&self) -> Result<Metadata, Box<dyn Error>> {
         let client = self.client.client.lock().unwrap();
 
         let get_metadata_arg = files::GetMetadataArg::new(self.path.clone());
-        let result = files::get_metadata(client.deref(), &get_metadata_arg)
-            .unwrap()
-            .unwrap();
+        let result = files::get_metadata(client.deref(), &get_metadata_arg)??;
 
         match result {
             files::Metadata::File(f) => {
                 Ok(*Metadata::default().with_is_file(true).with_len(f.size))
             }
             files::Metadata::Folder(_f) => Ok(*Metadata::default().with_is_dir(true)),
-            files::Metadata::Deleted(_d) => Err(FileSystemError::InvalidPathError(
+            files::Metadata::Deleted(_d) => Err(Box::new(FileSystemError::InvalidPathError(
                 "path deleted".to_string(),
-            )),
+            ))),
         }
     }
 }

@@ -1,4 +1,5 @@
 use crate::crypto::{CryptoError, MasterKeyError};
+use std::error::Error;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -83,6 +84,12 @@ impl From<std::sync::PoisonError<std::sync::MutexGuard<'_, LruCache<PathBuf, Dir
     fn from(
         err: std::sync::PoisonError<std::sync::MutexGuard<LruCache<PathBuf, DirEntry>>>,
     ) -> FileSystemError {
+        FileSystemError::UnknownError(err.to_string())
+    }
+}
+
+impl From<Box<dyn Error>> for FileSystemError {
+    fn from(err: Box<dyn Error>) -> Self {
         FileSystemError::UnknownError(err.to_string())
     }
 }

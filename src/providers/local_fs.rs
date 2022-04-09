@@ -1,5 +1,6 @@
-use crate::cryptofs::{DirEntry, File, FileSystem, FileSystemError, Metadata, Stats};
+use crate::cryptofs::{DirEntry, File, FileSystem, Metadata, Stats};
 use fs2::statvfs;
+use std::error::Error;
 use std::fs;
 use std::path::Path;
 
@@ -20,7 +21,7 @@ impl Default for LocalFs {
 }
 
 impl File for std::fs::File {
-    fn metadata(&self) -> Result<Metadata, FileSystemError> {
+    fn metadata(&self) -> Result<Metadata, Box<dyn Error>> {
         Ok(Metadata::from(self.metadata()?))
     }
 }
@@ -29,7 +30,7 @@ impl FileSystem for LocalFs {
     fn read_dir<P: AsRef<Path>>(
         &self,
         path: P,
-    ) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError> {
+    ) -> Result<Box<dyn Iterator<Item = DirEntry>>, Box<dyn Error>> {
         Ok(Box::new(fs::read_dir(path)?.map(|rd| match rd {
             Ok(de) => DirEntry {
                 path: de.path(),
@@ -43,15 +44,15 @@ impl FileSystem for LocalFs {
         })))
     }
 
-    fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn Error>> {
         Ok(fs::create_dir(path)?)
     }
 
-    fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn Error>> {
         Ok(fs::create_dir_all(path)?)
     }
 
-    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
+    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, Box<dyn Error>> {
         Ok(Box::new(
             std::fs::OpenOptions::new()
                 .create(true)
@@ -61,7 +62,7 @@ impl FileSystem for LocalFs {
         ))
     }
 
-    fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
+    fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, Box<dyn Error>> {
         Ok(Box::new(
             std::fs::OpenOptions::new()
                 .create(true)
@@ -76,37 +77,37 @@ impl FileSystem for LocalFs {
         std::path::Path::exists(std::path::Path::new(path.as_ref()))
     }
 
-    fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn Error>> {
         Ok(fs::remove_file(path)?)
     }
 
-    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn Error>> {
         Ok(fs::remove_dir_all(path)?)
     }
 
-    fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
+    fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), Box<dyn Error>> {
         fs::copy(_src, _dest)?;
         Ok(())
     }
 
-    fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
+    fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), Box<dyn Error>> {
         self.copy_file(&_src, &_dest)?;
         self.remove_file(_src)
     }
 
-    fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
+    fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), Box<dyn Error>> {
         // well, there is no call of this method from CryptoFS at this moment and i'm too lazy to
         // implement the method for no reason.
         //TODO: implement this method
         unimplemented!();
     }
 
-    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
+    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, Box<dyn Error>> {
         let metadata = fs::metadata(path)?;
         Ok(Metadata::from(metadata))
     }
 
-    fn stats<P: AsRef<Path>>(&self, path: P) -> Result<Stats, FileSystemError> {
+    fn stats<P: AsRef<Path>>(&self, path: P) -> Result<Stats, Box<dyn Error>> {
         let stats = statvfs(path)?;
         Ok(Stats {
             free_space: stats.free_space(),

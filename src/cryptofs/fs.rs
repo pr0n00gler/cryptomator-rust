@@ -414,6 +414,7 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
     fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
         let mut real_path = self.filepath_to_real_path(&path)?;
         if real_path.is_shorten {
+            #[allow(clippy::unnecessary_to_owned)]
             self.create_additional_shorten_entries(
                 &real_path.full_path,
                 &path.as_ref().to_path_buf(),
@@ -481,6 +482,7 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
             src_real_path.full_path = src_real_path.full_path.join(CONTENTS_FILENAME);
         }
         if dst_real_path.is_shorten {
+            #[allow(clippy::unnecessary_to_owned)]
             self.create_additional_shorten_entries(
                 &dst_real_path.full_path,
                 &_dest.as_ref().to_path_buf(),

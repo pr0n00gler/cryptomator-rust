@@ -4,7 +4,8 @@ use crate::crypto::error::MasterKeyError;
 
 use rand::Rng;
 
-use hmac::{Hmac, Mac, NewMac};
+use hmac::digest::generic_array::GenericArray;
+use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 const P: u32 = 1;
@@ -134,7 +135,7 @@ impl MasterKey {
         let mut calculated_version_mac: Hmac<Sha256> =
             Hmac::new_from_slice(&unwrapped_hmac_master_key)?;
         calculated_version_mac.update(&version.to_be_bytes());
-        calculated_version_mac.verify(version_mac.as_slice())?;
+        calculated_version_mac.verify(GenericArray::from_slice(version_mac.as_slice()))?;
 
         Ok(MasterKey {
             primary_master_key: unwrapped_master_key,

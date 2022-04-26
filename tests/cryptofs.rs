@@ -156,6 +156,7 @@ fn test_crypto_fs_remove_dir() {
         .collect();
     let dir_to_remove = Path::new("/dirs/child/");
     let dir_to_remove = dir_to_remove.join(long_dir_name.as_str());
+    #[allow(clippy::unnecessary_to_owned)]
     crypto_fs_remove_dir(
         vec![
             dir_to_remove.join("file1.dat"),
@@ -201,6 +202,7 @@ fn test_crypto_fs_copy_file() {
         .take(300)
         .map(char::from)
         .collect();
+    #[allow(clippy::unnecessary_to_owned)]
     crypto_fs_copy_file(
         "/".to_string() + long_src_name.as_str(),
         "/test-copy.pdf".to_string(),
@@ -217,6 +219,7 @@ fn test_crypto_fs_copy_file() {
         .take(300)
         .map(char::from)
         .collect();
+    #[allow(clippy::unnecessary_to_owned)]
     crypto_fs_copy_file(
         "/test.pdf".to_string(),
         "/".to_string() + long_dst_name.as_str(),
@@ -283,6 +286,7 @@ fn test_crypto_fs_move_file() {
         .take(300)
         .map(char::from)
         .collect();
+    #[allow(clippy::unnecessary_to_owned)]
     crypto_fs_move_file(
         "/".to_string() + long_src_name.as_str(),
         long_dst_name,
@@ -352,6 +356,7 @@ fn test_crypto_fs_move_dir() {
         .collect();
     let dest_dir = "/dest_dir";
 
+    #[allow(clippy::unnecessary_to_owned)]
     crypto_fs_move_dir(
         long_dir1_name,
         long_dir2_name,

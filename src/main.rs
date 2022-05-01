@@ -11,7 +11,7 @@ use tracing::info;
 use clap::Clap;
 
 use cryptomator::frontends::mount::*;
-use hmac::{Hmac, Mac, NewMac};
+use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::env;
 use std::fs::OpenOptions;

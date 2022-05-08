@@ -24,10 +24,10 @@ pub enum MasterKeyError {
     AesKeyError(openssl::aes::KeyError),
 
     #[error("HMac error")]
-    HMacError(hmac::crypto_mac::MacError),
+    HMacError(hmac::digest::MacError),
 
     #[error("HMac invalid key length error")]
-    HMacInvalidKeyLengthError(hmac::crypto_mac::InvalidKeyLength),
+    HMacInvalidKeyLengthError(hmac::digest::InvalidLength),
 
     #[error("JWT error")]
     JWTError(jwt::Error),
@@ -63,14 +63,14 @@ impl From<scrypt::errors::InvalidOutputLen> for MasterKeyError {
     }
 }
 
-impl From<hmac::crypto_mac::MacError> for MasterKeyError {
-    fn from(err: hmac::crypto_mac::MacError) -> MasterKeyError {
+impl From<hmac::digest::MacError> for MasterKeyError {
+    fn from(err: hmac::digest::MacError) -> MasterKeyError {
         MasterKeyError::HMacError(err)
     }
 }
 
-impl From<hmac::crypto_mac::InvalidKeyLength> for MasterKeyError {
-    fn from(err: hmac::crypto_mac::InvalidKeyLength) -> MasterKeyError {
+impl From<hmac::digest::InvalidLength> for MasterKeyError {
+    fn from(err: hmac::digest::InvalidLength) -> MasterKeyError {
         MasterKeyError::HMacInvalidKeyLengthError(err)
     }
 }
@@ -99,10 +99,10 @@ pub enum CryptoError {
     AeadError(aes_siv::aead::Error),
 
     #[error("HMac error")]
-    HMacError(hmac::crypto_mac::MacError),
+    HMacError(hmac::digest::MacError),
 
     #[error("HMac invalid key length error")]
-    HMacInvalidKeyLengthError(hmac::crypto_mac::InvalidKeyLength),
+    HMacInvalidKeyLengthError(hmac::digest::InvalidLength),
 
     #[error("Invalid file header length")]
     InvalidFileHeaderLength(String),
@@ -132,14 +132,14 @@ impl From<aes_siv::aead::Error> for CryptoError {
     }
 }
 
-impl From<hmac::crypto_mac::MacError> for CryptoError {
-    fn from(err: hmac::crypto_mac::MacError) -> CryptoError {
+impl From<hmac::digest::MacError> for CryptoError {
+    fn from(err: hmac::digest::MacError) -> CryptoError {
         CryptoError::HMacError(err)
     }
 }
 
-impl From<hmac::crypto_mac::InvalidKeyLength> for CryptoError {
-    fn from(err: hmac::crypto_mac::InvalidKeyLength) -> CryptoError {
+impl From<hmac::digest::InvalidLength> for CryptoError {
+    fn from(err: hmac::digest::InvalidLength) -> CryptoError {
         CryptoError::HMacInvalidKeyLengthError(err)
     }
 }

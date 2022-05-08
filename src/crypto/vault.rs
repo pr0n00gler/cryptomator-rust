@@ -1,6 +1,7 @@
 use crate::crypto::{MasterKey, MasterKeyError, DEFAULT_MASTER_KEY_FILE};
 use crate::cryptofs::{parent_path, FileSystem};
-use hmac::{Hmac, NewMac};
+use hmac::digest::KeyInit;
+use hmac::Hmac;
 use jwt::{AlgorithmType, Header, SignWithKey, Token, VerifyWithKey};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -83,13 +84,12 @@ impl Vault {
         let unverified_token: Token<Header, Claims, _> = jwt::Token::parse_unverified(&jwt_string)?;
 
         let master_key = if let Some(kid) = &unverified_token.header().key_id {
-            let masterkey_file_path: std::path::PathBuf;
-            if kid == DEFAULT_KID {
+            let masterkey_file_path = if kid == DEFAULT_KID {
                 let dir_path = parent_path(vault_path);
-                masterkey_file_path = dir_path.join(DEFAULT_MASTER_KEY_FILE);
+                dir_path.join(DEFAULT_MASTER_KEY_FILE)
             } else {
-                masterkey_file_path = std::path::PathBuf::from(kid)
-            }
+                std::path::PathBuf::from(kid)
+            };
 
             let mut masterkey_file = filesystem.open_file(masterkey_file_path).unwrap();
             MasterKey::from_reader(&mut masterkey_file, password.as_ref())?

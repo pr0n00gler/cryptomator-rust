@@ -17,7 +17,7 @@ use aes_ctr::Aes256Ctr;
 use crate::crypto::common::clone_into_array;
 
 use crate::crypto::error::CryptoError::{InvalidFileChunkLength, InvalidFileHeaderLength};
-use hmac::{Hmac, Mac, NewMac};
+use hmac::{Hmac, Mac};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 
@@ -238,7 +238,9 @@ impl Cryptor {
                 [FILE_HEADER_NONCE_LENGTH..FILE_HEADER_NONCE_LENGTH + FILE_HEADER_PAYLOAD_LENGTH],
         ); // encrypted payload
         mac.update(payload_to_verify.as_slice());
-        mac.verify(&encrypted_header[FILE_HEADER_NONCE_LENGTH + FILE_HEADER_PAYLOAD_LENGTH..])?;
+        mac.verify(GenericArray::from_slice(
+            &encrypted_header[FILE_HEADER_NONCE_LENGTH + FILE_HEADER_PAYLOAD_LENGTH..],
+        ))?;
 
         //decrypt header payload
         let mut cipher = Aes256Ctr::new(
@@ -410,7 +412,7 @@ impl Cryptor {
                                                            // payload_to_verify.extend(&encrypted_chunk[..FILE_CHUNK_CONTENT_NONCE_LENGTH]); // chunk_nonce
         payload_to_verify.extend(&encrypted_chunk[..begin_of_mac]); // ciphertext
         mac.update(payload_to_verify.as_slice());
-        mac.verify(&encrypted_chunk[begin_of_mac..])?;
+        mac.verify(GenericArray::from_slice(&encrypted_chunk[begin_of_mac..]))?;
 
         // decrypt content
         let mut cipher = Aes256Ctr::new(

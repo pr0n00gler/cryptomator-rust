@@ -8,11 +8,11 @@ use cryptomator::providers::{DropboxFS, LocalFs};
 
 use tracing::info;
 
-use clap::{ArgEnum, Clap};
+use clap::{ArgEnum, Parser};
 
 use cryptomator::frontends::mount::*;
 use dropbox_sdk::default_client::UserAuthDefaultClient;
-use hmac::{Hmac, Mac, NewMac};
+use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::env;
 use std::io::{Seek, SeekFrom, Write};
@@ -27,7 +27,7 @@ enum FilesystemProvider {
     Dropbox,
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 #[clap(version = "0.1.0", author = "pr0n00gler <pr0n00gler@yandex.ru>")]
 struct Opts {
     /// Path to a storage
@@ -50,7 +50,7 @@ struct Opts {
     subcmd: Command,
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 enum Command {
     /// Unlocks a vault
     Unlock(Unlock),
@@ -62,7 +62,7 @@ enum Command {
     MigrateV7ToV8,
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 struct Create {
     /// The Scrypt parameter N
     #[clap(default_value = "16384")]
@@ -73,7 +73,7 @@ struct Create {
     scrypt_block_size: u32,
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 struct Unlock {
     /// Webdav-server listen address
     #[clap(short, long, default_value = "127.0.0.1:4918")]

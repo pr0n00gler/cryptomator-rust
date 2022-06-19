@@ -5,11 +5,11 @@ use std::path::{Component, Path, PathBuf};
 /// Returns a String implementation of a Component
 pub fn component_to_string(c: Component) -> Result<String, FileSystemError> {
     match c {
-        std::path::Component::RootDir => match c.as_os_str().to_str() {
+        Component::RootDir => match c.as_os_str().to_str() {
             Some(s) => Ok(String::from(s)),
             None => Err(UnknownError(String::from("failed to convert OsStr to str"))),
         },
-        std::path::Component::Normal(os) => match os.to_str() {
+        Component::Normal(os) => match os.to_str() {
             Some(s) => Ok(String::from(s)),
             None => Err(UnknownError(String::from("failed to convert OsStr to str"))),
         },
@@ -26,9 +26,9 @@ pub fn component_to_string(c: Component) -> Result<String, FileSystemError> {
 /// assert_eq!("d", last_component.to_str().unwrap_or_default());
 /// ```
 pub fn last_path_component<S: AsRef<Path>>(path: S) -> Result<PathBuf, FileSystemError> {
-    let components = std::path::Path::new(path.as_ref())
+    let components = Path::new(path.as_ref())
         .components()
-        .collect::<Vec<std::path::Component>>();
+        .collect::<Vec<Component>>();
     Ok(match components.last() {
         Some(c) => PathBuf::new().join(c),
         None => {
@@ -51,10 +51,10 @@ pub fn last_path_component<S: AsRef<Path>>(path: S) -> Result<PathBuf, FileSyste
 /// assert_eq!("\\a\\b\\c", parent.to_str().unwrap_or_default());
 /// ```
 pub fn parent_path<S: AsRef<Path>>(path: S) -> PathBuf {
-    let components = std::path::Path::new(path.as_ref())
+    let components = Path::new(path.as_ref())
         .components()
-        .collect::<Vec<std::path::Component>>();
-    let mut dir_path = std::path::PathBuf::new(); //path without filename
+        .collect::<Vec<Component>>();
+    let mut dir_path = PathBuf::new(); //path without filename
 
     // return the same path if there are no parents
     if components.len() < 2 {

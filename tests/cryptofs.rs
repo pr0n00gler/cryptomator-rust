@@ -1,22 +1,22 @@
 use cryptomator::crypto;
+use cryptomator::crypto::Vault;
 use cryptomator::cryptofs::{CryptoFs, FileSystem};
 use cryptomator::providers::{LocalFs, MemoryFs};
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
-use std::io::Read;
+use std::io::{Read, Seek, Write};
 use std::path::Path;
 
 const TEST_STORAGE_PATH: &str = "tests/test_storage/d";
 const TEST_FILE_PATH: &str = "tests/lorem-ipsum.pdf";
-const PATH_TO_MASTER_KEY: &str = "tests/test_storage/masterkey.cryptomator";
+const PATH_TO_VAULT: &str = "tests/test_storage/vault.cryptomator";
 const DEFAULT_PASSWORD: &str = "12345678";
 const VFS_STORAGE_PATH: &str = "/";
 
 #[test]
 fn test_crypto_fs_seek_and_read() {
-    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
-    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
-    let cryptor = crypto::Cryptor::new(mk);
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
 
     let local_fs = LocalFs::new();
     let crypto_fs = CryptoFs::new(TEST_STORAGE_PATH, cryptor, local_fs.clone()).unwrap();
@@ -74,9 +74,8 @@ fn test_crypto_fs_write() {
 
 fn crypto_fs_write<P: AsRef<Path>>(filename: P) {
     let test_write_file: P = filename;
-    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
-    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
-    let cryptor = crypto::Cryptor::new(mk);
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
 
     let local_fs = MemoryFs::new();
     let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
@@ -127,9 +126,8 @@ fn test_crypto_fs_exists() {
 }
 
 fn crypto_fs_exists<P: AsRef<Path>>(filename: P) {
-    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
-    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
-    let cryptor = crypto::Cryptor::new(mk);
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
 
     let local_fs = MemoryFs::new();
     let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
@@ -158,6 +156,7 @@ fn test_crypto_fs_remove_dir() {
         .collect();
     let dir_to_remove = Path::new("/dirs/child/");
     let dir_to_remove = dir_to_remove.join(long_dir_name.as_str());
+    #[allow(clippy::unnecessary_to_owned)]
     crypto_fs_remove_dir(
         vec![
             dir_to_remove.join("file1.dat"),
@@ -171,9 +170,8 @@ fn test_crypto_fs_remove_dir() {
 
 fn crypto_fs_remove_dir<P: AsRef<Path>>(files: Vec<P>, dir_to_remove: P, parent_dir: P) {
     //TODO: remake this test
-    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
-    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
-    let cryptor = crypto::Cryptor::new(mk);
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
 
     let local_fs = MemoryFs::new();
     let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
@@ -204,6 +202,7 @@ fn test_crypto_fs_copy_file() {
         .take(300)
         .map(char::from)
         .collect();
+    #[allow(clippy::unnecessary_to_owned)]
     crypto_fs_copy_file(
         "/".to_string() + long_src_name.as_str(),
         "/test-copy.pdf".to_string(),
@@ -220,6 +219,7 @@ fn test_crypto_fs_copy_file() {
         .take(300)
         .map(char::from)
         .collect();
+    #[allow(clippy::unnecessary_to_owned)]
     crypto_fs_copy_file(
         "/test.pdf".to_string(),
         "/".to_string() + long_dst_name.as_str(),
@@ -228,9 +228,8 @@ fn test_crypto_fs_copy_file() {
 }
 
 fn crypto_fs_copy_file<P: AsRef<Path>>(src_file: P, dst_file: P, dir: P) {
-    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
-    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
-    let cryptor = crypto::Cryptor::new(mk);
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
 
     let local_fs = MemoryFs::new();
     let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
@@ -287,6 +286,7 @@ fn test_crypto_fs_move_file() {
         .take(300)
         .map(char::from)
         .collect();
+    #[allow(clippy::unnecessary_to_owned)]
     crypto_fs_move_file(
         "/".to_string() + long_src_name.as_str(),
         long_dst_name,
@@ -295,9 +295,8 @@ fn test_crypto_fs_move_file() {
 }
 
 fn crypto_fs_move_file<P: AsRef<Path>>(src_file: P, dst_file: P, dst_dir: P) {
-    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
-    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
-    let cryptor = crypto::Cryptor::new(mk);
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
 
     let local_fs = MemoryFs::new();
     let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
@@ -357,6 +356,7 @@ fn test_crypto_fs_move_dir() {
         .collect();
     let dest_dir = "/dest_dir";
 
+    #[allow(clippy::unnecessary_to_owned)]
     crypto_fs_move_dir(
         long_dir1_name,
         long_dir2_name,
@@ -366,9 +366,8 @@ fn test_crypto_fs_move_dir() {
 }
 
 fn crypto_fs_move_dir<P: AsRef<Path>>(dir1: P, child_dir: P, file: P, dst_dir: P) {
-    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
-    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
-    let cryptor = crypto::Cryptor::new(mk);
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
 
     let local_fs = MemoryFs::new();
     let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();

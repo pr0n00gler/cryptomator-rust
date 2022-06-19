@@ -1,10 +1,11 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use cryptomator::crypto;
-use cryptomator::cryptofs::{CryptoFs, FileSystem};
-use cryptomator::providers::MemoryFs;
-use std::io::{Read, SeekFrom};
+use cryptomator::crypto::Vault;
+use cryptomator::cryptofs::CryptoFs;
+use cryptomator::providers::{LocalFs, MemoryFs};
+use std::io::{Read, Seek, SeekFrom, Write};
 
-const PATH_TO_MASTER_KEY: &str = "tests/test_storage/masterkey.cryptomator";
+const PATH_TO_VAULT: &str = "tests/test_storage/vault.cryptomator";
 const DEFAULT_PASSWORD: &str = "12345678";
 const VFS_STORAGE_PATH: &str = "/";
 
@@ -12,14 +13,13 @@ const KB: usize = 1024;
 const MB: usize = 1024 * KB;
 
 fn crypto_fs_write(c: &mut Criterion) {
-    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
-    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
-    let cryptor = crypto::Cryptor::new(mk);
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
 
     let local_fs = MemoryFs::new();
     let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
 
-    let sizes = [10 * MB];
+    let sizes = [10 * KB, 5 * MB, 10 * MB];
 
     let mut group = c.benchmark_group("crypto_write");
     for size in sizes.iter() {
@@ -44,9 +44,8 @@ fn crypto_fs_write(c: &mut Criterion) {
 }
 
 fn crypto_fs_read(c: &mut Criterion) {
-    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
-    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
-    let cryptor = crypto::Cryptor::new(mk);
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
 
     let local_fs = MemoryFs::new();
     let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
@@ -56,7 +55,7 @@ fn crypto_fs_read(c: &mut Criterion) {
     bench_file.write_all(&random_data).unwrap();
     bench_file.flush().unwrap();
 
-    let sizes = [5 * MB];
+    let sizes = [10 * KB, 5 * MB, 10 * MB];
     let mut group = c.benchmark_group("crypto_read");
     for size in sizes.iter() {
         let mut f = crypto_fs.open_file("/bench.dat").unwrap();
@@ -74,9 +73,8 @@ fn crypto_fs_read(c: &mut Criterion) {
 }
 
 fn crypto_encrypt_chunk(c: &mut Criterion) {
-    let mk_file = std::fs::File::open(PATH_TO_MASTER_KEY).unwrap();
-    let mk = crypto::MasterKey::from_reader(mk_file, DEFAULT_PASSWORD).unwrap();
-    let cryptor = crypto::Cryptor::new(mk);
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
 
     let sizes = [32 * KB];
 

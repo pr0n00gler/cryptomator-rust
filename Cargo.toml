@@ -9,7 +9,7 @@ edition = "2018"
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-failure = "0.1"
+thiserror = "1.0"
 base64 = "0.13.0"
 base32 = "0.4.0"
 scrypt = { version = "0.2", default-features = false }
@@ -31,11 +31,10 @@ tokio = { version = "1.0.2", features = ["full"] }
 bytes = "1.0.1"
 tracing = { git = "https://github.com/tokio-rs/tracing", rev = "0e8f920" }
 tracing-appender = { git = "https://github.com/tokio-rs/tracing", rev = "0e8f920" }
-tracing-futures = { git = "https://github.com/tokio-rs/tracing", rev = "0e8f920" }
 tracing-subscriber = { git = "https://github.com/tokio-rs/tracing", features = ["json"], rev = "0e8f920" }
 lru-cache = "0.1.2"
 time = { version = "0.1.43" }
-clap = "3.0.0-beta.2"
+clap = { version = "3.1.17", features = ["derive"] }
 rpassword = "5.0"
 fs2 = "0.4.3"
 jwt = "0.16.0"

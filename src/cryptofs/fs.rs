@@ -10,6 +10,7 @@ use crate::cryptofs::{
 };
 use lru_cache::LruCache;
 use std::cmp::Ordering;
+use std::error::Error;
 use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -63,7 +64,7 @@ pub struct CryptoFs<FS: FileSystem> {
     dir_entries_cache: Arc<Mutex<LruCache<PathBuf, DirEntry>>>,
 }
 
-impl<FS: FileSystem> CryptoFs<FS> {
+impl<'a, FS: 'static + FileSystem> CryptoFs<FS> {
     /// Returns a new instance of CryptoFS
     pub fn new(
         folder: &str,
@@ -94,7 +95,7 @@ impl<FS: FileSystem> CryptoFs<FS> {
     /// There will be an PathIsNotExist error, if path does not exists and CryptoError cause of crypto errors
     pub fn dir_id_from_path<P: AsRef<Path>>(&self, path: P) -> Result<Vec<u8>, FileSystemError> {
         let mut dir_id: Vec<u8> = vec![];
-        let components = std::path::Path::new(path.as_ref()).components();
+        let components = Path::new(path.as_ref()).components();
         for c in components {
             dir_id = match c {
                 std::path::Component::RootDir => vec![],
@@ -122,9 +123,7 @@ impl<FS: FileSystem> CryptoFs<FS> {
                             shorten_name(&full_encrypted_name) + SHORTEN_FILENAME_EXT;
                     }
 
-                    let full_path = std::path::PathBuf::new()
-                        .join(real_path)
-                        .join(full_encrypted_name);
+                    let full_path = PathBuf::new().join(real_path).join(full_encrypted_name);
 
                     let mut guard = self.dir_uuids_cache.lock()?;
 
@@ -170,7 +169,7 @@ impl<FS: FileSystem> CryptoFs<FS> {
         if path.as_ref().eq(Path::new("")) {
             let real_dir_path = self.real_path_from_dir_id(&[])?;
             return Ok(CryptoPath {
-                full_path: std::path::PathBuf::new().join(&real_dir_path),
+                full_path: PathBuf::new().join(&real_dir_path),
                 is_shorten: false,
             });
         }
@@ -184,7 +183,7 @@ impl<FS: FileSystem> CryptoFs<FS> {
         // return only dir path cause the path is not a path to a file
         if filename == parent {
             return Ok(CryptoPath {
-                full_path: std::path::PathBuf::new().join(&real_dir_path),
+                full_path: PathBuf::new().join(&real_dir_path),
                 is_shorten: false,
             });
         }
@@ -192,7 +191,7 @@ impl<FS: FileSystem> CryptoFs<FS> {
         let filename_str = if let Some(fname) = filename.to_str() {
             fname
         } else {
-            return Err(FileSystemError::InvalidPathError(
+            return Err(InvalidPathError(
                 "failed to convert PathBuf to str".to_string(),
             ));
         };
@@ -209,9 +208,7 @@ impl<FS: FileSystem> CryptoFs<FS> {
         }
 
         Ok(CryptoPath {
-            full_path: std::path::PathBuf::new()
-                .join(&real_dir_path)
-                .join(full_name),
+            full_path: PathBuf::new().join(&real_dir_path).join(full_name),
             is_shorten,
         })
     }
@@ -308,11 +305,9 @@ impl<FS: FileSystem> CryptoFs<FS> {
         full_name_file.write_all((full_encrypted_name + ENCRYPTED_FILE_EXT).as_bytes())?;
         Ok(())
     }
-}
 
-impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
     /// Returns an iterator of DirEntries for the given path
-    fn read_dir<P: AsRef<Path>>(
+    pub fn read_dir<P: AsRef<Path>>(
         &self,
         path: P,
     ) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError> {
@@ -328,14 +323,14 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
 
     /// Creates the directory at this path
     /// Similar to create_dir_all()
-    fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    pub fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         let mut parent_dir_id: Vec<u8> = vec![];
-        let mut path_buf = std::path::PathBuf::new();
+        let mut path_buf = PathBuf::new();
 
-        let components = std::path::Path::new(path.as_ref()).components();
+        let components = Path::new(path.as_ref()).components();
         for component in components {
             let path = component_to_string(component)?;
-            path_buf = path_buf.join(std::path::Path::new(&path));
+            path_buf = path_buf.join(Path::new(&path));
             let dir_id = self.dir_id_from_path(&path_buf);
 
             match dir_id {
@@ -357,8 +352,7 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
                         }
 
                         let parent_folder = self.real_path_from_dir_id(parent_dir_id.as_slice())?;
-                        let mut real_path =
-                            std::path::Path::new(&parent_folder).join(&encrypted_folder_name);
+                        let mut real_path = Path::new(&parent_folder).join(&encrypted_folder_name);
                         self.file_system_provider.create_dir_all(&real_path)?;
 
                         if is_shorten {
@@ -379,7 +373,7 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
                             .cryptor
                             .get_dir_id_hash(dir_uuid.to_string().as_bytes())?;
 
-                        let real_folder_path = std::path::Path::new(self.root_folder.as_str())
+                        let real_folder_path = Path::new(self.root_folder.as_str())
                             .join(&dir_id_hash[..2])
                             .join(&dir_id_hash[2..]);
 
@@ -398,20 +392,20 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
         Ok(())
     }
 
-    fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    pub fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         self.create_dir(path)
     }
 
-    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
+    pub fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<CryptoFsFile, FileSystemError> {
         let mut real_path = self.filepath_to_real_path(path)?;
         if real_path.is_shorten {
             real_path.full_path = real_path.full_path.join(CONTENTS_FILENAME);
         }
         let crypto_file = CryptoFsFile::open(real_path, self.cryptor, &self.file_system_provider)?;
-        Ok(Box::new(crypto_file))
+        Ok(crypto_file)
     }
 
-    fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
+    pub fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<CryptoFsFile, FileSystemError> {
         let mut real_path = self.filepath_to_real_path(&path)?;
         if real_path.is_shorten {
             #[allow(clippy::unnecessary_to_owned)]
@@ -423,10 +417,10 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
             real_path.full_path = real_path.full_path.join(CONTENTS_FILENAME);
         }
         let rfs_file = self.file_system_provider.create_file(real_path)?;
-        Ok(Box::new(CryptoFsFile::create_file(self.cryptor, rfs_file)?))
+        CryptoFsFile::create_file(self.cryptor, rfs_file)
     }
 
-    fn exists<P: AsRef<Path>>(&self, path: P) -> bool {
+    pub fn exists<P: AsRef<Path>>(&self, path: P) -> bool {
         let real_path = match self.filepath_to_real_path(path) {
             Ok(p) => p,
             Err(_) => return false,
@@ -434,25 +428,25 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
         self.file_system_provider.exists(real_path)
     }
 
-    fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    pub fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         let real_path = self.filepath_to_real_path(&path)?;
         if real_path.is_shorten {
-            return self.file_system_provider.remove_dir(real_path);
+            return Ok(self.file_system_provider.remove_dir(real_path)?);
         }
 
         let key = path.as_ref().to_path_buf();
         let mut guard = self.dir_entries_cache.lock()?;
         guard.remove(&key);
 
-        self.file_system_provider.remove_file(real_path)
+        Ok(self.file_system_provider.remove_file(real_path)?)
     }
 
-    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    pub fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         let dir_entries = self.read_dir(&path)?;
         let real_dir_path = self.filepath_to_real_path(&path)?;
 
         for entry in dir_entries {
-            let full_path = std::path::PathBuf::new();
+            let full_path = PathBuf::new();
             let full_path = full_path.join(&path).join(&entry.file_name);
 
             let real_path = self.filepath_to_real_path(&full_path)?;
@@ -471,10 +465,10 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
         let mut guard = self.dir_entries_cache.lock()?;
         guard.clear();
 
-        self.file_system_provider.remove_dir(real_dir_path)
+        Ok(self.file_system_provider.remove_dir(real_dir_path)?)
     }
 
-    fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
+    pub fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
         let mut src_real_path = self.filepath_to_real_path(_src)?;
         let mut dst_real_path = self.filepath_to_real_path(&_dest)?;
 
@@ -491,20 +485,21 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
             dst_real_path.full_path = dst_real_path.full_path.join(CONTENTS_FILENAME);
         }
 
-        self.file_system_provider
-            .copy_file(src_real_path, dst_real_path)
+        Ok(self
+            .file_system_provider
+            .copy_file(src_real_path, dst_real_path)?)
     }
 
-    fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
+    pub fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
         self.copy_file(&_src, &_dest)?;
         self.remove_file(&_src)
     }
 
-    fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
+    pub fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
         let src_dir_entries = self.read_dir(&_src)?;
 
         let mut dst_path = _dest.as_ref();
-        let mut dst_path_builder = std::path::PathBuf::new();
+        let mut dst_path_builder = PathBuf::new();
         if !self.exists(&_dest) {
             self.create_dir(&_dest)?;
         } else {
@@ -515,10 +510,10 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
         }
 
         for entry in src_dir_entries {
-            let dst_full_path = std::path::PathBuf::new();
+            let dst_full_path = PathBuf::new();
             let dst_full_path = dst_full_path.join(dst_path).join(&entry.file_name);
 
-            let src_full_path = std::path::PathBuf::new();
+            let src_full_path = PathBuf::new();
             let src_full_path = src_full_path.join(&_src).join(&entry.file_name);
 
             if entry.metadata.is_dir {
@@ -530,22 +525,22 @@ impl<FS: FileSystem> FileSystem for CryptoFs<FS> {
         self.remove_dir(_src)
     }
 
-    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
+    pub fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
         if real_path.is_shorten {
             let contents_file = real_path.full_path.join(CONTENTS_FILENAME);
             if self.file_system_provider.exists(&contents_file) {
-                return self.file_system_provider.metadata(&contents_file);
+                return Ok(self.file_system_provider.metadata(&contents_file)?);
             }
         }
-        self.file_system_provider.metadata(real_path)
+        Ok(self.file_system_provider.metadata(real_path)?)
     }
 
-    fn stats<P: AsRef<Path>>(&self, path: P) -> Result<Stats, FileSystemError> {
+    pub fn stats<P: AsRef<Path>>(&self, path: P) -> Result<Stats, FileSystemError> {
         let dir_id = self.dir_id_from_path(path)?;
         let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
 
-        self.file_system_provider.stats(real_path)
+        Ok(self.file_system_provider.stats(real_path)?)
     }
 }
 
@@ -687,7 +682,7 @@ impl Seek for CryptoFsFile {
                 Ok(s) => self.current_pos = (s as i64 + p) as u64,
                 Err(e) => {
                     error!("Failed to determine cleartext file size: {:?}", e);
-                    return Err(std::io::Error::from(std::io::ErrorKind::Other));
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
                 }
             },
         }
@@ -806,10 +801,12 @@ impl Write for CryptoFsFile {
 
             chunk_index += 1;
         }
-        if self.update_metadata().is_err() {
+
+        if let Err(e) = self.update_metadata() {
             error!("Failed to update metadata for a file");
-            return Err(std::io::Error::from(std::io::ErrorKind::Other));
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
         }
+
         Ok(n)
     }
 
@@ -819,7 +816,7 @@ impl Write for CryptoFsFile {
 }
 
 impl File for CryptoFsFile {
-    fn metadata(&self) -> Result<Metadata, FileSystemError> {
+    fn metadata(&self) -> Result<Metadata, Box<dyn Error>> {
         Ok(self.metadata)
     }
 }

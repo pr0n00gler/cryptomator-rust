@@ -431,6 +431,7 @@ impl Cryptor {
 pub mod tests {
     use crate::crypto;
     use crate::crypto::Vault;
+    use crate::providers::LocalFs;
     use std::io::Cursor;
 
     const PATH_TO_VAULT: &str = "tests/test_storage/vault.cryptomator";
@@ -444,7 +445,7 @@ pub mod tests {
 
     #[test]
     fn test_encrypt_dir_id() {
-        let vault = Vault::open(PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+        let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
         let cryptor = crypto::Cryptor::new(vault);
         let dir_id_hash = cryptor.get_dir_id_hash(ROOT_DIR_ID).unwrap();
         assert_eq!(ROOT_DIR_ID_HASH, dir_id_hash.as_str());
@@ -452,7 +453,7 @@ pub mod tests {
 
     #[test]
     fn test_encrypt_filename() {
-        let vault = Vault::open(PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+        let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
         let cryptor = crypto::Cryptor::new(vault);
         let encrypted_filename = cryptor
             .encrypt_filename(TEST_FILENAME, ROOT_DIR_ID)
@@ -462,7 +463,7 @@ pub mod tests {
 
     #[test]
     fn test_decrypt_filename() {
-        let vault = Vault::open(PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+        let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
         let cryptor = crypto::Cryptor::new(vault);
         let decrypted_filename = cryptor
             .decrypt_filename(ENCRYPTED_TEST_FILENAME, ROOT_DIR_ID)
@@ -472,7 +473,7 @@ pub mod tests {
 
     #[test]
     fn test_encrypt_decrypt_header() {
-        let vault = Vault::open(PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+        let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
         let cryptor = crypto::Cryptor::new(vault);
 
         let header = cryptor.create_file_header();
@@ -491,7 +492,7 @@ pub mod tests {
 
     #[test]
     fn test_encrypt_decrypt_chunk() {
-        let vault = Vault::open(PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+        let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
         let cryptor = crypto::Cryptor::new(vault);
 
         let header = cryptor.create_file_header();
@@ -519,7 +520,7 @@ pub mod tests {
 
     #[test]
     fn test_encrypt_decrypt_content() {
-        let vault = Vault::open(PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+        let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
         let cryptor = crypto::Cryptor::new(vault);
 
         let content_data: Vec<u8> = (0..10 * 1024 * 1024)

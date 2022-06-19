@@ -2,24 +2,29 @@ use cryptomator::crypto::{
     CipherCombo, Cryptor, MasterKey, MasterKeyJson, Vault, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE,
     DEFAULT_SHORTENING_THRESHOLD, DEFAULT_VAULT_FILENAME,
 };
-use cryptomator::cryptofs::{parent_path, CryptoFs};
+use cryptomator::cryptofs::{parent_path, CryptoFs, FileSystem};
 use cryptomator::logging::init_logger;
 use cryptomator::providers::LocalFs;
 
 use tracing::info;
 
-use clap::Clap;
+use clap::{ArgEnum, Parser};
 
 use cryptomator::frontends::mount::*;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::env;
-use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
+use std::path::Path;
 
 const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
 
-#[derive(Clap)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ArgEnum)]
+enum FilesystemProvider {
+    Local,
+}
+
+#[derive(Parser)]
 #[clap(version = "0.1.0", author = "pr0n00gler <pr0n00gler@yandex.ru>")]
 struct Opts {
     /// Path to a storage
@@ -30,6 +35,10 @@ struct Opts {
     #[clap(short, long)]
     vault_path: Option<String>,
 
+    /// Filesystem provider. Supported values: only "local" for now
+    #[clap(arg_enum, default_value = "local")]
+    filesystem_provider: FilesystemProvider,
+
     /// Log level
     #[clap(short, long, default_value = "info")]
     log_level: String,
@@ -38,7 +47,7 @@ struct Opts {
     subcmd: Command,
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 enum Command {
     /// Unlocks a vault
     Unlock(Unlock),
@@ -50,7 +59,7 @@ enum Command {
     MigrateV7ToV8,
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 struct Create {
     /// The Scrypt parameter N
     #[clap(default_value = "16384")]
@@ -61,7 +70,7 @@ struct Create {
     scrypt_block_size: u32,
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 struct Unlock {
     /// Webdav-server listen address
     #[clap(short, long, default_value = "127.0.0.1:4918")]
@@ -95,127 +104,153 @@ async fn main() {
     let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
 
     match opts.subcmd {
-        Command::Create(c) => {
-            let pass = rpassword::prompt_password_stdout("Vault password: ")
-                .expect("Unable to read password");
-
-            info!("Generating master key...");
-            let mk_json = MasterKeyJson::create(pass.as_str(), c.scrypt_cost, c.scrypt_block_size)
-                .expect("Failed to generate master key file");
-            info!("Master key generated!");
-
-            info!("Saving master key to a file...");
-            let mk_path = parent_path(&vault_path).join(DEFAULT_MASTER_KEY_FILE);
-            let mk_file = OpenOptions::new()
-                .write(true)
-                .read(true)
-                .create(true)
-                .open(mk_path)
-                .expect("Failed to open masterkey file");
-            serde_json::to_writer(mk_file, &mk_json).expect("Failed to write master key file");
-            info!("Master key saved!");
-
-            let masterkey = MasterKey::from_masterkey_json(mk_json, &pass).unwrap();
-            let mut key: Vec<u8> = Vec::with_capacity(64);
-            key.extend_from_slice(&masterkey.primary_master_key);
-            key.extend_from_slice(&masterkey.hmac_master_key);
-
-            let vault = Vault::create_vault(
-                &key,
-                DEFAULT_FORMAT,
-                CipherCombo::SIV_CTRMAC,
-                DEFAULT_SHORTENING_THRESHOLD,
-            )
-            .expect("failed to create vault");
-            let mut vault_file =
-                std::fs::File::create(vault_path).expect("failed to create a file for a vault");
-            vault_file
-                .write_all(vault.as_bytes())
-                .expect("failed to write data to a vault file");
-
-            std::fs::create_dir(full_storage_path)
-                .expect("Failed to create folder for the storage");
-        }
-        Command::MigrateV7ToV8 => {
-            let pass = rpassword::prompt_password_stdout("Vault password: ")
-                .expect("Unable to read password");
-
-            info!("Reading old masterkey file...");
-            let mk_path = parent_path(&vault_path).join(DEFAULT_MASTER_KEY_FILE);
-            let mut mk_file = OpenOptions::new()
-                .write(true)
-                .read(true)
-                .open(mk_path)
-                .expect("Failed to open masterkey file");
-
-            let mut mk_json: MasterKeyJson =
-                serde_json::from_reader(&mk_file).expect("failed to read masterkey file");
-
-            let masterkey = MasterKey::from_masterkey_json(mk_json.clone(), pass.as_str())
-                .expect("Failed to decrypt master key file");
-            mk_file.seek(SeekFrom::Start(0)).unwrap();
-
-            let mut key: Vec<u8> = Vec::with_capacity(64);
-            key.extend_from_slice(&masterkey.primary_master_key);
-            key.extend_from_slice(&masterkey.hmac_master_key);
-
-            info!("Creating a vault...");
-            let vault = Vault::create_vault(
-                &key,
-                DEFAULT_FORMAT,
-                CipherCombo::SIV_CTRMAC,
-                DEFAULT_SHORTENING_THRESHOLD,
-            )
-            .expect("failed to create vault");
-
-            mk_json.version = 999;
-            let mut version_mac: Hmac<Sha256> =
-                Hmac::new_from_slice(&masterkey.hmac_master_key).unwrap();
-            version_mac.update(&mk_json.version.to_be_bytes());
-            let version_mac_bytes = version_mac.finalize().into_bytes();
-            mk_json.versionMac = base64::encode(version_mac_bytes);
-
-            info!("Rewriting masterkey file...");
-            mk_file.set_len(0).unwrap();
-            serde_json::to_writer(mk_file, &mk_json)
-                .expect("failed to write data to a masterkey file");
-
-            info!("Writing a vault file...");
-            let mut vault_file =
-                std::fs::File::create(vault_path).expect("failed to create a file for a vault");
-            vault_file
-                .write_all(vault.as_bytes())
-                .expect("failed to write data to a vault file");
-        }
-        Command::Unlock(u) => {
-            let local_fs = LocalFs::new();
-            let pass = rpassword::prompt_password_stdout("Vault password: ")
-                .expect("Unable to read password");
-            info!("Unlocking the storage...");
-
-            info!("Deriving keys...");
-
-            let vault = Vault::open(vault_path, pass).expect("failed to open vault");
-
-            let cryptor = Cryptor::new(vault);
-            let crypto_fs = CryptoFs::new(
-                full_storage_path
-                    .to_str()
-                    .expect("Failed to convert Path to &str"),
-                cryptor,
-                local_fs,
-            )
-            .expect("Failed to unblock storage");
-            info!("Storage unlocked!");
-
-            #[cfg(unix)]
-            if let Some(mountpoint) = u.mountpoint {
-                mount_fuse(mountpoint, u.fuse_options, crypto_fs);
-                return;
+        Command::Create(c) => match opts.filesystem_provider {
+            FilesystemProvider::Local => {
+                create_command(LocalFs::new(), &vault_path, &full_storage_path, c)
             }
-
-            info!("Starting WebDav server...");
-            mount_webdav(u.webdav_listen_address, crypto_fs).await;
-        }
+        },
+        Command::MigrateV7ToV8 => match opts.filesystem_provider {
+            FilesystemProvider::Local => migrate_v7_to_v8_command(LocalFs::new(), &vault_path),
+        },
+        Command::Unlock(u) => match opts.filesystem_provider {
+            FilesystemProvider::Local => {
+                unlock_command(LocalFs::new(), &vault_path, &full_storage_path, u).await
+            }
+        },
     }
+}
+
+fn create_command<FS: FileSystem, P: AsRef<Path>>(
+    fs: FS,
+    vault_path: P,
+    full_storage_path: P,
+    c: Create,
+) {
+    let pass =
+        rpassword::prompt_password_stdout("Vault password: ").expect("Unable to read password");
+
+    info!("Generating master key...");
+    let mk_json = MasterKeyJson::create(pass.as_str(), c.scrypt_cost, c.scrypt_block_size)
+        .expect("Failed to generate master key file");
+    info!("Master key generated!");
+
+    info!("Saving master key to a file...");
+    let mk_path = parent_path(&vault_path).join(DEFAULT_MASTER_KEY_FILE);
+    let mk_file = fs
+        .create_file(mk_path)
+        .expect("Failed to open masterkey file");
+    serde_json::to_writer(mk_file, &mk_json).expect("Failed to write master key file");
+    info!("Master key saved!");
+
+    let masterkey = MasterKey::from_masterkey_json(mk_json, &pass).unwrap();
+    let mut key: Vec<u8> = Vec::with_capacity(64);
+    key.extend_from_slice(&masterkey.primary_master_key);
+    key.extend_from_slice(&masterkey.hmac_master_key);
+
+    let vault = Vault::create_vault(
+        &key,
+        DEFAULT_FORMAT,
+        CipherCombo::SIV_CTRMAC,
+        DEFAULT_SHORTENING_THRESHOLD,
+    )
+    .expect("failed to create vault");
+    let mut vault_file = fs
+        .create_file(vault_path)
+        .expect("failed to create a file for a vault");
+    vault_file
+        .write_all(vault.as_bytes())
+        .expect("failed to write data to a vault file");
+
+    fs.create_dir(full_storage_path)
+        .expect("Failed to create folder for the storage");
+}
+
+fn migrate_v7_to_v8_command<FS: FileSystem, P: AsRef<Path>>(fs: FS, vault_path: P) {
+    let pass =
+        rpassword::prompt_password_stdout("Vault password: ").expect("Unable to read password");
+
+    info!("Reading old masterkey file...");
+    let mk_path = parent_path(&vault_path).join(DEFAULT_MASTER_KEY_FILE);
+    let mut mk_file = fs
+        .open_file(&mk_path)
+        .expect("Failed to open masterkey file");
+
+    let mut mk_json: MasterKeyJson =
+        serde_json::from_reader(&mut mk_file).expect("failed to read masterkey file");
+
+    fs.remove_file(&mk_path)
+        .expect("failed to delete old masterkey file");
+
+    let masterkey = MasterKey::from_masterkey_json(mk_json.clone(), pass.as_str())
+        .expect("Failed to decrypt master key file");
+    mk_file.seek(SeekFrom::Start(0)).unwrap();
+
+    let mut key: Vec<u8> = Vec::with_capacity(64);
+    key.extend_from_slice(&masterkey.primary_master_key);
+    key.extend_from_slice(&masterkey.hmac_master_key);
+
+    info!("Creating a vault...");
+    let vault = Vault::create_vault(
+        &key,
+        DEFAULT_FORMAT,
+        CipherCombo::SIV_CTRMAC,
+        DEFAULT_SHORTENING_THRESHOLD,
+    )
+    .expect("failed to create vault");
+
+    mk_json.version = 999;
+    let mut version_mac: Hmac<Sha256> = Hmac::new_from_slice(&masterkey.hmac_master_key).unwrap();
+    version_mac.update(&mk_json.version.to_be_bytes());
+    let version_mac_bytes = version_mac.finalize().into_bytes();
+    mk_json.versionMac = base64::encode(version_mac_bytes);
+
+    info!("Rewriting masterkey file...");
+    let mk_file = fs
+        .create_file(mk_path)
+        .expect("failed to create new masterkey file");
+    serde_json::to_writer(mk_file, &mk_json).expect("failed to write data to a masterkey file");
+
+    info!("Writing a vault file...");
+    let mut vault_file = fs
+        .create_file(vault_path)
+        .expect("failed to create a file for a vault");
+    vault_file
+        .write_all(vault.as_bytes())
+        .expect("failed to write data to a vault file");
+}
+
+async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
+    fs: FS,
+    vault_path: P,
+    full_storage_path: P,
+    u: Unlock,
+) {
+    let pass =
+        rpassword::prompt_password_stdout("Vault password: ").expect("Unable to read password");
+    info!("Unlocking the storage...");
+
+    info!("Deriving keys...");
+
+    let vault = Vault::open(&fs, vault_path, pass).expect("failed to open vault");
+
+    let cryptor = Cryptor::new(vault);
+    let crypto_fs = CryptoFs::new(
+        full_storage_path
+            .as_ref()
+            .to_str()
+            .expect("Failed to convert Path to &str"),
+        cryptor,
+        fs,
+    )
+    .expect("Failed to unblock storage");
+    info!("Storage unlocked!");
+
+    #[cfg(unix)]
+    if let Some(mountpoint) = u.mountpoint {
+        mount_fuse(mountpoint, u.fuse_options, crypto_fs);
+        return;
+    }
+
+    info!("Starting WebDav server...");
+    mount_webdav(u.webdav_listen_address, crypto_fs).await
 }

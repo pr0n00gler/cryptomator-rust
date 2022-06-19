@@ -1,8 +1,9 @@
 use crate::cryptofs::{
-    last_path_component, parent_path, DirEntry, File, FileSystem, FileSystemError, Metadata, Stats,
+    last_path_component, parent_path, DirEntry, File, FileSystem, Metadata, Stats,
 };
 use rsfs::mem::FS;
 use rsfs::{DirEntry as DE, GenFS, OpenOptions};
+use std::error::Error;
 use std::fmt::Debug;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -33,7 +34,7 @@ impl<F: rsfs::File> VirtualFile<F> {
 }
 
 impl<F: rsfs::File + Send + Sync> File for VirtualFile<F> {
-    fn metadata(&self) -> Result<Metadata, FileSystemError> {
+    fn metadata(&self) -> Result<Metadata, Box<dyn Error>> {
         Ok(metadata_from_rsfs(self.f.metadata()?))
     }
 }
@@ -94,7 +95,7 @@ impl FileSystem for MemoryFs {
     fn read_dir<P: AsRef<Path>>(
         &self,
         path: P,
-    ) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError> {
+    ) -> Result<Box<dyn Iterator<Item = DirEntry>>, Box<dyn Error>> {
         Ok(Box::new(
             self.fs
                 .read_dir(path)
@@ -103,21 +104,21 @@ impl FileSystem for MemoryFs {
         ))
     }
 
-    fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn Error>> {
         Ok(self.fs.create_dir(path)?)
     }
 
-    fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn Error>> {
         Ok(self.fs.create_dir_all(path)?)
     }
 
-    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
+    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, Box<dyn Error>> {
         Ok(Box::new(VirtualFile::new(
             self.fs.new_openopts().read(true).write(true).open(path)?,
         )))
     }
 
-    fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, FileSystemError> {
+    fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, Box<dyn Error>> {
         Ok(Box::new(VirtualFile::new(
             self.fs
                 .new_openopts()
@@ -135,37 +136,37 @@ impl FileSystem for MemoryFs {
         entries.any(|de| de.unwrap().file_name() == *last_element)
     }
 
-    fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn Error>> {
         Ok(self.fs.remove_file(path)?)
     }
 
-    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
+    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn Error>> {
         Ok(self.fs.remove_dir_all(path)?)
     }
 
-    fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
+    fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), Box<dyn Error>> {
         self.fs.copy(_src, _dest)?;
         Ok(())
     }
 
-    fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
+    fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), Box<dyn Error>> {
         self.copy_file(&_src, &_dest)?;
         self.remove_file(_src)
     }
 
-    fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
+    fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), Box<dyn Error>> {
         // well, there is no call of this method from CryptoFS at this moment and i'm too lazy to
         // implement the method for no reason.
         //TODO: implement this method
         unimplemented!()
     }
 
-    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
+    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, Box<dyn Error>> {
         let metadata = self.fs.metadata(path)?;
         Ok(metadata_from_rsfs(metadata))
     }
 
-    fn stats<P: AsRef<Path>>(&self, _path: P) -> Result<Stats, FileSystemError> {
+    fn stats<P: AsRef<Path>>(&self, _path: P) -> Result<Stats, Box<dyn Error>> {
         Ok(Default::default())
     }
 }

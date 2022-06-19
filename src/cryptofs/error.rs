@@ -1,7 +1,7 @@
 use crate::crypto::{CryptoError, MasterKeyError};
-use failure::Fail;
-use failure::_core::fmt::Debug;
+use std::error::Error;
 use std::path::PathBuf;
+use thiserror::Error;
 
 #[cfg(unix)]
 use libc::{c_int, EIO, ENOENT};
@@ -11,30 +11,30 @@ use crate::cryptofs::DirEntry;
 #[cfg(unix)]
 use tracing::debug;
 
-#[derive(Debug, Fail)]
+#[derive(Debug, Error)]
 pub enum FileSystemError {
-    #[fail(display = "Input/Output error")]
+    #[error("Input/Output error")]
     IoError(std::io::Error),
 
-    #[fail(display = "Crypto error")]
+    #[error("Crypto error")]
     CryptoError(CryptoError),
 
-    #[fail(display = "Master key error")]
+    #[error("Master key error")]
     MasterKeyError(MasterKeyError),
 
-    #[fail(display = "Unknown error")]
+    #[error("Unknown error")]
     UnknownError(String),
 
-    #[fail(display = "Invalid path error")]
+    #[error("Invalid path error")]
     InvalidPathError(String),
 
-    #[fail(display = "Path does not exist error")]
+    #[error("Path does not exist error")]
     PathDoesNotExist(String),
 
-    #[fail(display = "String from UTF-8 error")]
+    #[error("String from UTF-8 error")]
     StringConvertError(std::string::FromUtf8Error),
 
-    #[fail(display = "UUID parse error")]
+    #[error("UUID parse error")]
     UuidParseError(uuid::Error),
 }
 
@@ -84,6 +84,12 @@ impl From<std::sync::PoisonError<std::sync::MutexGuard<'_, LruCache<PathBuf, Dir
     fn from(
         err: std::sync::PoisonError<std::sync::MutexGuard<LruCache<PathBuf, DirEntry>>>,
     ) -> FileSystemError {
+        FileSystemError::UnknownError(err.to_string())
+    }
+}
+
+impl From<Box<dyn Error>> for FileSystemError {
+    fn from(err: Box<dyn Error>) -> Self {
         FileSystemError::UnknownError(err.to_string())
     }
 }

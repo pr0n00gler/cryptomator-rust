@@ -1,5 +1,5 @@
 use crate::crypto::{MasterKey, MasterKeyError, DEFAULT_MASTER_KEY_FILE};
-use crate::cryptofs::parent_path;
+use crate::cryptofs::{parent_path, FileSystem};
 use hmac::digest::KeyInit;
 use hmac::Hmac;
 use jwt::{AlgorithmType, Header, SignWithKey, Token, VerifyWithKey};
@@ -70,11 +70,13 @@ impl Vault {
         Ok(Token::new(header, claims).sign_with_key(&hmac_key)?.into())
     }
 
-    pub fn open<P: AsRef<Path>, S: AsRef<str>>(
+    // TODO: fix errors
+    pub fn open<P: AsRef<Path>, S: AsRef<str>, FS: FileSystem>(
+        filesystem: &FS,
         vault_path: P,
         password: S,
     ) -> Result<Vault, MasterKeyError> {
-        let mut vault_file = std::fs::File::open(&vault_path)?;
+        let mut vault_file = filesystem.open_file(&vault_path).unwrap();
         let mut jwt_bytes: Vec<u8> = vec![];
         vault_file.read_to_end(&mut jwt_bytes)?;
         let jwt_string = String::from_utf8(jwt_bytes).unwrap();
@@ -89,7 +91,7 @@ impl Vault {
                 std::path::PathBuf::from(kid)
             };
 
-            let mut masterkey_file = std::fs::File::open(masterkey_file_path)?;
+            let mut masterkey_file = filesystem.open_file(masterkey_file_path).unwrap();
             MasterKey::from_reader(&mut masterkey_file, password.as_ref())?
         } else {
             return Err(MasterKeyError::JWTError(jwt::Error::NoKeyId));

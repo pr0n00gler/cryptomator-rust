@@ -1,35 +1,35 @@
-use failure::Fail;
+use thiserror::Error;
 
-#[derive(Debug, Fail)]
+#[derive(Debug, Error)]
 pub enum MasterKeyError {
-    #[fail(display = "Unsupported vault version")]
+    #[error("Unsupported vault version")]
     VaultVersion,
 
-    #[fail(display = "Input/Output error")]
+    #[error("Input/Output error")]
     IoError(std::io::Error),
 
-    #[fail(display = "Json serialize error")]
+    #[error("Json serialize error")]
     SerializationJsonError(serde_json::Error),
 
-    #[fail(display = "Base64 decode error")]
+    #[error("Base64 decode error")]
     Base64DecodeError(base64::DecodeError),
 
-    #[fail(display = "Scrypt invalid params error")]
+    #[error("Scrypt invalid params error")]
     ScryptInvalidParams(scrypt::errors::InvalidParams),
 
-    #[fail(display = "Scrypt invalid output length")]
+    #[error("Scrypt invalid output length")]
     ScryptInvalidOutputLengthError(scrypt::errors::InvalidOutputLen),
 
-    #[fail(display = "AES key error")]
+    #[error("AES key error")]
     AesKeyError(openssl::aes::KeyError),
 
-    #[fail(display = "HMac error")]
+    #[error("HMac error")]
     HMacError(hmac::digest::MacError),
 
-    #[fail(display = "HMac invalid key length error")]
+    #[error("HMac invalid key length error")]
     HMacInvalidKeyLengthError(hmac::digest::InvalidLength),
 
-    #[fail(display = "JWT error")]
+    #[error("JWT error")]
     JWTError(jwt::Error),
 }
 
@@ -87,30 +87,30 @@ impl From<jwt::Error> for MasterKeyError {
     }
 }
 
-#[derive(Debug, Fail)]
+#[derive(Debug, Error)]
 pub enum CryptoError {
-    #[fail(display = "Input/Output error")]
+    #[error("Input/Output error")]
     IoError(std::io::Error),
 
-    #[fail(display = "Base64 decode error")]
+    #[error("Base64 decode error")]
     Base64DecodeError(base64::DecodeError),
 
-    #[fail(display = "AEAD error")]
+    #[error("AEAD error")]
     AeadError(aes_siv::aead::Error),
 
-    #[fail(display = "HMac error")]
+    #[error("HMac error")]
     HMacError(hmac::digest::MacError),
 
-    #[fail(display = "HMac invalid key length error")]
+    #[error("HMac invalid key length error")]
     HMacInvalidKeyLengthError(hmac::digest::InvalidLength),
 
-    #[fail(display = "Invalid file header length")]
+    #[error("Invalid file header length")]
     InvalidFileHeaderLength(String),
 
-    #[fail(display = "Invalid file chunk length")]
+    #[error("Invalid file chunk length")]
     InvalidFileChunkLength(String),
 
-    #[fail(display = "String from UTF-8 error")]
+    #[error("String from UTF-8 error")]
     StringFromUtf8Error(std::string::FromUtf8Error),
 }
 

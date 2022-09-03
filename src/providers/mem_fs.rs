@@ -1,5 +1,6 @@
 use crate::cryptofs::{
-    last_path_component, parent_path, DirEntry, File, FileSystem, Metadata, Stats,
+    last_path_component, parent_path, DirEntry, File, FileSystem, Metadata,
+    OpenOptions as cryptoOpenOptions, Stats,
 };
 use rsfs::mem::FS;
 use rsfs::{DirEntry as DE, GenFS, OpenOptions};
@@ -112,9 +113,21 @@ impl FileSystem for MemoryFs {
         Ok(self.fs.create_dir_all(path)?)
     }
 
-    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, Box<dyn Error>> {
+    fn open_file<P: AsRef<Path>>(
+        &self,
+        path: P,
+        options: cryptoOpenOptions,
+    ) -> Result<Box<dyn File>, Box<dyn Error>> {
         Ok(Box::new(VirtualFile::new(
-            self.fs.new_openopts().read(true).write(true).open(path)?,
+            self.fs
+                .new_openopts()
+                .read(options.read)
+                .write(options.write)
+                .truncate(options.truncate)
+                .append(options.append)
+                .create(options.create)
+                .create_new(options.create_new)
+                .open(path)?,
         )))
     }
 

@@ -1,4 +1,4 @@
-use crate::cryptofs::{DirEntry, File, FileSystem, Metadata, Stats};
+use crate::cryptofs::{DirEntry, File, FileSystem, Metadata, OpenOptions, Stats};
 use fs2::statvfs;
 use std::error::Error;
 use std::fs;
@@ -52,12 +52,19 @@ impl FileSystem for LocalFs {
         Ok(fs::create_dir_all(path)?)
     }
 
-    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, Box<dyn Error>> {
+    fn open_file<P: AsRef<Path>>(
+        &self,
+        path: P,
+        options: OpenOptions,
+    ) -> Result<Box<dyn File>, Box<dyn Error>> {
         Ok(Box::new(
-            std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .read(true)
+            fs::OpenOptions::new()
+                .create(options.create)
+                .write(options.write)
+                .read(options.read)
+                .truncate(options.truncate)
+                .create_new(options.create_new)
+                .append(options.append)
                 .open(path)?,
         ))
     }

@@ -1,5 +1,8 @@
 use crate::crypto::CryptoError;
-use crate::cryptofs::{CryptoFs, DirEntry, File, FileSystem, FileSystemError, Metadata};
+use crate::cryptofs::{
+    CryptoFs, DirEntry, File, FileSystem, FileSystemError, Metadata,
+    OpenOptions as cryptoOpenOptions,
+};
 use bytes::{Buf, Bytes};
 use futures::{future, future::FutureExt};
 use std::io::{ErrorKind, Read, SeekFrom, Write};
@@ -118,20 +121,29 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
     fn open<'a>(
         &'a self,
         path: &'a DavPath,
-        _options: OpenOptions,
+        options: OpenOptions,
     ) -> FsFuture<'_, Box<dyn DavFile>> {
         async move {
             let exists = self.crypto_fs.exists(path.as_pathbuf());
-            if _options.create_new && exists {
+            if options.create_new && exists {
                 return Err(FsError::Exists);
             }
-            if (_options.create || _options.create_new) && !exists {
+            if (options.create || options.create_new) && !exists {
                 return Ok(Box::new(DFile::new(Box::new(
                     self.crypto_fs.create_file(path.as_pathbuf())?,
                 ))) as Box<dyn DavFile>);
             }
             Ok(Box::new(DFile::new(Box::new(
-                self.crypto_fs.open_file(path.as_pathbuf())?,
+                self.crypto_fs.open_file(
+                    path.as_pathbuf(),
+                    *(cryptoOpenOptions::new()
+                        .read(options.read)
+                        .create_new(options.create_new)
+                        .create(options.create)
+                        .append(options.append)
+                        .truncate(options.truncate)
+                        .write(options.write)),
+                )?,
             ))) as Box<dyn DavFile>)
         }
         .boxed()

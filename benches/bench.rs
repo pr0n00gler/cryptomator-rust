@@ -1,7 +1,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use cryptomator::crypto;
 use cryptomator::crypto::Vault;
-use cryptomator::cryptofs::CryptoFs;
+use cryptomator::cryptofs::{CryptoFs, OpenOptions};
 use cryptomator::providers::{LocalFs, MemoryFs};
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -58,7 +58,9 @@ fn crypto_fs_read(c: &mut Criterion) {
     let sizes = [10 * KB, 5 * MB, 10 * MB];
     let mut group = c.benchmark_group("crypto_read");
     for size in sizes.iter() {
-        let mut f = crypto_fs.open_file("/bench.dat").unwrap();
+        let mut f = crypto_fs
+            .open_file("/bench.dat", OpenOptions::new())
+            .unwrap();
         let mut data: Vec<u8> = vec![0; *size];
 
         group.throughput(Throughput::Bytes(*size as u64));

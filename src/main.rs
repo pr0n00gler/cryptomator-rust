@@ -2,7 +2,7 @@ use cryptomator::crypto::{
     CipherCombo, Cryptor, MasterKey, MasterKeyJson, Vault, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE,
     DEFAULT_SHORTENING_THRESHOLD, DEFAULT_VAULT_FILENAME,
 };
-use cryptomator::cryptofs::{parent_path, CryptoFs, FileSystem};
+use cryptomator::cryptofs::{parent_path, CryptoFs, FileSystem, OpenOptions};
 use cryptomator::logging::init_logger;
 use cryptomator::providers::LocalFs;
 
@@ -172,7 +172,7 @@ fn migrate_v7_to_v8_command<FS: FileSystem, P: AsRef<Path>>(fs: FS, vault_path: 
     info!("Reading old masterkey file...");
     let mk_path = parent_path(&vault_path).join(DEFAULT_MASTER_KEY_FILE);
     let mut mk_file = fs
-        .open_file(&mk_path)
+        .open_file(&mk_path, OpenOptions::new())
         .expect("Failed to open masterkey file");
 
     let mut mk_json: MasterKeyJson =

@@ -77,12 +77,12 @@ struct Unlock {
     webdav_listen_address: String,
 
     /// Mountpoint for mounting FUSE filesystem (and Dokan in the future)
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "frontend_fuse"))]
     #[clap(short, long)]
     mountpoint: Option<String>,
 
     /// Options for the FUSE module
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "frontend_fuse"))]
     #[clap(short, long, default_value = "-o ro -o fsname=hello")]
     fuse_options: String,
 }
@@ -245,7 +245,7 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
     .expect("Failed to unblock storage");
     info!("Storage unlocked!");
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "frontend_fuse"))]
     if let Some(mountpoint) = u.mountpoint {
         mount_fuse(mountpoint, u.fuse_options, crypto_fs);
         return;

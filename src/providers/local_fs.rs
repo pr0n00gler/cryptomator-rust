@@ -71,8 +71,9 @@ impl FileSystem for LocalFs {
 
     fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, Box<dyn Error>> {
         Ok(Box::new(
-            std::fs::OpenOptions::new()
+            fs::OpenOptions::new()
                 .create(true)
+                .truncate(true)
                 .write(true)
                 .read(true)
                 .create_new(true)
@@ -81,7 +82,7 @@ impl FileSystem for LocalFs {
     }
 
     fn exists<P: AsRef<Path>>(&self, path: P) -> bool {
-        std::path::Path::exists(std::path::Path::new(path.as_ref()))
+        Path::exists(Path::new(path.as_ref()))
     }
 
     fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn Error>> {

@@ -64,7 +64,7 @@ pub struct CryptoFs<FS: FileSystem> {
     dir_entries_cache: Arc<Mutex<LruCache<PathBuf, DirEntry>>>,
 }
 
-impl<'a, FS: 'static + FileSystem> CryptoFs<FS> {
+impl<FS: 'static + FileSystem> CryptoFs<FS> {
     /// Returns a new instance of CryptoFS
     pub fn new(
         folder: &str,
@@ -572,7 +572,7 @@ pub struct CryptoFsFile {
     chunk_cache: LruCache<u64, Vec<u8>>,
 }
 
-impl<'gc> CryptoFsFile {
+impl CryptoFsFile {
     /// Opens a file at the given real path (so the path must be translated from 'virtual' to real before the
     /// function call) for reading/writing.
     /// Read/Write implementations for the traits works with a cleartext data, so CryptoFSFile instance
@@ -629,7 +629,7 @@ impl<'gc> CryptoFsFile {
 
     /// Returns a cleartext size of the file
     pub fn file_size(&mut self) -> Result<u64, FileSystemError> {
-        let current_pos = self.rfs_file.seek(SeekFrom::Current(0))?;
+        let current_pos = self.rfs_file.stream_position()?;
         let real_file_size = self.rfs_file.seek(SeekFrom::End(0))?;
         self.rfs_file.seek(SeekFrom::Start(current_pos))?;
         Ok(calculate_cleartext_size(real_file_size))
@@ -637,7 +637,7 @@ impl<'gc> CryptoFsFile {
 
     /// Return a real size of the file
     pub fn real_file_size(&mut self) -> Result<u64, FileSystemError> {
-        let current_pos = self.rfs_file.seek(SeekFrom::Current(0))?;
+        let current_pos = self.rfs_file.stream_position()?;
         let real_file_size = self.rfs_file.seek(SeekFrom::End(0))?;
         self.rfs_file.seek(SeekFrom::Start(current_pos))?;
         Ok(real_file_size)
@@ -689,7 +689,7 @@ impl Seek for CryptoFsFile {
                 Ok(s) => self.current_pos = (s as i64 + p) as u64,
                 Err(e) => {
                     error!("Failed to determine cleartext file size: {:?}", e);
-                    return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
+                    return Err(std::io::Error::other(e));
                 }
             },
         }
@@ -811,7 +811,7 @@ impl Write for CryptoFsFile {
 
         if let Err(e) = self.update_metadata() {
             error!("Failed to update metadata for a file");
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
+            return Err(std::io::Error::other(e));
         }
 
         Ok(n)

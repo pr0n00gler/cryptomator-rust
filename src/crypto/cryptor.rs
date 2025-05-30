@@ -144,7 +144,7 @@ impl Cryptor {
 
         let mut cipher = Aes256Siv::new(aes_siv_key);
         let encrypted_filename =
-            cipher.encrypt(&[parent_dir_id], cleartext_name.as_ref().as_bytes())?;
+            cipher.encrypt([parent_dir_id], cleartext_name.as_ref().as_bytes())?;
 
         let encoded_ciphertext = base64::encode_config(encrypted_filename, base64::URL_SAFE);
         Ok(encoded_ciphertext)
@@ -169,7 +169,7 @@ impl Cryptor {
         let mut cipher = Aes256Siv::new(aes_siv_key);
 
         let decrypted_filename =
-            cipher.decrypt(&[parent_dir_id], encrypted_filename_bytes.as_slice())?;
+            cipher.decrypt([parent_dir_id], encrypted_filename_bytes.as_slice())?;
 
         Ok(String::from_utf8(decrypted_filename)?)
     }
@@ -398,7 +398,7 @@ impl Cryptor {
         let begin_of_mac = encrypted_chunk.len() - FILE_CHUNK_CONTENT_MAC_LENGTH;
 
         let mut chunk_number_big_endian = Vec::with_capacity(U64_SIZE);
-        chunk_number_big_endian.write_u64::<BigEndian>(chunk_number as u64)?;
+        chunk_number_big_endian.write_u64::<BigEndian>(chunk_number)?;
 
         // check MAC
         let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&self.vault.master_key.hmac_master_key)?;

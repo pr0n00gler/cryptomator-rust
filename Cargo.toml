@@ -6,6 +6,9 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+frontend_fuse = []
+
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -13,7 +16,7 @@ thiserror = "1.0"
 base64 = "0.13.0"
 base32 = "0.4.0"
 scrypt = { version = "0.2", default-features = false }
-openssl = { version = "0.10"}
+openssl = { version = "0.10" }
 aes-siv = "0.5.0"
 aes-ctr = "0.6.0"
 hmac = "0.12.1"
@@ -23,26 +26,23 @@ sha-1 = { version = "0.10.0", features = ["asm"] }
 rand = "0.7.3"
 uuid = { version = "0.8.2", features = ["serde", "v4"] }
 rsfs = { git = "https://github.com/pr0n00gler/rsfs" }
-webdav-handler = { git = "https://github.com/pr0n00gler/webdav-handler-rs", branch = "win"}
+webdav-handler = { git = "https://github.com/pr0n00gler/webdav-handler-rs", branch = "win" }
 futures = "0.3.12"
-http = "0.1.17"
-hyper = { version = "0.14.2", features = [ "http1", "http2", "server", "stream", "runtime" ] }
+hyper = { version = "0.14.2", features = ["http1", "http2", "server", "stream", "runtime"] }
 tokio = { version = "1.0.2", features = ["full"] }
 bytes = "1.0.1"
 tracing = { git = "https://github.com/tokio-rs/tracing", rev = "0e8f920" }
 tracing-appender = { git = "https://github.com/tokio-rs/tracing", rev = "0e8f920" }
 tracing-subscriber = { git = "https://github.com/tokio-rs/tracing", features = ["json"], rev = "0e8f920" }
 lru-cache = "0.1.2"
-time = { version = "0.1.43" }
 clap = { version = "3.1.17", features = ["derive"] }
 rpassword = "5.0"
 fs2 = "0.4.3"
 jwt = "0.16.0"
 
-[target.'cfg(unix)'.dependencies]
-fuser = "0.11.0"
-libc = "0.2.51"
-
+[target.'cfg(all(unix, feature = "frontend_fuse"))'.dependencies]
+fuser = { version = "0.11.0" }
+libc = { version = "0.2.51" }
 
 [profile.release]
 rpath = false
@@ -54,7 +54,7 @@ debug-assertions = false
 panic = "unwind"
 
 [dev-dependencies]
-criterion = {version = "0.3", features = ["html_reports"]}
+criterion = { version = "0.3", features = ["html_reports"] }
 
 [[bench]]
 name = "bench"

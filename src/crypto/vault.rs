@@ -77,12 +77,7 @@ impl Vault {
     ) -> Result<Vault, MasterKeyError> {
         let mut vault_file = filesystem
             .open_file(&vault_path, OpenOptions::new())
-            .map_err(|e| {
-                MasterKeyError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
-            })?;
+            .map_err(|e| MasterKeyError::IoError(std::io::Error::other(e.to_string())))?;
         let mut jwt_bytes: Vec<u8> = vec![];
         vault_file.read_to_end(&mut jwt_bytes)?;
         let jwt_string = String::from_utf8(jwt_bytes)?;
@@ -99,12 +94,7 @@ impl Vault {
 
             let mut masterkey_file = filesystem
                 .open_file(masterkey_file_path, OpenOptions::new())
-                .map_err(|e| {
-                    MasterKeyError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    ))
-                })?;
+                .map_err(|e| MasterKeyError::IoError(std::io::Error::other(e.to_string())))?;
             MasterKey::from_reader(&mut masterkey_file, password.as_ref())?
         } else {
             return Err(MasterKeyError::JWTError(jwt::Error::NoKeyId));

@@ -122,7 +122,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         &'a self,
         path: &'a DavPath,
         options: OpenOptions,
-    ) -> FsFuture<'_, Box<dyn DavFile>> {
+    ) -> FsFuture<'a, Box<dyn DavFile>> {
         async move {
             let exists = self.crypto_fs.exists(path.as_pathbuf());
             if options.create_new && exists {
@@ -153,7 +153,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         &'a self,
         path: &'a DavPath,
         _meta: ReadDirMeta,
-    ) -> FsFuture<'_, FsStream<Box<dyn DavDirEntry>>> {
+    ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
         async move {
             let entries = self.crypto_fs.read_dir(path.as_pathbuf())?;
             let strm = futures::stream::iter(
@@ -166,7 +166,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         .boxed()
     }
 
-    fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'_, Box<dyn DavMetaData>> {
+    fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
         async move {
             let metadata = self.crypto_fs.metadata(path.as_pathbuf())?;
             Ok(Box::new(metadata) as Box<dyn DavMetaData>)
@@ -174,19 +174,19 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         .boxed()
     }
 
-    fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<()> {
+    fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         async move { Ok(self.crypto_fs.create_dir(path.as_pathbuf())?) }.boxed()
     }
 
-    fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<()> {
+    fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         async move { Ok(self.crypto_fs.remove_dir(path.as_pathbuf())?) }.boxed()
     }
 
-    fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<()> {
+    fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         async move { Ok(self.crypto_fs.remove_file(path.as_pathbuf())?) }.boxed()
     }
 
-    fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<()> {
+    fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
             let from_metadata = self.crypto_fs.metadata(from.as_pathbuf())?;
             if from_metadata.is_dir {
@@ -201,7 +201,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         .boxed()
     }
 
-    fn copy<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<()> {
+    fn copy<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
             Ok(self
                 .crypto_fs

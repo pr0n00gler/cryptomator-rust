@@ -68,11 +68,7 @@ fn test_crypto_fs_seek_and_read() {
 #[test]
 fn test_crypto_fs_write() {
     crypto_fs_write("/test.dat");
-    let long_name: String = thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(300)
-        .map(char::from)
-        .collect();
+    let long_name: String = thread_rng().sample_iter(&Alphanumeric).take(300).collect();
     crypto_fs_write("/".to_string() + long_name.as_str());
 }
 
@@ -125,11 +121,7 @@ fn crypto_fs_write<P: AsRef<Path>>(filename: P) {
 #[test]
 fn test_crypto_fs_exists() {
     crypto_fs_exists("/test.txt");
-    let long_name: String = thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(300)
-        .map(char::from)
-        .collect();
+    let long_name: String = thread_rng().sample_iter(&Alphanumeric).take(300).collect();
     crypto_fs_exists("/".to_string() + long_name.as_str());
 }
 
@@ -157,11 +149,7 @@ fn test_crypto_fs_remove_dir() {
         "/dirs/to/remove",
         "/dirs",
     );
-    let long_dir_name: String = thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(300)
-        .map(char::from)
-        .collect();
+    let long_dir_name: String = thread_rng().sample_iter(&Alphanumeric).take(300).collect();
     let dir_to_remove = Path::new("/dirs/child/");
     let dir_to_remove = dir_to_remove.join(long_dir_name.as_str());
     #[allow(clippy::unnecessary_to_owned)]
@@ -200,16 +188,8 @@ fn crypto_fs_remove_dir<P: AsRef<Path>>(files: Vec<P>, dir_to_remove: P, parent_
 fn test_crypto_fs_copy_file() {
     crypto_fs_copy_file("/test.pdf", "/test-copy.pdf", "/dir-to-copy");
 
-    let long_dir_name: String = thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(300)
-        .map(char::from)
-        .collect();
-    let long_src_name: String = thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(300)
-        .map(char::from)
-        .collect();
+    let long_dir_name: String = thread_rng().sample_iter(&Alphanumeric).take(300).collect();
+    let long_src_name: String = thread_rng().sample_iter(&Alphanumeric).take(300).collect();
     #[allow(clippy::unnecessary_to_owned)]
     crypto_fs_copy_file(
         "/".to_string() + long_src_name.as_str(),
@@ -217,16 +197,8 @@ fn test_crypto_fs_copy_file() {
         "/".to_string() + long_dir_name.as_str(),
     );
 
-    let long_dir_name: String = thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(300)
-        .map(char::from)
-        .collect();
-    let long_dst_name: String = thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(300)
-        .map(char::from)
-        .collect();
+    let long_dir_name: String = thread_rng().sample_iter(&Alphanumeric).take(300).collect();
+    let long_dst_name: String = thread_rng().sample_iter(&Alphanumeric).take(300).collect();
     #[allow(clippy::unnecessary_to_owned)]
     crypto_fs_copy_file(
         "/test.pdf".to_string(),
@@ -290,16 +262,8 @@ fn crypto_fs_copy_file<P: AsRef<Path>>(src_file: P, dst_file: P, dir: P) {
 fn test_crypto_fs_move_file() {
     crypto_fs_move_file("/test.dat", "test_moved.dat", "/dir_for_moved_file");
 
-    let long_dst_name: String = thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(300)
-        .map(char::from)
-        .collect();
-    let long_src_name: String = thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(300)
-        .map(char::from)
-        .collect();
+    let long_dst_name: String = thread_rng().sample_iter(&Alphanumeric).take(300).collect();
+    let long_src_name: String = thread_rng().sample_iter(&Alphanumeric).take(300).collect();
     #[allow(clippy::unnecessary_to_owned)]
     crypto_fs_move_file(
         "/".to_string() + long_src_name.as_str(),
@@ -357,21 +321,9 @@ fn crypto_fs_move_file<P: AsRef<Path>>(src_file: P, dst_file: P, dst_dir: P) {
 fn test_crypto_fs_move_dir() {
     crypto_fs_move_dir("dir1", "dir2", "test.dat", "/dest_dir");
 
-    let long_dir1_name: String = thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(300)
-        .map(char::from)
-        .collect();
-    let long_dir2_name: String = thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(300)
-        .map(char::from)
-        .collect();
-    let long_file_name: String = thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(300)
-        .map(char::from)
-        .collect();
+    let long_dir1_name: String = thread_rng().sample_iter(&Alphanumeric).take(300).collect();
+    let long_dir2_name: String = thread_rng().sample_iter(&Alphanumeric).take(300).collect();
+    let long_file_name: String = thread_rng().sample_iter(&Alphanumeric).take(300).collect();
     let dest_dir = "/dest_dir";
 
     #[allow(clippy::unnecessary_to_owned)]
@@ -403,7 +355,7 @@ fn crypto_fs_move_dir<P: AsRef<Path>>(dir1: P, child_dir: P, file: P, dst_dir: P
     let data: Vec<u8> = (0..32 * 1024 * 3 + 2465)
         .map(|_| rand::random::<u8>())
         .collect();
-    let mut test_file = crypto_fs.create_file(root.join(&test_filename)).unwrap();
+    let mut test_file = crypto_fs.create_file(root.join(test_filename)).unwrap();
     test_file.write_all(data.as_slice()).unwrap();
     test_file.flush().unwrap();
 
@@ -419,7 +371,7 @@ fn crypto_fs_move_dir<P: AsRef<Path>>(dir1: P, child_dir: P, file: P, dst_dir: P
     crypto_fs.remove_dir(dest_dir).unwrap();
 
     //test move folder into folder
-    let moved_file_path = dest_dir.join(&test_filename);
+    let moved_file_path = dest_dir.join(test_filename);
 
     crypto_fs.create_dir(root.join(dirs_to_move)).unwrap();
     crypto_fs.create_dir(dest_dir).unwrap();

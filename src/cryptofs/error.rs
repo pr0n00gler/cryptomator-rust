@@ -3,12 +3,12 @@ use std::error::Error;
 use std::path::PathBuf;
 use thiserror::Error;
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "frontend_fuse"))]
 use libc::{c_int, EIO, ENOENT};
 use lru_cache::LruCache;
 
 use crate::cryptofs::DirEntry;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "frontend_fuse"))]
 use tracing::debug;
 
 #[derive(Debug, Error)]
@@ -94,7 +94,7 @@ impl From<Box<dyn Error>> for FileSystemError {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "frontend_fuse"))]
 pub fn unix_error_code_from_filesystem_error(fs: FileSystemError) -> c_int {
     debug!("Error occurred: {:?}", fs);
     match fs {

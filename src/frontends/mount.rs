@@ -6,10 +6,10 @@ use tracing::info;
 use webdav_handler::fakels::FakeLs;
 use webdav_handler::DavHandler;
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "frontend_fuse"))]
 use std::ffi::OsStr;
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "frontend_fuse"))]
 use crate::frontends::fuse::Fuse;
 
 pub async fn mount_webdav<FS: 'static + FileSystem>(
@@ -44,7 +44,7 @@ pub async fn mount_webdav<FS: 'static + FileSystem>(
         .map_err(|e| eprintln!("server error: {}", e));
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "frontend_fuse"))]
 pub fn mount_fuse<FS: 'static + FileSystem>(
     mountpoint: String,
     options: String,

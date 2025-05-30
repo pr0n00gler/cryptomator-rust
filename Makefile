@@ -2,7 +2,7 @@
 
 clippy:
 	rustup component add clippy || true
-	cargo clippy --all-targets --all-features --workspace -- -D warnings
+	cargo clippy --all-targets --workspace -- -D warnings
 
 test:
 	cargo test

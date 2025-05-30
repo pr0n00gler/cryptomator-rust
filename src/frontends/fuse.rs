@@ -1,5 +1,5 @@
 use crate::cryptofs::{
-    unix_error_code_from_filesystem_error, CryptoFs, DirEntry, File, FileSystem,
+    unix_error_code_from_filesystem_error, CryptoFs, DirEntry, File, FileSystem, OpenOptions,
 };
 use fuser::{
     FileAttr, FileType, Filesystem as FuseFS, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
@@ -350,7 +350,7 @@ impl<FS: 'static + FileSystem> FuseFS for Fuse<FS> {
             reply.error(ENOENT);
             return;
         };
-        let mut f = match self.crypto_fs.open_file(entry_name) {
+        let mut f = match self.crypto_fs.open_file(entry_name, OpenOptions::new()) {
             Ok(f) => f,
             Err(e) => {
                 error!("Failed to open file {:?}: {:?}", entry_name, e);
@@ -392,7 +392,10 @@ impl<FS: 'static + FileSystem> FuseFS for Fuse<FS> {
             reply.error(ENOENT);
             return;
         };
-        let mut f = match self.crypto_fs.open_file(entry_name) {
+        let mut f = match self
+            .crypto_fs
+            .open_file(entry_name, *OpenOptions::new().write(true).append(true))
+        {
             Ok(f) => f,
             Err(e) => {
                 error!("Failed to open file {:?}: {:?}", entry_name, e);

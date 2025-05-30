@@ -157,7 +157,7 @@ impl MasterKey {
 pub mod tests {
     use crate::crypto::masterkey::MasterKeyJson;
     use crate::crypto::MasterKey;
-    use crate::cryptofs::FileSystem;
+    use crate::cryptofs::{FileSystem, OpenOptions};
     use crate::providers::MemoryFs;
 
     const DEFAULT_PASSWORD: &str = "12345678";
@@ -174,7 +174,9 @@ pub mod tests {
         let mk_file = memory_fs.create_file(DEFAULT_MK_FILE).unwrap();
         serde_json::to_writer(mk_file, &mk_json).unwrap();
 
-        let check_mk_file = memory_fs.open_file(DEFAULT_MK_FILE).unwrap();
+        let check_mk_file = memory_fs
+            .open_file(DEFAULT_MK_FILE, OpenOptions::new())
+            .unwrap();
         MasterKey::from_reader(check_mk_file, DEFAULT_PASSWORD).unwrap();
     }
 }

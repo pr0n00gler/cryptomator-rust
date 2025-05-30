@@ -1,6 +1,6 @@
 use cryptomator::crypto;
 use cryptomator::crypto::Vault;
-use cryptomator::cryptofs::{CryptoFs, FileSystem};
+use cryptomator::cryptofs::{CryptoFs, FileSystem, OpenOptions};
 use cryptomator::providers::{LocalFs, MemoryFs};
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
@@ -21,10 +21,14 @@ fn test_crypto_fs_seek_and_read() {
     let local_fs = LocalFs::new();
     let crypto_fs = CryptoFs::new(TEST_STORAGE_PATH, cryptor, local_fs.clone()).unwrap();
 
-    let mut cleartext_test_file = local_fs.open_file(TEST_FILE_PATH).unwrap();
+    let mut cleartext_test_file = local_fs
+        .open_file(TEST_FILE_PATH, OpenOptions::new())
+        .unwrap();
     let cleartext_file_size = cleartext_test_file.seek(std::io::SeekFrom::End(0)).unwrap();
 
-    let mut ciphertext_test_file = crypto_fs.open_file("/lorem-ipsum.pdf").unwrap();
+    let mut ciphertext_test_file = crypto_fs
+        .open_file("/lorem-ipsum.pdf", OpenOptions::new())
+        .unwrap();
     let ciphertext_file_size = ciphertext_test_file
         .seek(std::io::SeekFrom::End(0))
         .unwrap();
@@ -88,7 +92,9 @@ fn crypto_fs_write<P: AsRef<Path>>(filename: P) {
     test_file.write_all(random_data.as_slice()).unwrap();
     test_file.flush().unwrap();
 
-    let mut check_file = crypto_fs.open_file(&test_write_file).unwrap();
+    let mut check_file = crypto_fs
+        .open_file(&test_write_file, OpenOptions::new())
+        .unwrap();
     let mut check_data: Vec<u8> = vec![];
     let count = check_file.read_to_end(&mut check_data).unwrap();
     assert_eq!(count, random_data.len());
@@ -99,7 +105,9 @@ fn crypto_fs_write<P: AsRef<Path>>(filename: P) {
     for (i, b) in random_slice.iter().enumerate() {
         random_data[i + slice_offset] = *b
     }
-    let mut dat_file = crypto_fs.open_file(&test_write_file).unwrap();
+    let mut dat_file = crypto_fs
+        .open_file(&test_write_file, *OpenOptions::new().write(true))
+        .unwrap();
     dat_file
         .seek(std::io::SeekFrom::Start(slice_offset as u64))
         .unwrap();
@@ -247,11 +255,15 @@ fn crypto_fs_copy_file<P: AsRef<Path>>(src_file: P, dst_file: P, dir: P) {
     //test copy to the same folder
     crypto_fs.copy_file(file_to_copy, copied_file).unwrap();
 
-    let mut file = crypto_fs.open_file(file_to_copy).unwrap();
+    let mut file = crypto_fs
+        .open_file(file_to_copy, OpenOptions::new())
+        .unwrap();
     let mut data: Vec<u8> = vec![];
     file.read_to_end(&mut data).unwrap();
 
-    let mut file_copy = crypto_fs.open_file(copied_file).unwrap();
+    let mut file_copy = crypto_fs
+        .open_file(copied_file, OpenOptions::new())
+        .unwrap();
     let mut data_copy: Vec<u8> = vec![];
     file_copy.read_to_end(&mut data_copy).unwrap();
     assert_eq!(data, data_copy);
@@ -263,7 +275,9 @@ fn crypto_fs_copy_file<P: AsRef<Path>>(src_file: P, dst_file: P, dir: P) {
     crypto_fs
         .copy_file(file_to_copy.as_ref(), copied_file_full_path.as_path())
         .unwrap();
-    let mut file_copy2 = crypto_fs.open_file(copied_file_full_path).unwrap();
+    let mut file_copy2 = crypto_fs
+        .open_file(copied_file_full_path, OpenOptions::new())
+        .unwrap();
     let mut data_copy2: Vec<u8> = vec![];
     file_copy2.read_to_end(&mut data_copy2).unwrap();
     assert_eq!(data, data_copy2);
@@ -315,7 +329,9 @@ fn crypto_fs_move_file<P: AsRef<Path>>(src_file: P, dst_file: P, dst_dir: P) {
     crypto_fs
         .move_file(file_to_move.as_ref(), moved_file.as_path())
         .unwrap();
-    let mut check_file = crypto_fs.open_file(&moved_file).unwrap();
+    let mut check_file = crypto_fs
+        .open_file(&moved_file, OpenOptions::new())
+        .unwrap();
     let mut data_check: Vec<u8> = vec![];
     check_file.read_to_end(&mut data_check).unwrap();
     assert_eq!(data, data_check);
@@ -327,7 +343,9 @@ fn crypto_fs_move_file<P: AsRef<Path>>(src_file: P, dst_file: P, dst_dir: P) {
     crypto_fs
         .move_file(&moved_file, &moved_file_to_folder)
         .unwrap();
-    let mut check_file = crypto_fs.open_file(moved_file_to_folder).unwrap();
+    let mut check_file = crypto_fs
+        .open_file(moved_file_to_folder, OpenOptions::new())
+        .unwrap();
     let mut data_check: Vec<u8> = vec![];
     check_file.read_to_end(&mut data_check).unwrap();
     assert_eq!(data, data_check);
@@ -392,7 +410,9 @@ fn crypto_fs_move_dir<P: AsRef<Path>>(dir1: P, child_dir: P, file: P, dst_dir: P
     crypto_fs
         .move_dir(root.join(dir_to_move).as_path(), dest_dir)
         .unwrap();
-    let mut check_file = crypto_fs.open_file(moved_file_path).unwrap();
+    let mut check_file = crypto_fs
+        .open_file(moved_file_path, OpenOptions::new())
+        .unwrap();
     let mut data_check: Vec<u8> = vec![];
     check_file.read_to_end(&mut data_check).unwrap();
     assert_eq!(data, data_check);
@@ -414,7 +434,9 @@ fn crypto_fs_move_dir<P: AsRef<Path>>(dir1: P, child_dir: P, file: P, dst_dir: P
     crypto_fs
         .move_dir(root.join(dir_to_move).as_path(), dest_dir)
         .unwrap();
-    let mut check_file = crypto_fs.open_file(moved_file_path).unwrap();
+    let mut check_file = crypto_fs
+        .open_file(moved_file_path, OpenOptions::new())
+        .unwrap();
     let mut data_check: Vec<u8> = vec![];
     check_file.read_to_end(&mut data_check).unwrap();
     assert_eq!(data, data_check);

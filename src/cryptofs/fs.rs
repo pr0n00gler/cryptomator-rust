@@ -6,7 +6,7 @@ use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist
 use crate::cryptofs::filesystem::Metadata;
 use crate::cryptofs::{
     component_to_string, last_path_component, parent_path, DirEntry, File, FileSystem,
-    FileSystemError, Stats,
+    FileSystemError, OpenOptions, Stats,
 };
 use lru_cache::LruCache;
 use std::cmp::Ordering;
@@ -131,9 +131,10 @@ impl<'a, FS: 'static + FileSystem> CryptoFs<FS> {
                         dir_uuid = guard.get_mut(&full_path).unwrap().clone();
                     } else {
                         if self.file_system_provider.exists(&full_path) {
-                            let mut reader = self
-                                .file_system_provider
-                                .open_file(Path::new(full_path.as_path()).join(DIR_FILENAME))?;
+                            let mut reader = self.file_system_provider.open_file(
+                                Path::new(full_path.as_path()).join(DIR_FILENAME),
+                                OpenOptions::new(),
+                            )?;
                             reader.read_to_end(&mut dir_uuid)?;
                         }
                         if dir_uuid.is_empty() {
@@ -231,7 +232,7 @@ impl<'a, FS: 'static + FileSystem> CryptoFs<FS> {
             let mut read_name: Vec<u8> = vec![];
             let mut fname_file = self
                 .file_system_provider
-                .open_file(de.path.join(FULL_NAME_FILENAME))?;
+                .open_file(de.path.join(FULL_NAME_FILENAME), OpenOptions::new())?;
             fname_file.read_to_end(&mut read_name)?;
             ciphertext_filename = String::from_utf8(read_name)?;
             ciphertext_filename =
@@ -245,7 +246,7 @@ impl<'a, FS: 'static + FileSystem> CryptoFs<FS> {
 
             let contents_file = self
                 .file_system_provider
-                .open_file(de.path.join(CONTENTS_FILENAME));
+                .open_file(de.path.join(CONTENTS_FILENAME), OpenOptions::new());
             if let Ok(c) = contents_file {
                 metadata = c.metadata()?;
             }
@@ -396,12 +397,17 @@ impl<'a, FS: 'static + FileSystem> CryptoFs<FS> {
         self.create_dir(path)
     }
 
-    pub fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<CryptoFsFile, FileSystemError> {
+    pub fn open_file<P: AsRef<Path>>(
+        &self,
+        path: P,
+        options: OpenOptions,
+    ) -> Result<CryptoFsFile, FileSystemError> {
         let mut real_path = self.filepath_to_real_path(path)?;
         if real_path.is_shorten {
             real_path.full_path = real_path.full_path.join(CONTENTS_FILENAME);
         }
-        let crypto_file = CryptoFsFile::open(real_path, self.cryptor, &self.file_system_provider)?;
+        let crypto_file =
+            CryptoFsFile::open(real_path, self.cryptor, &self.file_system_provider, options)?;
         Ok(crypto_file)
     }
 
@@ -575,8 +581,9 @@ impl<'gc> CryptoFsFile {
         real_path: P,
         cryptor: Cryptor,
         real_file_system_provider: &FS,
+        options: OpenOptions,
     ) -> Result<CryptoFsFile, FileSystemError> {
-        let mut reader = real_file_system_provider.open_file(real_path)?;
+        let mut reader = real_file_system_provider.open_file(real_path, options)?;
         let mut encrypted_header: [u8; FILE_HEADER_LENGTH] = [0; FILE_HEADER_LENGTH];
 
         reader.read_exact(&mut encrypted_header)?;

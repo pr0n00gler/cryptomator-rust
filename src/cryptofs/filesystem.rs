@@ -32,7 +32,11 @@ pub trait FileSystem: Sync + Send + Clone {
     fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn Error>>;
 
     /// Opens the file at this path for reading/writing
-    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, Box<dyn Error>>;
+    fn open_file<P: AsRef<Path>>(
+        &self,
+        path: P,
+        options: OpenOptions,
+    ) -> Result<Box<dyn File>, Box<dyn Error>>;
 
     /// Creates a file at the given path for reading/writing
     fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, Box<dyn Error>>;
@@ -60,6 +64,66 @@ pub trait FileSystem: Sync + Send + Clone {
 
     /// Returns the stats of the file system containing the provided path
     fn stats<P: AsRef<Path>>(&self, path: P) -> Result<Stats, Box<dyn Error>>;
+}
+
+/// Options and flags which can be used to configure how a file is opened.
+#[derive(Clone, Debug, Copy)]
+pub struct OpenOptions {
+    pub read: bool,
+    pub write: bool,
+    pub append: bool,
+    pub truncate: bool,
+    pub create: bool,
+    pub create_new: bool,
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        OpenOptions {
+            read: true,
+            write: false,
+            append: false,
+            truncate: false,
+            create: false,
+            create_new: false,
+        }
+    }
+}
+
+impl OpenOptions {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    pub fn read(&mut self, f: bool) -> &mut Self {
+        self.read = f;
+        self
+    }
+
+    pub fn write(&mut self, f: bool) -> &mut Self {
+        self.write = f;
+        self
+    }
+
+    pub fn append(&mut self, f: bool) -> &mut Self {
+        self.append = f;
+        self
+    }
+
+    pub fn truncate(&mut self, f: bool) -> &mut Self {
+        self.truncate = f;
+        self
+    }
+
+    pub fn create(&mut self, f: bool) -> &mut Self {
+        self.create = f;
+        self
+    }
+
+    pub fn create_new(&mut self, f: bool) -> &mut Self {
+        self.create_new = f;
+        self
+    }
 }
 
 /// File metadata. Not much more than type, length, and some timestamps

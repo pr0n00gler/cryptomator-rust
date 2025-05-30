@@ -1,3 +1,4 @@
+use std::string::FromUtf8Error;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -31,6 +32,9 @@ pub enum MasterKeyError {
 
     #[error("JWT error")]
     JWTError(jwt::Error),
+
+    #[error("String decoding error")]
+    FromUTF8Error(FromUtf8Error),
 }
 
 impl From<std::io::Error> for MasterKeyError {
@@ -84,6 +88,12 @@ impl From<openssl::aes::KeyError> for MasterKeyError {
 impl From<jwt::Error> for MasterKeyError {
     fn from(err: jwt::Error) -> MasterKeyError {
         MasterKeyError::JWTError(err)
+    }
+}
+
+impl From<FromUtf8Error> for MasterKeyError {
+    fn from(err: FromUtf8Error) -> Self {
+        MasterKeyError::FromUTF8Error(err)
     }
 }
 

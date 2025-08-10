@@ -80,16 +80,6 @@ struct Unlock {
     /// NFS-server listen address
     #[clap(short, long, default_value = "127.0.0.1:11111")]
     nfs_listen_address: String,
-
-    /// Mountpoint for mounting FUSE filesystem (and Dokan in the future)
-    #[cfg(all(unix, feature = "frontend_fuse"))]
-    #[clap(short, long)]
-    mountpoint: Option<String>,
-
-    /// Options for the FUSE module
-    #[cfg(all(unix, feature = "frontend_fuse"))]
-    #[clap(short, long, default_value = "-o ro -o fsname=hello")]
-    fuse_options: String,
 }
 
 #[tokio::main]
@@ -249,12 +239,6 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
     )
     .expect("Failed to unblock storage");
     info!("Storage unlocked!");
-
-    #[cfg(all(unix, feature = "frontend_fuse"))]
-    if let Some(mountpoint) = u.mountpoint {
-        mount_fuse(mountpoint, u.fuse_options, crypto_fs);
-        return;
-    }
 
     if let Some(webdav_listen_address) = u.webdav_listen_address {
         info!("Starting WebDav server...");

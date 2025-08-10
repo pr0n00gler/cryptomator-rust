@@ -21,15 +21,14 @@ evaluation purposes.
 
 ## Work in progress
 
-* FUSE/Dokan support to mount vaults as a virtual filesystem
-* Dropbox, Google Drive, OneDrive and other cloud storages to work with without synchronize with a local directory
+* Dropbox, Google Drive, OneDrive and other cloud storages to work with without synchronizing with a local directory
 * GUI
 * Log coverage
 
 ## Building
 
 ```shell
-make build-release
+make build
 ```
 
 This will build the whole project and put the release version of a binarry file to `target/release/` folder.

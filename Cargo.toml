@@ -7,7 +7,6 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-frontend_fuse = ["fuser", "libc"]
 
 [dependencies]
 serde_json = "1.0"
@@ -41,10 +40,6 @@ fs2 = "0.4.3"
 jwt = "0.16.0"
 async-trait = "0.1"
 nfsserve = "0.10"
-
-[target.'cfg(unix)'.dependencies]
-fuser = { version = "0.11.0", optional = true }
-libc = { version = "0.2.51", optional = true }
 
 [profile.release]
 rpath = false

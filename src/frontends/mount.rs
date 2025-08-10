@@ -6,12 +6,6 @@ use tracing::info;
 use webdav_handler::fakels::FakeLs;
 use webdav_handler::DavHandler;
 
-#[cfg(all(unix, feature = "frontend_fuse"))]
-use std::ffi::OsStr;
-
-#[cfg(all(unix, feature = "frontend_fuse"))]
-use crate::frontends::fuse::Fuse;
-
 use crate::frontends::nfs::NfsServer;
 
 pub async fn mount_webdav<FS: 'static + FileSystem>(
@@ -44,22 +38,6 @@ pub async fn mount_webdav<FS: 'static + FileSystem>(
         .serve(make_service)
         .await
         .map_err(|e| eprintln!("server error: {}", e));
-}
-
-#[cfg(all(unix, feature = "frontend_fuse"))]
-pub fn mount_fuse<FS: 'static + FileSystem>(
-    mountpoint: String,
-    options: String,
-    crypto_fs: CryptoFs<FS>,
-) {
-    let fuse_fs = Fuse::new(crypto_fs);
-    let options = options
-        .split_whitespace()
-        .map(|o| o.as_ref())
-        .collect::<Vec<&OsStr>>();
-
-    #[allow(deprecated)]
-    fuser::mount(fuse_fs, &mountpoint, &options).unwrap();
 }
 
 pub async fn mount_nfs<FS: 'static + FileSystem>(listen_address: String, crypto_fs: CryptoFs<FS>) {

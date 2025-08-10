@@ -3,13 +3,9 @@ use std::error::Error;
 use std::path::PathBuf;
 use thiserror::Error;
 
-#[cfg(all(unix, feature = "frontend_fuse"))]
-use libc::{c_int, EIO, ENOENT};
 use lru_cache::LruCache;
 
 use crate::cryptofs::DirEntry;
-#[cfg(all(unix, feature = "frontend_fuse"))]
-use tracing::debug;
 
 #[derive(Debug, Error)]
 pub enum FileSystemError {
@@ -91,36 +87,5 @@ impl From<std::sync::PoisonError<std::sync::MutexGuard<'_, LruCache<PathBuf, Dir
 impl From<Box<dyn Error>> for FileSystemError {
     fn from(err: Box<dyn Error>) -> Self {
         FileSystemError::UnknownError(err.to_string())
-    }
-}
-
-#[cfg(all(unix, feature = "frontend_fuse"))]
-pub fn unix_error_code_from_filesystem_error(fs: FileSystemError) -> c_int {
-    debug!("Error occurred: {:?}", fs);
-    match fs {
-        FileSystemError::IoError(io) => {
-            if let Some(e) = io.raw_os_error() {
-                e
-            } else {
-                EIO
-            }
-        }
-        FileSystemError::CryptoError(CryptoError::IoError(io)) => {
-            if let Some(e) = io.raw_os_error() {
-                e
-            } else {
-                EIO
-            }
-        }
-        FileSystemError::MasterKeyError(MasterKeyError::IoError(io)) => {
-            if let Some(e) = io.raw_os_error() {
-                e
-            } else {
-                EIO
-            }
-        }
-        FileSystemError::InvalidPathError(_) => ENOENT,
-        FileSystemError::PathDoesNotExist(_) => ENOENT,
-        _ => EIO,
     }
 }

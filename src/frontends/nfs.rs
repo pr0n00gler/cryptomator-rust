@@ -1,0 +1,495 @@
+use crate::cryptofs::{CryptoFs, FileSystem, Metadata, OpenOptions};
+use async_trait::async_trait;
+use nfsserve::nfs::{fattr3, fileid3, ftype3, nfsstat3, nfsstring, nfstime3, sattr3, specdata3};
+use nfsserve::vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
+use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::UNIX_EPOCH;
+use tracing::{debug, error};
+
+pub struct NfsServer<FS: FileSystem> {
+    crypto_fs: CryptoFs<FS>,
+    handle_map: Arc<Mutex<HashMap<u64, PathBuf>>>,
+    next_handle: Arc<Mutex<u64>>,
+}
+
+impl<FS: FileSystem> NfsServer<FS> {
+    pub fn new(crypto_fs: CryptoFs<FS>) -> Self {
+        let mut handle_map = HashMap::new();
+        handle_map.insert(1, PathBuf::from("/"));
+
+        NfsServer {
+            crypto_fs,
+            handle_map: Arc::new(Mutex::new(handle_map)),
+            next_handle: Arc::new(Mutex::new(2)),
+        }
+    }
+
+    fn get_or_create_handle(&self, path: PathBuf) -> u64 {
+        let mut handle_map = self.handle_map.lock().unwrap();
+
+        // Check if path already has a handle
+        for (handle, p) in handle_map.iter() {
+            if p == &path {
+                return *handle;
+            }
+        }
+
+        // Create new handle
+        let mut next_handle = self.next_handle.lock().unwrap();
+        let handle = *next_handle;
+        *next_handle += 1;
+        handle_map.insert(handle, path);
+        handle
+    }
+
+    fn get_path_from_handle(&self, handle: &u64) -> Option<PathBuf> {
+        let handle_map = self.handle_map.lock().unwrap();
+        handle_map.get(handle).cloned()
+    }
+
+    fn metadata_to_fattr3(&self, metadata: Metadata, handle: u64) -> fattr3 {
+        let size = metadata.len;
+        let used = size;
+
+        let mode = if metadata.is_dir {
+            0o755 | 0o40000 // Directory
+        } else {
+            0o644 | 0o100000 // Regular file
+        };
+
+        let mtime = metadata
+            .modified
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let atime = metadata
+            .accessed
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let ctime = metadata
+            .created
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+
+        let (uid, gid) = {
+            #[cfg(unix)]
+            {
+                (metadata.uid, metadata.gid)
+            }
+            #[cfg(not(unix))]
+            {
+                (0, 0)
+            }
+        };
+
+        fattr3 {
+            ftype: if metadata.is_dir {
+                ftype3::NF3DIR
+            } else {
+                ftype3::NF3REG
+            },
+            mode,
+            nlink: 1,
+            uid,
+            gid,
+            size,
+            used,
+            rdev: specdata3 {
+                specdata1: 0,
+                specdata2: 0,
+            },
+            fsid: 1,
+            fileid: handle as fileid3,
+            atime: nfstime3 {
+                seconds: atime.as_secs() as u32,
+                nseconds: atime.subsec_nanos(),
+            },
+            mtime: nfstime3 {
+                seconds: mtime.as_secs() as u32,
+                nseconds: mtime.subsec_nanos(),
+            },
+            ctime: nfstime3 {
+                seconds: ctime.as_secs() as u32,
+                nseconds: ctime.subsec_nanos(),
+            },
+        }
+    }
+
+    fn apply_sattr3(&self, _metadata: &mut Metadata, _sattr: &sattr3) {
+        // For now, we ignore attribute changes
+        // In a full implementation, we would apply mode, uid, gid, size, and time changes
+    }
+}
+
+#[async_trait]
+impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
+    fn capabilities(&self) -> VFSCapabilities {
+        VFSCapabilities::ReadWrite
+    }
+
+    fn root_dir(&self) -> u64 {
+        1 // Root directory always has handle 1
+    }
+
+    async fn getattr(&self, handle: u64) -> Result<fattr3, nfsstat3> {
+        debug!("NFS GETATTR: handle={}", handle);
+
+        let path = self
+            .get_path_from_handle(&handle)
+            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+
+        match self.crypto_fs.metadata(&path) {
+            Ok(metadata) => Ok(self.metadata_to_fattr3(metadata, handle)),
+            Err(_) => Err(nfsstat3::NFS3ERR_IO),
+        }
+    }
+
+    async fn setattr(&self, handle: u64, sattr: sattr3) -> Result<fattr3, nfsstat3> {
+        debug!("NFS SETATTR: handle={}, sattr={:?}", handle, sattr);
+
+        let path = self
+            .get_path_from_handle(&handle)
+            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+
+        match self.crypto_fs.metadata(&path) {
+            Ok(mut metadata) => {
+                self.apply_sattr3(&mut metadata, &sattr);
+                Ok(self.metadata_to_fattr3(metadata, handle))
+            }
+            Err(_) => Err(nfsstat3::NFS3ERR_IO),
+        }
+    }
+
+    async fn lookup(&self, dir_handle: u64, name: &nfsstring) -> Result<u64, nfsstat3> {
+        let name_str = String::from_utf8_lossy(name);
+        debug!("NFS LOOKUP: dir_handle={}, name={}", dir_handle, name_str);
+
+        let dir_path = self
+            .get_path_from_handle(&dir_handle)
+            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+
+        let file_path = dir_path.join(name_str.as_ref());
+
+        if self.crypto_fs.exists(&file_path) {
+            Ok(self.get_or_create_handle(file_path))
+        } else {
+            Err(nfsstat3::NFS3ERR_NOENT)
+        }
+    }
+
+    async fn read(
+        &self,
+        handle: u64,
+        offset: u64,
+        count: u32,
+    ) -> Result<(Vec<u8>, bool), nfsstat3> {
+        debug!(
+            "NFS READ: handle={}, offset={}, count={}",
+            handle, offset, count
+        );
+
+        let path = self
+            .get_path_from_handle(&handle)
+            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+
+        let metadata = self
+            .crypto_fs
+            .metadata(&path)
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+        if metadata.is_dir {
+            return Err(nfsstat3::NFS3ERR_ISDIR);
+        }
+
+        let mut file = self
+            .crypto_fs
+            .open_file(&path, *OpenOptions::new().read(true))
+            .map_err(|e| {
+                error!("Failed to open file for read: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })?;
+
+        file.seek(SeekFrom::Start(offset)).map_err(|e| {
+            error!("Failed to seek: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?;
+
+        let mut buffer = vec![0u8; count as usize];
+        let bytes_read = file.read(&mut buffer).map_err(|e| {
+            error!("Failed to read: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?;
+
+        buffer.truncate(bytes_read);
+        let eof = (offset + bytes_read as u64) >= metadata.len;
+
+        Ok((buffer, eof))
+    }
+
+    async fn write(&self, handle: u64, offset: u64, data: &[u8]) -> Result<fattr3, nfsstat3> {
+        debug!(
+            "NFS WRITE: handle={}, offset={}, len={}",
+            handle,
+            offset,
+            data.len()
+        );
+
+        let path = self
+            .get_path_from_handle(&handle)
+            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+
+        let mut file = self
+            .crypto_fs
+            .open_file(&path, *OpenOptions::new().write(true).read(true))
+            .map_err(|e| {
+                error!("Failed to open file for write: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })?;
+
+        file.seek(SeekFrom::Start(offset)).map_err(|e| {
+            error!("Failed to seek: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?;
+
+        file.write_all(data).map_err(|e| {
+            error!("Failed to write: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?;
+
+        file.flush().map_err(|e| {
+            error!("Failed to flush: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?;
+
+        let metadata = self
+            .crypto_fs
+            .metadata(&path)
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        Ok(self.metadata_to_fattr3(metadata, handle))
+    }
+
+    async fn create(
+        &self,
+        dir_handle: u64,
+        name: &nfsstring,
+        _sattr: sattr3,
+    ) -> Result<(u64, fattr3), nfsstat3> {
+        let name_str = String::from_utf8_lossy(name);
+        debug!("NFS CREATE: dir_handle={}, name={}", dir_handle, name_str);
+
+        let dir_path = self
+            .get_path_from_handle(&dir_handle)
+            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+
+        let file_path = dir_path.join(name_str.as_ref());
+
+        self.crypto_fs.create_file(&file_path).map_err(|e| {
+            error!("Failed to create file: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?;
+
+        let handle = self.get_or_create_handle(file_path.clone());
+        let metadata = self
+            .crypto_fs
+            .metadata(&file_path)
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+        Ok((handle, self.metadata_to_fattr3(metadata, handle)))
+    }
+
+    async fn create_exclusive(&self, dir_handle: u64, name: &nfsstring) -> Result<u64, nfsstat3> {
+        let name_str = String::from_utf8_lossy(name);
+        debug!(
+            "NFS CREATE_EXCLUSIVE: dir_handle={}, name={}",
+            dir_handle, name_str
+        );
+
+        let dir_path = self
+            .get_path_from_handle(&dir_handle)
+            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+
+        let file_path = dir_path.join(name_str.as_ref());
+
+        if self.crypto_fs.exists(&file_path) {
+            return Err(nfsstat3::NFS3ERR_EXIST);
+        }
+
+        self.crypto_fs.create_file(&file_path).map_err(|e| {
+            error!("Failed to create file exclusively: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?;
+
+        Ok(self.get_or_create_handle(file_path))
+    }
+
+    async fn mkdir(&self, dir_handle: u64, name: &nfsstring) -> Result<(u64, fattr3), nfsstat3> {
+        let name_str = String::from_utf8_lossy(name);
+        debug!("NFS MKDIR: dir_handle={}, name={}", dir_handle, name_str);
+
+        let dir_path = self
+            .get_path_from_handle(&dir_handle)
+            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+
+        let new_dir_path = dir_path.join(name_str.as_ref());
+
+        self.crypto_fs.create_dir(&new_dir_path).map_err(|e| {
+            error!("Failed to create directory: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?;
+
+        let handle = self.get_or_create_handle(new_dir_path.clone());
+        let metadata = self
+            .crypto_fs
+            .metadata(&new_dir_path)
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+        Ok((handle, self.metadata_to_fattr3(metadata, handle)))
+    }
+
+    async fn symlink(
+        &self,
+        _dir_handle: u64,
+        _name: &nfsstring,
+        _link_data: &nfsstring,
+        _sattr: &sattr3,
+    ) -> Result<(u64, fattr3), nfsstat3> {
+        // We don't support symlinks
+        Err(nfsstat3::NFS3ERR_NOTSUPP)
+    }
+
+    async fn remove(&self, dir_handle: u64, name: &nfsstring) -> Result<(), nfsstat3> {
+        let name_str = String::from_utf8_lossy(name);
+        debug!("NFS REMOVE: dir_handle={}, name={}", dir_handle, name_str);
+
+        let dir_path = self
+            .get_path_from_handle(&dir_handle)
+            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+
+        let file_path = dir_path.join(name_str.as_ref());
+
+        self.crypto_fs.remove_file(&file_path).map_err(|e| {
+            error!("Failed to remove file: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?;
+
+        Ok(())
+    }
+
+    async fn rename(
+        &self,
+        from_dir: u64,
+        from_name: &nfsstring,
+        to_dir: u64,
+        to_name: &nfsstring,
+    ) -> Result<(), nfsstat3> {
+        let from_name_str = String::from_utf8_lossy(from_name);
+        let to_name_str = String::from_utf8_lossy(to_name);
+        debug!(
+            "NFS RENAME: from_dir={}, from_name={}, to_dir={}, to_name={}",
+            from_dir, from_name_str, to_dir, to_name_str
+        );
+
+        let from_dir_path = self
+            .get_path_from_handle(&from_dir)
+            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let to_dir_path = self
+            .get_path_from_handle(&to_dir)
+            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+
+        let from_path = from_dir_path.join(from_name_str.as_ref());
+        let to_path = to_dir_path.join(to_name_str.as_ref());
+
+        let metadata = self
+            .crypto_fs
+            .metadata(&from_path)
+            .map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
+
+        if metadata.is_dir {
+            self.crypto_fs.move_dir(&from_path, &to_path)
+        } else {
+            self.crypto_fs.move_file(&from_path, &to_path)
+        }
+        .map_err(|e| {
+            error!("Failed to rename: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?;
+
+        Ok(())
+    }
+
+    async fn readdir(
+        &self,
+        handle: u64,
+        cookie: u64,
+        max_entries: usize,
+    ) -> Result<ReadDirResult, nfsstat3> {
+        debug!(
+            "NFS READDIR: handle={}, cookie={}, max_entries={}",
+            handle, cookie, max_entries
+        );
+
+        let path = self
+            .get_path_from_handle(&handle)
+            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+
+        let entries = self.crypto_fs.read_dir(&path).map_err(|e| {
+            error!("Failed to read directory: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?;
+
+        let mut dirlist = Vec::new();
+        let mut entry_count = 0;
+        let mut current_cookie = 0u64;
+
+        for entry in entries {
+            current_cookie += 1;
+
+            if current_cookie <= cookie {
+                continue;
+            }
+
+            if entry_count >= max_entries {
+                break;
+            }
+
+            let name = entry.filename_string().unwrap_or_default();
+            let entry_path = path.join(&name);
+            let fileid = self.get_or_create_handle(entry_path) as fileid3;
+
+            dirlist.push((fileid, name.into_bytes(), current_cookie));
+            entry_count += 1;
+        }
+
+        let dirlist = dirlist
+            .into_iter()
+            .map(|(fileid, name, _cookie)| {
+                // Get metadata for each entry to populate attr field
+                let entry_path = path.join(String::from_utf8_lossy(&name).as_ref());
+                let attr = if let Ok(metadata) = self.crypto_fs.metadata(&entry_path) {
+                    self.metadata_to_fattr3(metadata, fileid)
+                } else {
+                    // Default attributes if metadata fails
+                    fattr3::default()
+                };
+
+                DirEntry {
+                    fileid,
+                    name: nfsstring::from(name),
+                    attr,
+                }
+            })
+            .collect();
+
+        Ok(ReadDirResult {
+            entries: dirlist,
+            end: entry_count < max_entries,
+        })
+    }
+
+    async fn readlink(&self, _handle: u64) -> Result<nfsstring, nfsstat3> {
+        // We don't support symlinks
+        Err(nfsstat3::NFS3ERR_NOTSUPP)
+    }
+}

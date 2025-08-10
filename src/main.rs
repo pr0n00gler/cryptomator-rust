@@ -10,6 +10,7 @@ use tracing::info;
 
 use clap::{ArgEnum, Parser};
 
+use cryptomator::frontends::mount::mount_nfs;
 use cryptomator::frontends::mount::*;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -73,8 +74,12 @@ struct Create {
 #[derive(Parser)]
 struct Unlock {
     /// Webdav-server listen address
-    #[clap(short, long, default_value = "127.0.0.1:4918")]
-    webdav_listen_address: String,
+    #[clap(short, long)]
+    webdav_listen_address: Option<String>,
+
+    /// NFS-server listen address
+    #[clap(short, long, default_value = "127.0.0.1:11111")]
+    nfs_listen_address: String,
 
     /// Mountpoint for mounting FUSE filesystem (and Dokan in the future)
     #[cfg(all(unix, feature = "frontend_fuse"))]
@@ -251,6 +256,12 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
         return;
     }
 
-    info!("Starting WebDav server...");
-    mount_webdav(u.webdav_listen_address, crypto_fs).await
+    if let Some(webdav_listen_address) = u.webdav_listen_address {
+        info!("Starting WebDav server...");
+        mount_webdav(webdav_listen_address, crypto_fs).await;
+        return;
+    }
+
+    info!("Starting NFS server...");
+    mount_nfs(u.nfs_listen_address, crypto_fs).await;
 }

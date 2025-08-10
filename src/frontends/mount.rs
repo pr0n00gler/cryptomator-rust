@@ -12,6 +12,8 @@ use std::ffi::OsStr;
 #[cfg(all(unix, feature = "frontend_fuse"))]
 use crate::frontends::fuse::Fuse;
 
+use crate::frontends::nfs::NfsServer;
+
 pub async fn mount_webdav<FS: 'static + FileSystem>(
     listen_address: String,
     crypto_fs: CryptoFs<FS>,
@@ -58,4 +60,20 @@ pub fn mount_fuse<FS: 'static + FileSystem>(
 
     #[allow(deprecated)]
     fuser::mount(fuse_fs, &mountpoint, &options).unwrap();
+}
+
+pub async fn mount_nfs<FS: 'static + FileSystem>(listen_address: String, crypto_fs: CryptoFs<FS>) {
+    let nfs_server = NfsServer::new(crypto_fs);
+
+    info!("Starting NFS server on {}", listen_address);
+
+    let listener = nfsserve::tcp::NFSTcpListener::bind(&listen_address, nfs_server)
+        .await
+        .expect("Failed to bind NFS server");
+
+    use nfsserve::tcp::NFSTcp;
+    listener
+        .handle_forever()
+        .await
+        .expect("Failed to start NFS server");
 }

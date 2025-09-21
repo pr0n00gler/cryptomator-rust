@@ -8,11 +8,14 @@ use rand::Rng;
 
 use byteorder::{BigEndian, WriteBytesExt};
 
-use aes_siv::aead::generic_array::GenericArray;
+use aes::Aes256;
 use aes_siv::siv::Aes256Siv;
+use aes_siv::{aead::generic_array::GenericArray, KeyInit};
+use base32::Alphabet;
+use base64::{engine::general_purpose::URL_SAFE, Engine as _};
+use ctr::cipher::{KeyIvInit, StreamCipher};
 
-use aes_ctr::cipher::stream::{NewStreamCipher, SyncStreamCipher};
-use aes_ctr::Aes256Ctr;
+type Aes256Ctr = ctr::Ctr128BE<Aes256>;
 
 use crate::crypto::common::clone_into_array;
 
@@ -79,7 +82,7 @@ pub fn calculate_cleartext_size(ciphertext_size: u64) -> u64 {
 pub fn shorten_name<P: AsRef<str>>(name: P) -> String {
     let mut hasher = Sha1::new();
     hasher.update(name.as_ref().as_bytes());
-    base64::encode_config(hasher.finalize().as_slice(), base64::URL_SAFE)
+    URL_SAFE.encode(hasher.finalize())
 }
 
 /// Contains reserved bytes and content key
@@ -117,16 +120,14 @@ impl Cryptor {
         long_key.extend(&self.vault.master_key.primary_master_key);
         let aes_siv_key = GenericArray::clone_from_slice(long_key.as_slice());
 
-        let mut cipher = Aes256Siv::new(aes_siv_key);
+        let mut cipher = Aes256Siv::new(&aes_siv_key);
         let encrypted_dir_id = cipher.encrypt(iter::empty::<&[u8]>(), dir_id)?;
 
         let mut sha1_hasher = Sha1::new();
         sha1_hasher.update(encrypted_dir_id.as_slice());
         let sha1_hash = sha1_hasher.finalize();
-        let dir_id_hash_base32_encoded = base32::encode(
-            base32::Alphabet::RFC4648 { padding: false },
-            sha1_hash.as_slice(),
-        );
+        let dir_id_hash_base32_encoded =
+            base32::encode(Alphabet::Rfc4648 { padding: false }, sha1_hash.as_slice());
         Ok(dir_id_hash_base32_encoded)
     }
 
@@ -142,11 +143,11 @@ impl Cryptor {
         long_key.extend(&self.vault.master_key.primary_master_key);
         let aes_siv_key = GenericArray::clone_from_slice(long_key.as_slice());
 
-        let mut cipher = Aes256Siv::new(aes_siv_key);
+        let mut cipher = Aes256Siv::new(&aes_siv_key);
         let encrypted_filename =
             cipher.encrypt([parent_dir_id], cleartext_name.as_ref().as_bytes())?;
 
-        let encoded_ciphertext = base64::encode_config(encrypted_filename, base64::URL_SAFE);
+        let encoded_ciphertext = URL_SAFE.encode(encrypted_filename);
         Ok(encoded_ciphertext)
     }
 
@@ -157,8 +158,7 @@ impl Cryptor {
         encrypted_filename: S,
         parent_dir_id: &[u8],
     ) -> Result<String, CryptoError> {
-        let encrypted_filename_bytes =
-            base64::decode_config(encrypted_filename.as_ref(), base64::URL_SAFE)?;
+        let encrypted_filename_bytes = URL_SAFE.decode(encrypted_filename.as_ref())?;
 
         let mut long_key: Vec<u8> = Vec::with_capacity(AES_SIV_KEY_LENGTH);
         long_key.extend(&self.vault.master_key.hmac_master_key);
@@ -166,7 +166,7 @@ impl Cryptor {
 
         let aes_siv_key = GenericArray::clone_from_slice(long_key.as_slice());
 
-        let mut cipher = Aes256Siv::new(aes_siv_key);
+        let mut cipher = Aes256Siv::new(&aes_siv_key);
 
         let decrypted_filename =
             cipher.decrypt([parent_dir_id], encrypted_filename_bytes.as_slice())?;
@@ -207,7 +207,8 @@ impl Cryptor {
         let mut mac_payload: Vec<u8> = Vec::with_capacity(FILE_HEADER_MAC_LENGTH);
         mac_payload.extend_from_slice(&file_header.nonce);
         mac_payload.extend(&payload);
-        let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&self.vault.master_key.hmac_master_key)?;
+        let mut mac: Hmac<Sha256> =
+            <Hmac<Sha256> as Mac>::new_from_slice(&self.vault.master_key.hmac_master_key)?;
         mac.update(mac_payload.as_slice());
         let mac_bytes = mac.finalize().into_bytes();
 
@@ -230,7 +231,8 @@ impl Cryptor {
         }
 
         //verify header payload
-        let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&self.vault.master_key.hmac_master_key)?;
+        let mut mac: Hmac<Sha256> =
+            <Hmac<Sha256> as Mac>::new_from_slice(&self.vault.master_key.hmac_master_key)?;
         let mut payload_to_verify = Vec::with_capacity(FILE_HEADER_LENGTH); // nonce + ciphertext
         payload_to_verify.extend(&encrypted_header[..FILE_HEADER_NONCE_LENGTH]); // nonce
         payload_to_verify.extend(
@@ -369,7 +371,8 @@ impl Cryptor {
         mac_payload.write_u64::<BigEndian>(chunk_number)?;
         mac_payload.extend_from_slice(&encrypted_chunk);
 
-        let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&self.vault.master_key.hmac_master_key)?;
+        let mut mac: Hmac<Sha256> =
+            <Hmac<Sha256> as Mac>::new_from_slice(&self.vault.master_key.hmac_master_key)?;
         mac.update(mac_payload.as_slice());
         let mac_bytes = mac.finalize().into_bytes();
 
@@ -401,7 +404,8 @@ impl Cryptor {
         chunk_number_big_endian.write_u64::<BigEndian>(chunk_number)?;
 
         // check MAC
-        let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&self.vault.master_key.hmac_master_key)?;
+        let mut mac: Hmac<Sha256> =
+            <Hmac<Sha256> as Mac>::new_from_slice(&self.vault.master_key.hmac_master_key)?;
         let mut payload_to_verify = Vec::with_capacity(
             header_nonce.len()
                 + chunk_number_big_endian.len()

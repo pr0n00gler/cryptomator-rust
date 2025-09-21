@@ -569,7 +569,7 @@ pub struct CryptoFsFile {
     metadata: Metadata,
 
     /// Stores the most frequently used chunks of the file to decrease read operations
-    chunk_cache: LruCache<u64, Vec<u8>>,
+    chunk_cache: LruCache<u64, Arc<[u8]>>,
 }
 
 impl CryptoFsFile {
@@ -651,12 +651,11 @@ impl CryptoFsFile {
     }
 
     /// Reads and returns cleartext chunk of the data.
-    fn read_chunk(&mut self, chunk_index: u64) -> Result<Vec<u8>, FileSystemError> {
-        if self.metadata.modified >= self.rfs_file.metadata()?.modified
-            && self.chunk_cache.contains_key(&chunk_index)
-        {
-            let chunk = self.chunk_cache.get_mut(&chunk_index).unwrap();
-            return Ok(chunk.clone());
+    fn read_chunk(&mut self, chunk_index: u64) -> Result<Arc<[u8]>, FileSystemError> {
+        if self.metadata.modified >= self.rfs_file.metadata()?.modified {
+            if let Some(chunk) = self.chunk_cache.get_mut(&chunk_index) {
+                return Ok(Arc::clone(chunk));
+            }
         }
         self.rfs_file.seek(SeekFrom::Start(
             (chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
@@ -664,7 +663,7 @@ impl CryptoFsFile {
         let mut chunk = [0u8; FILE_CHUNK_LENGTH];
         let read_bytes = self.rfs_file.read(&mut chunk)?;
         if read_bytes == 0 {
-            return Ok(vec![0; 0]);
+            return Ok(Arc::<[u8]>::from(Vec::new()));
         }
         let decrypted_chunk = self.cryptor.decrypt_chunk(
             &self.header.nonce,
@@ -673,8 +672,10 @@ impl CryptoFsFile {
             &chunk[..read_bytes],
         )?;
 
+        let decrypted_chunk = Arc::<[u8]>::from(decrypted_chunk);
+
         self.chunk_cache
-            .insert(chunk_index, decrypted_chunk.clone());
+            .insert(chunk_index, Arc::clone(&decrypted_chunk));
 
         Ok(decrypted_chunk)
     }
@@ -712,19 +713,21 @@ impl Read for CryptoFsFile {
                 }
             };
 
-            if chunk.is_empty() {
+            let chunk_slice = chunk.as_ref();
+
+            if chunk_slice.is_empty() {
                 break;
             }
-            if offset >= chunk.len() {
+            if offset >= chunk_slice.len() {
                 break;
             }
 
-            let slice_len = match (buf.len() - n).cmp(&(chunk.len() - offset)) {
+            let slice_len = match (buf.len() - n).cmp(&(chunk_slice.len() - offset)) {
                 Ordering::Less => buf.len() - n,
-                Ordering::Greater => chunk.len() - offset,
+                Ordering::Greater => chunk_slice.len() - offset,
                 Ordering::Equal => buf.len() - n,
             };
-            buf[n..n + slice_len].copy_from_slice(&chunk[offset..offset + slice_len]);
+            buf[n..n + slice_len].copy_from_slice(&chunk_slice[offset..offset + slice_len]);
             n += slice_len;
 
             self.current_pos += slice_len as u64;
@@ -749,18 +752,15 @@ impl Write for CryptoFsFile {
 
         let mut n: usize = 0;
         while n < buf.len() {
-            let mut chunk: Vec<u8> = vec![];
+            let mut chunk: Vec<u8>;
             let slice_len: usize;
             if chunk_index > chunks_count || file_size == FILE_HEADER_LENGTH as u64 {
-                slice_len = if FILE_CHUNK_CONTENT_PAYLOAD_LENGTH <= buf.len() - n {
-                    FILE_CHUNK_CONTENT_PAYLOAD_LENGTH
-                } else {
-                    buf.len() - n
-                };
+                slice_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH.min(buf.len() - n);
+                chunk = Vec::with_capacity(FILE_CHUNK_CONTENT_PAYLOAD_LENGTH);
                 chunk.extend_from_slice(&buf[n..n + slice_len]);
                 n += slice_len;
             } else {
-                let mut buf_chunk = match self.read_chunk(chunk_index) {
+                let cached_chunk = match self.read_chunk(chunk_index) {
                     Ok(c) => c,
                     Err(e) => {
                         error!("Failed to read chunk: {:?}", e);
@@ -775,8 +775,9 @@ impl Write for CryptoFsFile {
                     buf.len() - n
                 };
 
+                let mut buf_chunk = Vec::from(cached_chunk.as_ref());
                 if buf_chunk.len() < offset + slice_len {
-                    buf_chunk.resize(slice_len + offset, 0u8);
+                    buf_chunk.resize(offset + slice_len, 0u8);
                 }
 
                 buf_chunk[offset..offset + slice_len].copy_from_slice(&buf[n..n + slice_len]);
@@ -804,7 +805,7 @@ impl Write for CryptoFsFile {
 
             self.current_pos += slice_len as u64;
 
-            self.chunk_cache.insert(chunk_index, chunk);
+            self.chunk_cache.insert(chunk_index, chunk.into());
 
             chunk_index += 1;
         }

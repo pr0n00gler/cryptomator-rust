@@ -55,7 +55,7 @@ pub struct CryptoFs<FS: FileSystem> {
     cryptor: Cryptor,
 
     /// path to an encrypted storage
-    root_folder: String,
+    root_folder: PathBuf,
 
     /// Instance of the FileSystem. Should provide access to a real files.
     file_system_provider: FS,
@@ -73,7 +73,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     ) -> Result<CryptoFs<FS>, FileSystemError> {
         let crypto_fs = CryptoFs {
             cryptor,
-            root_folder: String::from(folder),
+            root_folder: PathBuf::from(folder),
             file_system_provider: fs_provider,
             dir_uuids_cache: Arc::new(Mutex::new(LruCache::new(5000))),
             dir_entries_cache: Arc::new(Mutex::new(LruCache::new(5000))),
@@ -86,76 +86,73 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     /// Returns a real path to a dir by dir_id
     pub fn real_path_from_dir_id(&self, dir_id: &[u8]) -> Result<PathBuf, FileSystemError> {
         let dir_hash = self.cryptor.get_dir_id_hash(dir_id)?;
-        Ok(Path::new(self.root_folder.as_str())
-            .join(&dir_hash[..2])
-            .join(&dir_hash[2..]))
+        Ok(self.root_folder.join(&dir_hash[..2]).join(&dir_hash[2..]))
+    }
+
+    fn shorten_if_needed(&self, encrypted_name: String) -> (String, bool) {
+        if encrypted_name.len() > self.cryptor.vault.claims.shorteningThreshold as usize {
+            (shorten_name(&encrypted_name) + SHORTEN_FILENAME_EXT, true)
+        } else {
+            (encrypted_name, false)
+        }
     }
 
     /// Returns a dir_id for a path
     /// There will be an PathIsNotExist error, if path does not exists and CryptoError cause of crypto errors
     pub fn dir_id_from_path<P: AsRef<Path>>(&self, path: P) -> Result<Vec<u8>, FileSystemError> {
-        let mut dir_id: Vec<u8> = vec![];
-        let components = Path::new(path.as_ref()).components();
-        for c in components {
-            dir_id = match c {
-                std::path::Component::RootDir => vec![],
+        let mut dir_id: Vec<u8> = Vec::new();
+        for component in Path::new(path.as_ref()).components() {
+            match component {
+                std::path::Component::RootDir => dir_id.clear(),
                 std::path::Component::Normal(path_name) => {
-                    let mut dir_uuid = vec![];
-                    let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
-
-                    let cleartext_name = if let Some(name) = path_name.to_str() {
-                        name
-                    } else {
-                        return Err(FileSystemError::UnknownError(
-                            "failed to convert OsStr to str".to_string(),
-                        ));
-                    };
+                    let cleartext_name = path_name.to_str().ok_or_else(|| {
+                        FileSystemError::UnknownError("failed to convert OsStr to str".to_string())
+                    })?;
 
                     let encrypted_name = self
                         .cryptor
                         .encrypt_filename(cleartext_name, dir_id.as_slice())?;
-                    let mut full_encrypted_name = encrypted_name + ENCRYPTED_FILE_EXT;
+                    let (full_encrypted_name, _) =
+                        self.shorten_if_needed(encrypted_name + ENCRYPTED_FILE_EXT);
 
-                    if full_encrypted_name.len()
-                        > self.cryptor.vault.claims.shorteningThreshold as usize
+                    let mut full_path = self.real_path_from_dir_id(dir_id.as_slice())?;
+                    full_path.push(&full_encrypted_name);
+
+                    if let Some(cached_dir_id) = {
+                        let mut cache = self.dir_uuids_cache.lock()?;
+                        cache.get_mut(&full_path).map(|existing| existing.clone())
+                    } {
+                        dir_id = cached_dir_id;
+                        continue;
+                    }
+
+                    let mut dir_uuid = Vec::new();
+                    if self.file_system_provider.exists(&full_path) {
+                        let mut reader = self
+                            .file_system_provider
+                            .open_file(full_path.join(DIR_FILENAME), OpenOptions::new())?;
+                        reader.read_to_end(&mut dir_uuid)?;
+                    }
+
+                    if dir_uuid.is_empty() {
+                        let component_str = cleartext_name.to_string();
+                        error!("Path {:?} doesn't exist", component_str);
+                        return Err(PathDoesNotExist(component_str));
+                    }
+
                     {
-                        full_encrypted_name =
-                            shorten_name(&full_encrypted_name) + SHORTEN_FILENAME_EXT;
+                        let mut cache = self.dir_uuids_cache.lock()?;
+                        cache.insert(full_path, dir_uuid.clone());
                     }
 
-                    let full_path = PathBuf::new().join(real_path).join(full_encrypted_name);
-
-                    let mut guard = self.dir_uuids_cache.lock()?;
-
-                    if guard.contains_key(&full_path) {
-                        dir_uuid = guard.get_mut(&full_path).unwrap().clone();
-                    } else {
-                        if self.file_system_provider.exists(&full_path) {
-                            let mut reader = self.file_system_provider.open_file(
-                                Path::new(full_path.as_path()).join(DIR_FILENAME),
-                                OpenOptions::new(),
-                            )?;
-                            reader.read_to_end(&mut dir_uuid)?;
-                        }
-                        if dir_uuid.is_empty() {
-                            error!("Path {:?} doesn't exist", c);
-                            return Err(PathDoesNotExist(String::from(
-                                c.as_os_str().to_str().unwrap_or_default(),
-                            )));
-                        }
-
-                        guard.insert(full_path, dir_uuid.clone());
-                    }
-
-                    dir_uuid
+                    dir_id = dir_uuid;
                 }
-                _ => {
-                    error!("Invalid path {:?}", c);
-                    return Err(InvalidPathError(String::from(
-                        c.as_os_str().to_str().unwrap_or_default(),
-                    )));
+                other => {
+                    let component_str = other.as_os_str().to_str().unwrap_or_default().to_string();
+                    error!("Invalid path {:?}", component_str);
+                    return Err(InvalidPathError(component_str));
                 }
-            };
+            }
         }
         Ok(dir_id)
     }
@@ -170,7 +167,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         if path.as_ref().eq(Path::new("")) {
             let real_dir_path = self.real_path_from_dir_id(&[])?;
             return Ok(CryptoPath {
-                full_path: PathBuf::new().join(&real_dir_path),
+                full_path: real_dir_path,
                 is_shorten: false,
             });
         }
@@ -184,7 +181,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         // return only dir path cause the path is not a path to a file
         if filename == parent {
             return Ok(CryptoPath {
-                full_path: PathBuf::new().join(&real_dir_path),
+                full_path: real_dir_path,
                 is_shorten: false,
             });
         }
@@ -200,16 +197,13 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         let real_filename = self
             .cryptor
             .encrypt_filename(filename_str, dir_id.as_slice())?;
-        let mut full_name = real_filename + ENCRYPTED_FILE_EXT;
+        let (full_name, is_shorten) = self.shorten_if_needed(real_filename + ENCRYPTED_FILE_EXT);
 
-        let mut is_shorten = false;
-        if full_name.len() > self.cryptor.vault.claims.shorteningThreshold as usize {
-            full_name = shorten_name(full_name) + SHORTEN_FILENAME_EXT;
-            is_shorten = true;
-        }
+        let mut full_path = real_dir_path;
+        full_path.push(&full_name);
 
         Ok(CryptoPath {
-            full_path: PathBuf::new().join(&real_dir_path).join(full_name),
+            full_path,
             is_shorten,
         })
     }
@@ -341,27 +335,19 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
                         let encrypted_name = self
                             .cryptor
                             .encrypt_filename(path, parent_dir_id.as_slice())?;
-                        let mut encrypted_folder_name = encrypted_name.clone() + ENCRYPTED_FILE_EXT;
+                        let full_encrypted_name = encrypted_name.clone() + ENCRYPTED_FILE_EXT;
+                        let (storage_name, is_shorten) =
+                            self.shorten_if_needed(full_encrypted_name.clone());
 
-                        let mut is_shorten = false;
-                        if encrypted_folder_name.len()
-                            > self.cryptor.vault.claims.shorteningThreshold as usize
-                        {
-                            is_shorten = true;
-                            encrypted_folder_name =
-                                shorten_name(&encrypted_folder_name) + SHORTEN_FILENAME_EXT;
-                        }
-
-                        let parent_folder = self.real_path_from_dir_id(parent_dir_id.as_slice())?;
-                        let mut real_path = Path::new(&parent_folder).join(&encrypted_folder_name);
+                        let mut real_path = self.real_path_from_dir_id(parent_dir_id.as_slice())?;
+                        real_path.push(&storage_name);
                         self.file_system_provider.create_dir_all(&real_path)?;
 
                         if is_shorten {
                             let mut name_writer = self
                                 .file_system_provider
                                 .create_file(real_path.join(FULL_NAME_FILENAME))?;
-                            name_writer
-                                .write_all((encrypted_name + ENCRYPTED_FILE_EXT).as_bytes())?
+                            name_writer.write_all(full_encrypted_name.as_bytes())?
                         }
 
                         real_path = real_path.join(DIR_FILENAME);
@@ -374,7 +360,8 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
                             .cryptor
                             .get_dir_id_hash(dir_uuid.to_string().as_bytes())?;
 
-                        let real_folder_path = Path::new(self.root_folder.as_str())
+                        let real_folder_path = self
+                            .root_folder
                             .join(&dir_id_hash[..2])
                             .join(&dir_id_hash[2..]);
 

@@ -434,9 +434,8 @@ impl Cryptor {
 
         // Pre-allocate vector with exact size needed
         let mut decrypted_content = Vec::with_capacity(payload_length);
-        decrypted_content.extend_from_slice(
-            &encrypted_chunk[FILE_CHUNK_CONTENT_NONCE_LENGTH..begin_of_mac],
-        );
+        decrypted_content
+            .extend_from_slice(&encrypted_chunk[FILE_CHUNK_CONTENT_NONCE_LENGTH..begin_of_mac]);
         cipher.apply_keystream(&mut decrypted_content);
 
         Ok(decrypted_content)

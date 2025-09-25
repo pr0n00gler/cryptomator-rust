@@ -56,7 +56,12 @@ fn bench_encrypt_chunk(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), chunk, |b, chunk| {
             b.iter(|| {
                 let encrypted = cryptor
-                    .encrypt_chunk(&header_nonce, &file_key, BENCH_CHUNK_NUMBER, chunk.as_slice())
+                    .encrypt_chunk(
+                        &header_nonce,
+                        &file_key,
+                        BENCH_CHUNK_NUMBER,
+                        chunk.as_slice(),
+                    )
                     .expect("failed to encrypt chunk");
                 black_box(encrypted);
             });
@@ -76,7 +81,12 @@ fn bench_decrypt_chunk(c: &mut Criterion) {
         .map(|&size| {
             let plain = make_chunk_data(size);
             let encrypted = cryptor
-                .encrypt_chunk(&header_nonce, &file_key, BENCH_CHUNK_NUMBER, plain.as_slice())
+                .encrypt_chunk(
+                    &header_nonce,
+                    &file_key,
+                    BENCH_CHUNK_NUMBER,
+                    plain.as_slice(),
+                )
                 .expect("failed to encrypt chunk");
             (size, encrypted)
         })
@@ -88,7 +98,12 @@ fn bench_decrypt_chunk(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), chunk, |b, chunk| {
             b.iter(|| {
                 let decrypted = cryptor
-                    .decrypt_chunk(&header_nonce, &file_key, BENCH_CHUNK_NUMBER, chunk.as_slice())
+                    .decrypt_chunk(
+                        &header_nonce,
+                        &file_key,
+                        BENCH_CHUNK_NUMBER,
+                        chunk.as_slice(),
+                    )
                     .expect("failed to decrypt chunk");
                 black_box(decrypted);
             });
@@ -105,18 +120,21 @@ fn bench_encrypt_content(c: &mut Criterion) {
     for (size, data) in &inputs {
         let expected_plain = *size;
         group.throughput(Throughput::Bytes(expected_plain as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(expected_plain), data, |b, data| {
-            b.iter(|| {
-                let mut input = Cursor::new(data.as_slice());
-                let mut output = Vec::with_capacity(
-                    data.len() + FILE_HEADER_LENGTH + FILE_CHUNK_LENGTH,
-                );
-                cryptor
-                    .encrypt_content(&mut input, &mut output)
-                    .expect("failed to encrypt content");
-                black_box(output);
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(expected_plain),
+            data,
+            |b, data| {
+                b.iter(|| {
+                    let mut input = Cursor::new(data.as_slice());
+                    let mut output =
+                        Vec::with_capacity(data.len() + FILE_HEADER_LENGTH + FILE_CHUNK_LENGTH);
+                    cryptor
+                        .encrypt_content(&mut input, &mut output)
+                        .expect("failed to encrypt content");
+                    black_box(output);
+                });
+            },
+        );
     }
     group.finish();
 }
@@ -141,16 +159,20 @@ fn bench_decrypt_content(c: &mut Criterion) {
     for (size, encrypted) in &encrypted_inputs {
         let expected_plain = *size;
         group.throughput(Throughput::Bytes(expected_plain as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(expected_plain), encrypted, |b, encrypted| {
-            b.iter(|| {
-                let mut input = Cursor::new(encrypted.as_slice());
-                let mut output = Vec::with_capacity(expected_plain);
-                cryptor
-                    .decrypt_content(&mut input, &mut output)
-                    .expect("failed to decrypt content");
-                black_box(output);
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(expected_plain),
+            encrypted,
+            |b, encrypted| {
+                b.iter(|| {
+                    let mut input = Cursor::new(encrypted.as_slice());
+                    let mut output = Vec::with_capacity(expected_plain);
+                    cryptor
+                        .decrypt_content(&mut input, &mut output)
+                        .expect("failed to decrypt content");
+                    black_box(output);
+                });
+            },
+        );
     }
     group.finish();
 }

@@ -191,7 +191,8 @@ impl Cryptor {
         let mut encrypted_header = Vec::with_capacity(FILE_HEADER_LENGTH);
 
         let mut payload = [0u8; FILE_HEADER_PAYLOAD_LENGTH];
-        payload[..FILE_HEADER_PAYLOAD_RESERVED_LENGTH].copy_from_slice(&file_header.payload.reserved);
+        payload[..FILE_HEADER_PAYLOAD_RESERVED_LENGTH]
+            .copy_from_slice(&file_header.payload.reserved);
         payload[FILE_HEADER_PAYLOAD_RESERVED_LENGTH..]
             .copy_from_slice(&file_header.payload.content_key);
 
@@ -352,25 +353,25 @@ impl Cryptor {
         let mut encrypted_chunk = Vec::with_capacity(
             FILE_CHUNK_CONTENT_NONCE_LENGTH + chunk_data.len() + FILE_CHUNK_CONTENT_MAC_LENGTH,
         );
-        
+
         // Use unsafe for performance-critical code to avoid bounds checking
         unsafe {
             let ptr = encrypted_chunk.as_mut_ptr();
-            
+
             // Copy nonce
             std::ptr::copy_nonoverlapping(
                 chunk_nonce.as_ptr(),
                 ptr,
                 FILE_CHUNK_CONTENT_NONCE_LENGTH,
             );
-            
+
             // Copy chunk data
             std::ptr::copy_nonoverlapping(
                 chunk_data.as_ptr(),
                 ptr.add(FILE_CHUNK_CONTENT_NONCE_LENGTH),
                 chunk_data.len(),
             );
-            
+
             // Set the length of the vector
             encrypted_chunk.set_len(FILE_CHUNK_CONTENT_NONCE_LENGTH + chunk_data.len());
         }
@@ -430,13 +431,12 @@ impl Cryptor {
             GenericArray::from_slice(file_key),
             GenericArray::from_slice(&encrypted_chunk[..FILE_CHUNK_CONTENT_NONCE_LENGTH]),
         );
-        
+
         // Pre-allocate vector with exact size needed
         let mut decrypted_content = Vec::with_capacity(payload_length);
-        unsafe {
-            decrypted_content.set_len(payload_length);
-        }
-        decrypted_content.copy_from_slice(&encrypted_chunk[FILE_CHUNK_CONTENT_NONCE_LENGTH..begin_of_mac]);
+        decrypted_content.extend_from_slice(
+            &encrypted_chunk[FILE_CHUNK_CONTENT_NONCE_LENGTH..begin_of_mac],
+        );
         cipher.apply_keystream(&mut decrypted_content);
 
         Ok(decrypted_content)

@@ -1,41 +1,137 @@
+use std::hint::black_box;
+use std::io::Cursor;
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use cryptomator::crypto;
-use cryptomator::crypto::Vault;
-use cryptomator::cryptofs::{CryptoFs, OpenOptions};
-use cryptomator::providers::{LocalFs, MemoryFs};
-use std::io::{Read, Seek, SeekFrom, Write};
+use cryptomator::crypto::{
+    Claims, Cryptor, MasterKey, Vault, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, FILE_CHUNK_LENGTH,
+    FILE_HEADER_LENGTH,
+};
 
-const PATH_TO_VAULT: &str = "tests/test_storage/vault.cryptomator";
-const DEFAULT_PASSWORD: &str = "12345678";
-const VFS_STORAGE_PATH: &str = "/";
+const CHUNK_SIZES: [usize; 4] = [64, 1024, 16 * 1024, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH];
+const BENCH_CHUNK_NUMBER: u64 = 7;
+const CONTENT_SIZES: [usize; 3] = [1024, 64 * 1024, 256 * 1024];
 
-const KB: usize = 1024;
-const MB: usize = 1024 * KB;
+fn create_cryptor() -> Cryptor {
+    let master_key = MasterKey {
+        primary_master_key: [0x11; 32],
+        hmac_master_key: [0x22; 32],
+    };
 
-fn crypto_fs_write(c: &mut Criterion) {
-    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
-    let cryptor = crypto::Cryptor::new(vault);
+    let vault = Vault {
+        master_key,
+        claims: Claims::default(),
+    };
 
-    let local_fs = MemoryFs::new();
-    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+    Cryptor::new(vault)
+}
 
-    let sizes = [10 * KB, 5 * MB, 10 * MB];
+fn make_chunk_data(size: usize) -> Vec<u8> {
+    vec![0xA5; size]
+}
 
-    let mut group = c.benchmark_group("crypto_write");
-    for size in sizes.iter() {
-        let random_data: Vec<u8> = (0..*size).map(|_| rand::random::<u8>()).collect();
-        let mut bench_file = crypto_fs
-            .create_file(format!("/bench#{}.dat", *size))
-            .unwrap();
+fn chunk_inputs() -> Vec<(usize, Vec<u8>)> {
+    CHUNK_SIZES
+        .iter()
+        .map(|&size| (size, make_chunk_data(size)))
+        .collect()
+}
 
-        group.throughput(Throughput::Bytes(random_data.len() as u64));
+fn content_inputs() -> Vec<(usize, Vec<u8>)> {
+    CONTENT_SIZES
+        .iter()
+        .map(|&size| (size, make_chunk_data(size)))
+        .collect()
+}
+
+fn bench_encrypt_chunk(c: &mut Criterion) {
+    let cryptor = create_cryptor();
+    let file_header = cryptor.create_file_header();
+    let header_nonce = file_header.nonce;
+    let file_key = file_header.payload.content_key;
+
+    let inputs = chunk_inputs();
+    let mut group = c.benchmark_group("encrypt_chunk");
+    for (size, chunk) in &inputs {
+        group.throughput(Throughput::Bytes(*size as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(size), chunk, |b, chunk| {
+            b.iter(|| {
+                let encrypted = cryptor
+                    .encrypt_chunk(
+                        &header_nonce,
+                        &file_key,
+                        BENCH_CHUNK_NUMBER,
+                        chunk.as_slice(),
+                    )
+                    .expect("failed to encrypt chunk");
+                black_box(encrypted);
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_decrypt_chunk(c: &mut Criterion) {
+    let cryptor = create_cryptor();
+    let file_header = cryptor.create_file_header();
+    let header_nonce = file_header.nonce;
+    let file_key = file_header.payload.content_key;
+
+    let encrypted_inputs: Vec<(usize, Vec<u8>)> = CHUNK_SIZES
+        .iter()
+        .map(|&size| {
+            let plain = make_chunk_data(size);
+            let encrypted = cryptor
+                .encrypt_chunk(
+                    &header_nonce,
+                    &file_key,
+                    BENCH_CHUNK_NUMBER,
+                    plain.as_slice(),
+                )
+                .expect("failed to encrypt chunk");
+            (size, encrypted)
+        })
+        .collect();
+
+    let mut group = c.benchmark_group("decrypt_chunk");
+    for (size, chunk) in &encrypted_inputs {
+        group.throughput(Throughput::Bytes(*size as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(size), chunk, |b, chunk| {
+            b.iter(|| {
+                let decrypted = cryptor
+                    .decrypt_chunk(
+                        &header_nonce,
+                        &file_key,
+                        BENCH_CHUNK_NUMBER,
+                        chunk.as_slice(),
+                    )
+                    .expect("failed to decrypt chunk");
+                black_box(decrypted);
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_encrypt_content(c: &mut Criterion) {
+    let cryptor = create_cryptor();
+    let inputs = content_inputs();
+
+    let mut group = c.benchmark_group("encrypt_content");
+    for (size, data) in &inputs {
+        let expected_plain = *size;
+        group.throughput(Throughput::Bytes(expected_plain as u64));
         group.bench_with_input(
-            BenchmarkId::new("crypto_write", random_data.len()),
-            &random_data,
+            BenchmarkId::from_parameter(expected_plain),
+            data,
             |b, data| {
                 b.iter(|| {
-                    bench_file.write_all(data).unwrap();
-                    bench_file.flush().unwrap();
+                    let mut input = Cursor::new(data.as_slice());
+                    let mut output =
+                        Vec::with_capacity(data.len() + FILE_HEADER_LENGTH + FILE_CHUNK_LENGTH);
+                    cryptor
+                        .encrypt_content(&mut input, &mut output)
+                        .expect("failed to encrypt content");
+                    black_box(output);
                 });
             },
         );
@@ -43,55 +139,38 @@ fn crypto_fs_write(c: &mut Criterion) {
     group.finish();
 }
 
-fn crypto_fs_read(c: &mut Criterion) {
-    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
-    let cryptor = crypto::Cryptor::new(vault);
+fn bench_decrypt_content(c: &mut Criterion) {
+    let cryptor = create_cryptor();
 
-    let local_fs = MemoryFs::new();
-    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+    let encrypted_inputs: Vec<(usize, Vec<u8>)> = CONTENT_SIZES
+        .iter()
+        .map(|&size| {
+            let plain = make_chunk_data(size);
+            let mut encrypted =
+                Vec::with_capacity(plain.len() + FILE_HEADER_LENGTH + FILE_CHUNK_LENGTH);
+            cryptor
+                .encrypt_content(&mut Cursor::new(plain.as_slice()), &mut encrypted)
+                .expect("failed to prepare encrypted content");
+            (size, encrypted)
+        })
+        .collect();
 
-    let random_data: Vec<u8> = (0..10 * MB).map(|_| rand::random::<u8>()).collect();
-    let mut bench_file = crypto_fs.create_file("/bench.dat").unwrap();
-    bench_file.write_all(&random_data).unwrap();
-    bench_file.flush().unwrap();
-
-    let sizes = [10 * KB, 5 * MB, 10 * MB];
-    let mut group = c.benchmark_group("crypto_read");
-    for size in sizes.iter() {
-        let mut f = crypto_fs
-            .open_file("/bench.dat", OpenOptions::new())
-            .unwrap();
-        let mut data: Vec<u8> = vec![0; *size];
-
-        group.throughput(Throughput::Bytes(*size as u64));
-        group.bench_function(BenchmarkId::new("crypto_read", *size), |b| {
-            b.iter(|| {
-                let _ = f.read(&mut data).unwrap();
-                f.seek(SeekFrom::Start(0)).unwrap();
-            });
-        });
-    }
-    group.finish();
-}
-
-fn crypto_encrypt_chunk(c: &mut Criterion) {
-    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
-    let cryptor = crypto::Cryptor::new(vault);
-
-    let sizes = [32 * KB];
-
-    let mut group = c.benchmark_group("crypto_encrypt_chunk");
-    for size in sizes.iter() {
-        let random_data: Vec<u8> = (0..*size).map(|_| rand::random::<u8>()).collect();
-        let file_key: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
-        let nonce: Vec<u8> = (0..16).map(|_| rand::random::<u8>()).collect();
-
-        group.throughput(Throughput::Bytes(random_data.len() as u64));
+    let mut group = c.benchmark_group("decrypt_content");
+    for (size, encrypted) in &encrypted_inputs {
+        let expected_plain = *size;
+        group.throughput(Throughput::Bytes(expected_plain as u64));
         group.bench_with_input(
-            BenchmarkId::new("crypto_encrypt_chunk", random_data.len()),
-            &random_data,
-            |b, data| {
-                b.iter(|| cryptor.encrypt_chunk(&nonce, &file_key, 1, data).unwrap());
+            BenchmarkId::from_parameter(expected_plain),
+            encrypted,
+            |b, encrypted| {
+                b.iter(|| {
+                    let mut input = Cursor::new(encrypted.as_slice());
+                    let mut output = Vec::with_capacity(expected_plain);
+                    cryptor
+                        .decrypt_content(&mut input, &mut output)
+                        .expect("failed to decrypt content");
+                    black_box(output);
+                });
             },
         );
     }
@@ -100,8 +179,9 @@ fn crypto_encrypt_chunk(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    crypto_fs_write,
-    crypto_fs_read,
-    crypto_encrypt_chunk,
+    bench_encrypt_chunk,
+    bench_decrypt_chunk,
+    bench_encrypt_content,
+    bench_decrypt_content,
 );
 criterion_main!(benches);

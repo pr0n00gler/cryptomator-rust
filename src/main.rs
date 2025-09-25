@@ -8,7 +8,8 @@ use cryptomator::providers::LocalFs;
 
 use tracing::info;
 
-use clap::{ArgEnum, Parser};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use clap::{Parser, ValueEnum};
 
 use cryptomator::frontends::mount::mount_nfs;
 use cryptomator::frontends::mount::*;
@@ -20,31 +21,31 @@ use std::path::Path;
 
 const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ArgEnum)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum FilesystemProvider {
     Local,
 }
 
 #[derive(Parser)]
-#[clap(version = "0.1.0", author = "pr0n00gler <pr0n00gler@yandex.ru>")]
+#[command(version = "0.1.0", author = "pr0n00gler <pr0n00gler@yandex.ru>")]
 struct Opts {
     /// Path to a storage
-    #[clap(short, long)]
+    #[arg(short, long)]
     storage_path: String,
 
     /// Path to a vault file. By default in the storage directory
-    #[clap(short, long)]
+    #[arg(short, long)]
     vault_path: Option<String>,
 
     /// Filesystem provider. Supported values: only "local" for now
-    #[clap(arg_enum, default_value = "local")]
+    #[arg(value_enum, default_value_t = FilesystemProvider::Local)]
     filesystem_provider: FilesystemProvider,
 
     /// Log level
-    #[clap(short, long, default_value = "info")]
+    #[arg(short, long, default_value = "info")]
     log_level: String,
 
-    #[clap(subcommand)]
+    #[command(subcommand)]
     subcmd: Command,
 }
 
@@ -63,22 +64,22 @@ enum Command {
 #[derive(Parser)]
 struct Create {
     /// The Scrypt parameter N
-    #[clap(default_value = "16384")]
+    #[arg(default_value_t = 16384)]
     scrypt_cost: u64,
 
     /// The Scrypt parameter r
-    #[clap(default_value = "8")]
+    #[arg(default_value_t = 8)]
     scrypt_block_size: u32,
 }
 
 #[derive(Parser)]
 struct Unlock {
     /// Webdav-server listen address
-    #[clap(short, long)]
+    #[arg(short, long)]
     webdav_listen_address: Option<String>,
 
     /// NFS-server listen address
-    #[clap(short, long, default_value = "127.0.0.1:11111")]
+    #[arg(short, long, default_value = "127.0.0.1:11111")]
     nfs_listen_address: String,
 }
 
@@ -121,8 +122,7 @@ fn create_command<FS: FileSystem, P: AsRef<Path>>(
     full_storage_path: P,
     c: Create,
 ) {
-    let pass =
-        rpassword::prompt_password_stdout("Vault password: ").expect("Unable to read password");
+    let pass = rpassword::prompt_password("Vault password: ").expect("Unable to read password");
 
     info!("Generating master key...");
     let mk_json = MasterKeyJson::create(pass.as_str(), c.scrypt_cost, c.scrypt_block_size)
@@ -161,8 +161,7 @@ fn create_command<FS: FileSystem, P: AsRef<Path>>(
 }
 
 fn migrate_v7_to_v8_command<FS: FileSystem, P: AsRef<Path>>(fs: FS, vault_path: P) {
-    let pass =
-        rpassword::prompt_password_stdout("Vault password: ").expect("Unable to read password");
+    let pass = rpassword::prompt_password("Vault password: ").expect("Unable to read password");
 
     info!("Reading old masterkey file...");
     let mk_path = parent_path(&vault_path).join(DEFAULT_MASTER_KEY_FILE);
@@ -197,7 +196,7 @@ fn migrate_v7_to_v8_command<FS: FileSystem, P: AsRef<Path>>(fs: FS, vault_path: 
     let mut version_mac: Hmac<Sha256> = Hmac::new_from_slice(&masterkey.hmac_master_key).unwrap();
     version_mac.update(&mk_json.version.to_be_bytes());
     let version_mac_bytes = version_mac.finalize().into_bytes();
-    mk_json.versionMac = base64::encode(version_mac_bytes);
+    mk_json.versionMac = STANDARD.encode(version_mac_bytes);
 
     info!("Rewriting masterkey file...");
     let mk_file = fs
@@ -220,8 +219,7 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
     full_storage_path: P,
     u: Unlock,
 ) {
-    let pass =
-        rpassword::prompt_password_stdout("Vault password: ").expect("Unable to read password");
+    let pass = rpassword::prompt_password("Vault password: ").expect("Unable to read password");
     info!("Unlocking the storage...");
 
     info!("Deriving keys...");

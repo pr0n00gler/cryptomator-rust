@@ -4,8 +4,10 @@ use crate::crypto::error::MasterKeyError;
 
 use rand::Rng;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use hmac::digest::generic_array::GenericArray;
 use hmac::{Hmac, Mac};
+use scrypt::Params;
 use sha2::Sha256;
 
 const P: u32 = 1;
@@ -37,12 +39,13 @@ impl MasterKeyJson {
         let hmac_master_key = rand::thread_rng().gen::<[u8; 32]>();
         let scrypt_salt = rand::thread_rng().gen::<[u8; 32]>();
 
-        let scrypt_params = scrypt::ScryptParams::new(
+        let mut kek = [0u8; 32];
+        let scrypt_params = Params::new(
             (scrypt_cost_param as f64).log2() as u8,
             scrypt_block_size,
             P,
+            kek.len(),
         )?;
-        let mut kek = [0u8; 32];
         scrypt::scrypt(password.as_bytes(), &scrypt_salt, &scrypt_params, &mut kek)?;
 
         let kek_aes_key = openssl::aes::AesKey::new_encrypt(&kek)?;
@@ -63,19 +66,20 @@ impl MasterKeyJson {
             &hmac_master_key,
         )?;
 
-        let mut version_mac: Hmac<Sha256> = Hmac::new_from_slice(&hmac_master_key)?;
+        let mut version_mac: Hmac<Sha256> =
+            <Hmac<Sha256> as Mac>::new_from_slice(&hmac_master_key)?;
         version_mac.update(&FAKE_VAULT_VERSION.to_be_bytes());
 
         let version_mac_bytes = version_mac.finalize().into_bytes();
 
         Ok(MasterKeyJson {
             version: FAKE_VAULT_VERSION,
-            scryptSalt: base64::encode(scrypt_salt),
+            scryptSalt: STANDARD.encode(scrypt_salt),
             scryptCostParam: scrypt_cost_param,
             scryptBlockSize: scrypt_block_size,
-            primaryMasterKey: base64::encode(wrapped_master_key),
-            hmacMasterKey: base64::encode(wrapped_hmac_master_key),
-            versionMac: base64::encode(version_mac_bytes),
+            primaryMasterKey: STANDARD.encode(wrapped_master_key),
+            hmacMasterKey: STANDARD.encode(wrapped_hmac_master_key),
+            versionMac: STANDARD.encode(version_mac_bytes),
         })
     }
 }
@@ -93,17 +97,17 @@ impl MasterKey {
         mk_json: MasterKeyJson,
         password: &str,
     ) -> Result<MasterKey, MasterKeyError> {
-        let scrypt_salt = base64::decode(mk_json.scryptSalt)?;
-        let primary_master_key = base64::decode(mk_json.primaryMasterKey)?;
-        let hmac_master_key = base64::decode(mk_json.hmacMasterKey)?;
+        let scrypt_salt = STANDARD.decode(mk_json.scryptSalt)?;
+        let primary_master_key = STANDARD.decode(mk_json.primaryMasterKey)?;
+        let hmac_master_key = STANDARD.decode(mk_json.hmacMasterKey)?;
 
-        let scrypt_params = scrypt::ScryptParams::new(
+        let mut kek = [0u8; 32];
+        let scrypt_params = Params::new(
             (mk_json.scryptCostParam as f64).log2() as u8,
             mk_json.scryptBlockSize,
             P,
+            kek.len(),
         )?;
-
-        let mut kek = [0u8; 32];
         scrypt::scrypt(
             password.as_bytes(),
             scrypt_salt.as_slice(),
@@ -130,10 +134,10 @@ impl MasterKey {
         )?;
 
         let version = mk_json.version;
-        let version_mac = base64::decode(mk_json.versionMac)?;
+        let version_mac = STANDARD.decode(mk_json.versionMac)?;
 
         let mut calculated_version_mac: Hmac<Sha256> =
-            Hmac::new_from_slice(&unwrapped_hmac_master_key)?;
+            <Hmac<Sha256> as Mac>::new_from_slice(&unwrapped_hmac_master_key)?;
         calculated_version_mac.update(&version.to_be_bytes());
         calculated_version_mac.verify(GenericArray::from_slice(version_mac.as_slice()))?;
 

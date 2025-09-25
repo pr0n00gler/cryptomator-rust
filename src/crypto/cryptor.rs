@@ -58,23 +58,20 @@ pub const FILE_CHUNK_LENGTH: usize = FILE_CHUNK_CONTENT_NONCE_LENGTH
 const AES_SIV_KEY_LENGTH: usize = 64;
 
 /// Calculates the size of the cleartext payload by ciphertext
+#[inline]
 pub fn calculate_cleartext_size(ciphertext_size: u64) -> u64 {
-    if ciphertext_size < (FILE_HEADER_LENGTH as u64) {
+    if ciphertext_size < FILE_HEADER_LENGTH as u64 {
         return 0;
     }
     let ciphertext_size = ciphertext_size - FILE_HEADER_LENGTH as u64;
-    let overhead_per_chunk =
-        (FILE_CHUNK_CONTENT_MAC_LENGTH + FILE_CHUNK_CONTENT_NONCE_LENGTH) as u64;
+    let overhead_per_chunk = FILE_CHUNK_LENGTH as u64 - FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
     let full_chunks_number = ciphertext_size / FILE_CHUNK_LENGTH as u64;
     let additional_ciphertext_bytes = ciphertext_size % FILE_CHUNK_LENGTH as u64;
-    let additional_cleartext_bytes = if additional_ciphertext_bytes == 0 {
-        0
-    } else {
-        additional_ciphertext_bytes - overhead_per_chunk
-    };
+    let additional_cleartext_bytes = additional_ciphertext_bytes.saturating_sub(overhead_per_chunk);
     FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64 * full_chunks_number + additional_cleartext_bytes
 }
 
+#[inline]
 pub fn shorten_name<P: AsRef<str>>(name: P) -> String {
     let mut hasher = Sha1::new();
     hasher.update(name.as_ref().as_bytes());
@@ -103,6 +100,7 @@ pub struct Cryptor {
 }
 
 impl Cryptor {
+    #[inline]
     fn fill_aes_siv_key(&self, out: &mut [u8; AES_SIV_KEY_LENGTH]) {
         let hmac_key = &self.vault.master_key.hmac_master_key;
         let primary_key = &self.vault.master_key.primary_master_key;
@@ -190,17 +188,16 @@ impl Cryptor {
     /// Encrypts a FileHeader
     /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-header-encryption
     pub fn encrypt_file_header(&self, file_header: &FileHeader) -> Result<Vec<u8>, CryptoError> {
-        let mut encrypted_header: Vec<u8> = Vec::with_capacity(FILE_HEADER_LENGTH);
+        let mut encrypted_header = Vec::with_capacity(FILE_HEADER_LENGTH);
 
         let mut payload = [0u8; FILE_HEADER_PAYLOAD_LENGTH];
-        let reserved_len = file_header.payload.reserved.len();
-        payload[..reserved_len].copy_from_slice(&file_header.payload.reserved);
-        payload[reserved_len..reserved_len + file_header.payload.content_key.len()]
+        payload[..FILE_HEADER_PAYLOAD_RESERVED_LENGTH].copy_from_slice(&file_header.payload.reserved);
+        payload[FILE_HEADER_PAYLOAD_RESERVED_LENGTH..]
             .copy_from_slice(&file_header.payload.content_key);
 
         let mut cipher = Aes256Ctr::new(
             GenericArray::from_slice(&self.vault.master_key.primary_master_key),
-            GenericArray::from_slice(file_header.nonce.as_ref()),
+            GenericArray::from_slice(&file_header.nonce),
         );
         cipher.apply_keystream(&mut payload);
 
@@ -211,8 +208,8 @@ impl Cryptor {
         let mac_bytes = mac.finalize().into_bytes();
 
         encrypted_header.extend_from_slice(&file_header.nonce);
-        encrypted_header.extend_from_slice(payload.as_slice());
-        encrypted_header.extend_from_slice(mac_bytes.as_slice());
+        encrypted_header.extend_from_slice(&payload);
+        encrypted_header.extend_from_slice(&mac_bytes);
 
         Ok(encrypted_header)
     }
@@ -272,6 +269,7 @@ impl Cryptor {
     /// Encrypts a data
     /// Encrypted data will be written to a output
     /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-content-encryption
+    #[inline]
     pub fn encrypt_content<R: Read, W: Write>(
         &self,
         input: &mut R,
@@ -279,7 +277,7 @@ impl Cryptor {
     ) -> Result<(), CryptoError> {
         let file_header = self.create_file_header();
         let encrypted_header = self.encrypt_file_header(&file_header)?;
-        output.write_all(encrypted_header.as_slice())?;
+        output.write_all(&encrypted_header)?;
 
         let mut file_chunk = [0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH];
         let mut chunk_number: u64 = 0;
@@ -291,7 +289,7 @@ impl Cryptor {
                 chunk_number,
                 &file_chunk[..read_bytes],
             )?;
-            output.write_all(encrypted_chunk.as_slice())?;
+            output.write_all(&encrypted_chunk)?;
             if read_bytes < FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
                 break;
             }
@@ -303,6 +301,7 @@ impl Cryptor {
     /// Decrypts a data
     /// Decrypted data will be written to a output
     /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#file-content-encryption
+    #[inline]
     pub fn decrypt_content<R: Read, W: Write>(
         &self,
         input: &mut R,
@@ -322,7 +321,7 @@ impl Cryptor {
                 chunk_number,
                 &file_chunk[..read_bytes],
             )?;
-            output.write_all(chunk_content.as_slice())?;
+            output.write_all(&chunk_content)?;
             if read_bytes < FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
                 break;
             }
@@ -349,11 +348,32 @@ impl Cryptor {
         }
         let chunk_nonce = rand::thread_rng().gen::<[u8; FILE_CHUNK_CONTENT_NONCE_LENGTH]>();
 
-        let mut encrypted_chunk: Vec<u8> = Vec::with_capacity(
-            chunk_nonce.len() + chunk_data.len() + FILE_CHUNK_CONTENT_MAC_LENGTH,
+        // Pre-allocate the vector with the exact size needed
+        let mut encrypted_chunk = Vec::with_capacity(
+            FILE_CHUNK_CONTENT_NONCE_LENGTH + chunk_data.len() + FILE_CHUNK_CONTENT_MAC_LENGTH,
         );
-        encrypted_chunk.extend_from_slice(&chunk_nonce);
-        encrypted_chunk.extend_from_slice(chunk_data);
+        
+        // Use unsafe for performance-critical code to avoid bounds checking
+        unsafe {
+            let ptr = encrypted_chunk.as_mut_ptr();
+            
+            // Copy nonce
+            std::ptr::copy_nonoverlapping(
+                chunk_nonce.as_ptr(),
+                ptr,
+                FILE_CHUNK_CONTENT_NONCE_LENGTH,
+            );
+            
+            // Copy chunk data
+            std::ptr::copy_nonoverlapping(
+                chunk_data.as_ptr(),
+                ptr.add(FILE_CHUNK_CONTENT_NONCE_LENGTH),
+                chunk_data.len(),
+            );
+            
+            // Set the length of the vector
+            encrypted_chunk.set_len(FILE_CHUNK_CONTENT_NONCE_LENGTH + chunk_data.len());
+        }
 
         let mut cipher = Aes256Ctr::new(
             GenericArray::from_slice(file_key),
@@ -370,7 +390,7 @@ impl Cryptor {
         mac.update(&encrypted_chunk);
         let mac_bytes = mac.finalize().into_bytes();
 
-        encrypted_chunk.extend_from_slice(mac_bytes.as_slice());
+        encrypted_chunk.extend_from_slice(&mac_bytes);
 
         Ok(encrypted_chunk)
     }
@@ -393,6 +413,7 @@ impl Cryptor {
         }
 
         let begin_of_mac = encrypted_chunk.len() - FILE_CHUNK_CONTENT_MAC_LENGTH;
+        let payload_length = begin_of_mac - FILE_CHUNK_CONTENT_NONCE_LENGTH;
 
         let chunk_number_be = chunk_number.to_be_bytes();
 
@@ -409,8 +430,13 @@ impl Cryptor {
             GenericArray::from_slice(file_key),
             GenericArray::from_slice(&encrypted_chunk[..FILE_CHUNK_CONTENT_NONCE_LENGTH]),
         );
-        let mut decrypted_content =
-            Vec::from(&encrypted_chunk[FILE_CHUNK_CONTENT_NONCE_LENGTH..begin_of_mac]);
+        
+        // Pre-allocate vector with exact size needed
+        let mut decrypted_content = Vec::with_capacity(payload_length);
+        unsafe {
+            decrypted_content.set_len(payload_length);
+        }
+        decrypted_content.copy_from_slice(&encrypted_chunk[FILE_CHUNK_CONTENT_NONCE_LENGTH..begin_of_mac]);
         cipher.apply_keystream(&mut decrypted_content);
 
         Ok(decrypted_content)

@@ -5,7 +5,7 @@ use crate::cryptofs::{
 };
 use bytes::{Buf, Bytes};
 use futures::{future, future::FutureExt};
-use std::io::{ErrorKind, Read, SeekFrom, Write};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path};
 use std::time::SystemTime;
 use webdav_handler::davpath::DavPath;
@@ -76,8 +76,19 @@ impl DFile {
 
 impl DavFile for DFile {
     fn metadata(&mut self) -> FsFuture<Box<dyn DavMetaData>> {
-        async move { Ok(Box::new(self.crypto_fs_file.metadata().unwrap()) as Box<dyn DavMetaData>) }
-            .boxed()
+        async move {
+            let mut metadata = self.crypto_fs_file.metadata().unwrap();
+
+            // Get the actual cleartext size by seeking to the end
+            if !metadata.is_dir {
+                if let Ok(size) = self.crypto_fs_file.seek(SeekFrom::End(0)) {
+                    metadata.len = size;
+                }
+            }
+
+            Ok(Box::new(metadata) as Box<dyn DavMetaData>)
+        }
+        .boxed()
     }
 
     fn write_buf(&mut self, buf: Box<dyn Buf + Send>) -> FsFuture<'_, ()> {
@@ -168,7 +179,20 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
 
     fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
         async move {
-            let metadata = self.crypto_fs.metadata(path.as_pathbuf())?;
+            let mut metadata = self.crypto_fs.metadata(path.as_pathbuf())?;
+
+            // For files, get the actual cleartext size by opening and seeking
+            if !metadata.is_dir {
+                if let Ok(mut file) = self
+                    .crypto_fs
+                    .open_file(path.as_pathbuf(), *cryptoOpenOptions::new().read(true))
+                {
+                    if let Ok(size) = file.seek(SeekFrom::End(0)) {
+                        metadata.len = size;
+                    }
+                }
+            }
+
             Ok(Box::new(metadata) as Box<dyn DavMetaData>)
         }
         .boxed()

@@ -1,6 +1,7 @@
 use crate::crypto::{
-    calculate_cleartext_size, shorten_name, Cryptor, FileHeader, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH,
-    FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH,
+    calculate_cleartext_size, shorten_name, Cryptor, FileHeader, FILE_CHUNK_CONTENT_MAC_LENGTH,
+    FILE_CHUNK_CONTENT_NONCE_LENGTH, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, FILE_CHUNK_LENGTH,
+    FILE_HEADER_LENGTH,
 };
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist};
 use crate::cryptofs::filesystem::Metadata;
@@ -9,7 +10,6 @@ use crate::cryptofs::{
     FileSystemError, OpenOptions, Stats,
 };
 use lru_cache::LruCache;
-use std::cmp::Ordering;
 use std::error::Error;
 use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -582,10 +582,7 @@ impl CryptoFsFile {
             rfs_file: reader,
             current_pos: 0,
             header,
-            metadata: Metadata {
-                len: calculate_cleartext_size(metadata.len),
-                ..metadata
-            },
+            metadata,
             chunk_cache: LruCache::new(CHUNK_CACHE_CAP),
         })
     }
@@ -602,8 +599,7 @@ impl CryptoFsFile {
         let encrypted_header = cryptor.encrypt_file_header(&header)?;
         rfs_file.write_all(encrypted_header.as_slice())?;
         rfs_file.flush()?;
-        let mut metadata = rfs_file.metadata()?;
-        metadata.len = 0;
+        let metadata = rfs_file.metadata()?;
         Ok(CryptoFsFile {
             cryptor,
             rfs_file,
@@ -647,17 +643,71 @@ impl CryptoFsFile {
         self.rfs_file.seek(SeekFrom::Start(
             (chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
         ))?;
-        let mut chunk = [0u8; FILE_CHUNK_LENGTH];
+        let mut chunk = vec![0u8; FILE_CHUNK_LENGTH];
         let read_bytes = self.rfs_file.read(&mut chunk)?;
+
+        let payload_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        let cleartext_size = calculate_cleartext_size(self.metadata.len);
+        let chunk_start_clear = chunk_index * payload_len;
+        let expected_plain_len = if cleartext_size > chunk_start_clear {
+            std::cmp::min(payload_len, cleartext_size - chunk_start_clear) as usize
+        } else {
+            0
+        };
+
         if read_bytes == 0 {
-            return Ok(Arc::<[u8]>::from(Vec::new()));
+            let zero_chunk: Arc<[u8]> = Arc::from(vec![0u8; expected_plain_len]);
+            self.chunk_cache
+                .insert(chunk_index, Arc::clone(&zero_chunk));
+            return Ok(zero_chunk);
         }
-        let decrypted_chunk = self.cryptor.decrypt_chunk(
+
+        let chunk_slice = &chunk[..read_bytes];
+        let min_chunk_len = FILE_CHUNK_CONTENT_NONCE_LENGTH + FILE_CHUNK_CONTENT_MAC_LENGTH;
+        let mut effective_len = chunk_slice.len();
+
+        if effective_len >= min_chunk_len {
+            while effective_len > min_chunk_len && chunk_slice[effective_len - 1] == 0 {
+                effective_len -= 1;
+            }
+        }
+
+        if effective_len <= min_chunk_len || chunk_slice[..effective_len].iter().all(|&b| b == 0) {
+            let zero_chunk: Arc<[u8]> = Arc::from(vec![0u8; expected_plain_len]);
+            self.chunk_cache
+                .insert(chunk_index, Arc::clone(&zero_chunk));
+            return Ok(zero_chunk);
+        }
+
+        let decrypt_attempt = self.cryptor.decrypt_chunk(
             &self.header.nonce,
             &self.header.payload.content_key,
             chunk_index,
-            &chunk[..read_bytes],
-        )?;
+            &chunk_slice[..effective_len],
+        );
+
+        let decrypted_chunk = match decrypt_attempt {
+            Ok(data) => data,
+            Err(err) => {
+                if effective_len != chunk_slice.len() {
+                    match self.cryptor.decrypt_chunk(
+                        &self.header.nonce,
+                        &self.header.payload.content_key,
+                        chunk_index,
+                        chunk_slice,
+                    ) {
+                        Ok(data) => data,
+                        Err(_) => {
+                            error!(chunk_index, "Failed to decrypt chunk: {:?}", err);
+                            return Err(err.into());
+                        }
+                    }
+                } else {
+                    error!(chunk_index, "Failed to decrypt chunk: {:?}", err);
+                    return Err(err.into());
+                }
+            }
+        };
 
         let decrypted_chunk = Arc::<[u8]>::from(decrypted_chunk);
 
@@ -687,38 +737,63 @@ impl Seek for CryptoFsFile {
 
 impl Read for CryptoFsFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let mut chunk_index = self.current_pos / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        let payload_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        let total_plain_size = match self.file_size() {
+            Ok(size) => size,
+            Err(e) => {
+                error!("Failed to determine cleartext file size: {:?}", e);
+                return Err(std::io::Error::other(e));
+            }
+        };
         let mut n: usize = 0;
         while n < buf.len() {
-            let offset = (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize;
+            if self.current_pos >= total_plain_size {
+                break;
+            }
+
+            let chunk_index = self.current_pos / payload_len;
+            let offset = (self.current_pos % payload_len) as usize;
+            let remaining_total = (total_plain_size - self.current_pos) as usize;
+            let remaining_buf = buf.len() - n;
+            let max_read = remaining_total.min(remaining_buf);
+            if max_read == 0 {
+                break;
+            }
+
+            let available_in_chunk = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH - offset;
+            let slice_len = max_read.min(available_in_chunk);
 
             let chunk = match self.read_chunk(chunk_index) {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("Failed to read chunk: {:?}", e);
+                    error!(chunk_index, "Failed to read chunk: {:?}", e);
                     return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                 }
             };
 
             let chunk_slice = chunk.as_ref();
-
-            if chunk_slice.is_empty() {
-                break;
-            }
-            if offset >= chunk_slice.len() {
-                break;
-            }
-
-            let slice_len = match (buf.len() - n).cmp(&(chunk_slice.len() - offset)) {
-                Ordering::Less => buf.len() - n,
-                Ordering::Greater => chunk_slice.len() - offset,
-                Ordering::Equal => buf.len() - n,
+            let data_available = if offset < chunk_slice.len() {
+                chunk_slice.len() - offset
+            } else {
+                0
             };
-            buf[n..n + slice_len].copy_from_slice(&chunk_slice[offset..offset + slice_len]);
-            n += slice_len;
 
-            self.current_pos += slice_len as u64;
-            chunk_index += 1;
+            let copy_len = slice_len.min(data_available);
+
+            if copy_len > 0 {
+                buf[n..n + copy_len].copy_from_slice(&chunk_slice[offset..offset + copy_len]);
+                n += copy_len;
+                self.current_pos += copy_len as u64;
+            }
+
+            if slice_len > copy_len {
+                let zero_len = slice_len - copy_len;
+                for byte in &mut buf[n..n + zero_len] {
+                    *byte = 0;
+                }
+                n += zero_len;
+                self.current_pos += zero_len as u64;
+            }
         }
         Ok(n)
     }
@@ -726,8 +801,9 @@ impl Read for CryptoFsFile {
 
 impl Write for CryptoFsFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut chunk_index = self.current_pos / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
-        let file_size = match self.real_file_size() {
+        let payload_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        let mut chunk_index = self.current_pos / payload_len;
+        let mut known_cleartext_size = match self.file_size() {
             Ok(s) => s,
             Err(e) => {
                 error!("Failed to determine cleartext file size: {:?}", e);
@@ -735,18 +811,57 @@ impl Write for CryptoFsFile {
             }
         };
 
-        let chunks_count = file_size / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
-
         let mut n: usize = 0;
         while n < buf.len() {
-            let mut chunk: Vec<u8>;
-            let slice_len: usize;
-            if chunk_index > chunks_count || file_size == FILE_HEADER_LENGTH as u64 {
-                slice_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH.min(buf.len() - n);
-                chunk = Vec::with_capacity(FILE_CHUNK_CONTENT_PAYLOAD_LENGTH);
-                chunk.extend_from_slice(&buf[n..n + slice_len]);
-                n += slice_len;
+            let offset_in_chunk = (self.current_pos % payload_len) as usize;
+            let available_in_chunk = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH - offset_in_chunk;
+            let slice_len = available_in_chunk.min(buf.len() - n);
+
+            loop {
+                let full_chunks = known_cleartext_size / payload_len;
+                let trailing_bytes = (known_cleartext_size % payload_len) as usize;
+                let mut missing_index = full_chunks;
+                if trailing_bytes > 0 {
+                    missing_index += 1;
+                }
+                if missing_index >= chunk_index {
+                    break;
+                }
+
+                let zero_plain = vec![0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH];
+                let encrypted_zero = match self.cryptor.encrypt_chunk(
+                    &self.header.nonce,
+                    &self.header.payload.content_key,
+                    missing_index,
+                    &zero_plain,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!("Failed to encrypt zero chunk: {:?}", e);
+                        return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+                    }
+                };
+
+                self.rfs_file.seek(SeekFrom::Start(
+                    (missing_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
+                ))?;
+                self.rfs_file.write_all(&encrypted_zero)?;
+
+                let zero_arc: Arc<[u8]> = Arc::from(zero_plain.into_boxed_slice());
+                self.chunk_cache.insert(missing_index, zero_arc);
+
+                known_cleartext_size += payload_len;
+            }
+
+            let full_chunks = known_cleartext_size / payload_len;
+            let trailing_bytes = (known_cleartext_size % payload_len) as usize;
+            let chunk_exists = if chunk_index < full_chunks {
+                true
             } else {
+                chunk_index == full_chunks && trailing_bytes > 0
+            };
+
+            let mut chunk = if chunk_exists {
                 let cached_chunk = match self.read_chunk(chunk_index) {
                     Ok(c) => c,
                     Err(e) => {
@@ -755,22 +870,22 @@ impl Write for CryptoFsFile {
                     }
                 };
 
-                let offset = (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize;
-                slice_len = if offset + buf.len() - n > FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
-                    FILE_CHUNK_CONTENT_PAYLOAD_LENGTH - offset
-                } else {
-                    buf.len() - n
-                };
-
                 let mut buf_chunk = Vec::from(cached_chunk.as_ref());
-                if buf_chunk.len() < offset + slice_len {
-                    buf_chunk.resize(offset + slice_len, 0u8);
+                if buf_chunk.len() < offset_in_chunk {
+                    buf_chunk.resize(offset_in_chunk, 0u8);
                 }
+                buf_chunk
+            } else {
+                vec![0u8; offset_in_chunk]
+            };
 
-                buf_chunk[offset..offset + slice_len].copy_from_slice(&buf[n..n + slice_len]);
-                n += slice_len;
-                chunk = buf_chunk;
+            if chunk.len() < offset_in_chunk + slice_len {
+                chunk.resize(offset_in_chunk + slice_len, 0u8);
             }
+
+            chunk[offset_in_chunk..offset_in_chunk + slice_len]
+                .copy_from_slice(&buf[n..n + slice_len]);
+            n += slice_len;
 
             let encrypted_chunk = match self.cryptor.encrypt_chunk(
                 &self.header.nonce,
@@ -793,6 +908,8 @@ impl Write for CryptoFsFile {
             self.current_pos += slice_len as u64;
 
             self.chunk_cache.insert(chunk_index, chunk.into());
+
+            known_cleartext_size = known_cleartext_size.max(self.current_pos);
 
             chunk_index += 1;
         }

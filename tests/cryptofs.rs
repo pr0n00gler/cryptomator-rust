@@ -1,5 +1,5 @@
 use cryptomator::crypto;
-use cryptomator::crypto::Vault;
+use cryptomator::crypto::{Vault, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH};
 use cryptomator::cryptofs::{CryptoFs, FileSystem, OpenOptions};
 use cryptomator::providers::{LocalFs, MemoryFs};
 use rand::distributions::Alphanumeric;
@@ -78,6 +78,35 @@ fn test_crypto_fs_write() {
     crypto_fs_write("/test.dat");
     let long_name = random_alphanumeric_string(300);
     crypto_fs_write("/".to_string() + long_name.as_str());
+}
+
+#[test]
+fn test_crypto_fs_sparse_write_and_read() {
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    let file_path = "/sparse.dat";
+    let mut file = crypto_fs.create_file(file_path).unwrap();
+
+    let offset = (FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64 * 2) + 123;
+    let payload = b"after-gap";
+
+    file.seek(std::io::SeekFrom::Start(offset)).unwrap();
+    file.write_all(payload).unwrap();
+    file.flush().unwrap();
+    drop(file);
+
+    let mut reader = crypto_fs.open_file(file_path, OpenOptions::new()).unwrap();
+
+    let mut data = Vec::new();
+    reader.read_to_end(&mut data).unwrap();
+
+    assert_eq!(data.len(), offset as usize + payload.len());
+    assert!(data[..offset as usize].iter().all(|&b| b == 0));
+    assert_eq!(&data[offset as usize..], payload);
 }
 
 fn crypto_fs_write<P: AsRef<Path>>(filename: P) {

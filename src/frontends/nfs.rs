@@ -140,10 +140,24 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             .get_path_from_handle(&handle)
             .ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        match self.crypto_fs.metadata(&path) {
-            Ok(metadata) => Ok(self.metadata_to_fattr3(metadata, handle)),
-            Err(_) => Err(nfsstat3::NFS3ERR_IO),
+        let mut metadata = self
+            .crypto_fs
+            .metadata(&path)
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+        // For files, get the actual cleartext size by opening and seeking
+        if !metadata.is_dir {
+            if let Ok(mut file) = self
+                .crypto_fs
+                .open_file(&path, *OpenOptions::new().read(true))
+            {
+                if let Ok(size) = file.seek(SeekFrom::End(0)) {
+                    metadata.len = size;
+                }
+            }
         }
+
+        Ok(self.metadata_to_fattr3(metadata, handle))
     }
 
     async fn setattr(&self, handle: u64, sattr: sattr3) -> Result<fattr3, nfsstat3> {
@@ -211,6 +225,12 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
                 nfsstat3::NFS3ERR_IO
             })?;
 
+        // Get the cleartext file size
+        let file_size = file.seek(SeekFrom::End(0)).map_err(|e| {
+            error!("Failed to get file size: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?;
+
         file.seek(SeekFrom::Start(offset)).map_err(|e| {
             error!("Failed to seek: {:?}", e);
             nfsstat3::NFS3ERR_IO
@@ -223,7 +243,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         })?;
 
         buffer.truncate(bytes_read);
-        let eof = (offset + bytes_read as u64) >= metadata.len;
+        let eof = (offset + bytes_read as u64) >= file_size;
 
         Ok((buffer, eof))
     }
@@ -263,10 +283,24 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             nfsstat3::NFS3ERR_IO
         })?;
 
-        let metadata = self
+        // Get the actual file size by seeking to the end (this gives us the cleartext size)
+        let file_size = file.seek(SeekFrom::End(0)).map_err(|e| {
+            error!("Failed to get file size: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?;
+
+        // Explicitly drop the file to ensure it's closed and flushed before getting metadata
+        drop(file);
+
+        // Get metadata and update the size to the cleartext size
+        let mut metadata = self
             .crypto_fs
             .metadata(&path)
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+        // Override the size with the cleartext size we got from seeking
+        metadata.len = file_size;
+
         Ok(self.metadata_to_fattr3(metadata, handle))
     }
 
@@ -285,16 +319,22 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         let file_path = dir_path.join(name_str.as_ref());
 
-        self.crypto_fs.create_file(&file_path).map_err(|e| {
+        let file = self.crypto_fs.create_file(&file_path).map_err(|e| {
             error!("Failed to create file: {:?}", e);
             nfsstat3::NFS3ERR_IO
         })?;
 
+        // Explicitly drop the file to ensure it's closed and flushed
+        drop(file);
+
         let handle = self.get_or_create_handle(file_path.clone());
-        let metadata = self
+        let mut metadata = self
             .crypto_fs
             .metadata(&file_path)
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+        // Newly created files have 0 cleartext size even though they have encrypted headers
+        metadata.len = 0;
 
         Ok((handle, self.metadata_to_fattr3(metadata, handle)))
     }

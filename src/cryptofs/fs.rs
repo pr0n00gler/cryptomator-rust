@@ -851,7 +851,8 @@ impl Write for CryptoFsFile {
             self.rfs_file.seek(SeekFrom::Start(
                 (chunk_idx * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
             ))?;
-            self.rfs_file.write_all(&encrypted_buffer[..encrypted_len])?;
+            self.rfs_file
+                .write_all(&encrypted_buffer[..encrypted_len])?;
             self.chunk_cache.insert(chunk_idx, chunk_data.into());
 
             known_cleartext_size += fill_len;
@@ -864,7 +865,8 @@ impl Write for CryptoFsFile {
         while n < buf.len() {
             let chunk_index = self.current_pos / payload_len;
             let offset_in_chunk = (self.current_pos % payload_len) as usize;
-            let slice_len = (payload_len - offset_in_chunk as u64).min((buf.len() - n) as u64) as usize;
+            let slice_len =
+                (payload_len - offset_in_chunk as u64).min((buf.len() - n) as u64) as usize;
 
             let mut chunk = if chunk_index * payload_len < known_cleartext_size {
                 match self.read_chunk(chunk_index) {
@@ -903,7 +905,8 @@ impl Write for CryptoFsFile {
             self.rfs_file.seek(SeekFrom::Start(
                 (chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
             ))?;
-            self.rfs_file.write_all(&encrypted_buffer[..encrypted_len])?;
+            self.rfs_file
+                .write_all(&encrypted_buffer[..encrypted_len])?;
 
             self.current_pos += slice_len as u64;
             self.chunk_cache.insert(chunk_index, chunk.into());

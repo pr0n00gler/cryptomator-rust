@@ -568,5 +568,4 @@ pub mod tests {
 
         assert_eq!(raw_content_reader.get_ref(), decrypted_content.get_ref());
     }
-
 }

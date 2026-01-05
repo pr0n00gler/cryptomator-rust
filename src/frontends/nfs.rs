@@ -50,7 +50,7 @@ impl<FS: FileSystem> NfsServer<FS> {
         handle_map.get(handle).cloned()
     }
 
-    fn metadata_to_fattr3(&self, metadata: Metadata, handle: u64) -> fattr3 {
+    fn metadata_to_fattr3(metadata: Metadata, handle: u64) -> fattr3 {
         let size = metadata.len;
         let used = size;
 
@@ -117,6 +117,7 @@ impl<FS: FileSystem> NfsServer<FS> {
         }
     }
 
+    #[allow(dead_code)]
     fn apply_sattr3(&self, _metadata: &mut Metadata, _sattr: &sattr3) {
         // For now, we ignore attribute changes
         // In a full implementation, we would apply mode, uid, gid, size, and time changes
@@ -140,24 +141,23 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             .get_path_from_handle(&handle)
             .ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        let mut metadata = self
-            .crypto_fs
-            .metadata(&path)
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        let crypto_fs = self.crypto_fs.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut metadata = crypto_fs.metadata(&path).map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
-        // For files, get the actual cleartext size by opening and seeking
-        if !metadata.is_dir {
-            if let Ok(mut file) = self
-                .crypto_fs
-                .open_file(&path, *OpenOptions::new().read(true))
-            {
-                if let Ok(size) = file.seek(SeekFrom::End(0)) {
-                    metadata.len = size;
+            // For files, get the actual cleartext size by opening and seeking
+            if !metadata.is_dir {
+                if let Ok(mut file) = crypto_fs.open_file(&path, *OpenOptions::new().read(true)) {
+                    if let Ok(size) = file.seek(SeekFrom::End(0)) {
+                        metadata.len = size;
+                    }
                 }
             }
-        }
 
-        Ok(self.metadata_to_fattr3(metadata, handle))
+            Ok(NfsServer::<FS>::metadata_to_fattr3(metadata, handle))
+        })
+        .await
+        .unwrap()
     }
 
     async fn setattr(&self, handle: u64, sattr: sattr3) -> Result<fattr3, nfsstat3> {
@@ -167,26 +167,43 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             .get_path_from_handle(&handle)
             .ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        match self.crypto_fs.metadata(&path) {
-            Ok(mut metadata) => {
-                self.apply_sattr3(&mut metadata, &sattr);
-                Ok(self.metadata_to_fattr3(metadata, handle))
+        let crypto_fs = self.crypto_fs.clone();
+        tokio::task::spawn_blocking(move || {
+            match crypto_fs.metadata(&path) {
+                Ok(metadata) => {
+                    // In a full implementation, we would apply mode, uid, gid, size, and time changes
+                    // For now, we ignore attribute changes
+                    // self.apply_sattr3(&mut metadata, &sattr);
+                    Ok(NfsServer::<FS>::metadata_to_fattr3(metadata, handle))
+                }
+                Err(_) => Err(nfsstat3::NFS3ERR_IO),
             }
-            Err(_) => Err(nfsstat3::NFS3ERR_IO),
-        }
+        })
+        .await
+        .unwrap()
     }
 
     async fn lookup(&self, dir_handle: u64, name: &nfsstring) -> Result<u64, nfsstat3> {
-        let name_str = String::from_utf8_lossy(name);
+        let name_str = String::from_utf8_lossy(name).to_string(); // Clone to move into block
         debug!("NFS LOOKUP: dir_handle={}, name={}", dir_handle, name_str);
 
         let dir_path = self
             .get_path_from_handle(&dir_handle)
             .ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        let file_path = dir_path.join(name_str.as_ref());
+        let crypto_fs = self.crypto_fs.clone();
+        let file_path = dir_path.join(&name_str);
 
-        if self.crypto_fs.exists(&file_path) {
+        // We need to return handle, which requires self interaction (handle_map).
+        // Since get_or_create_handle hits a mutex, it is blocking but fast (memory only).
+        // However, crypto_fs.exists is blocking I/O.
+
+        let exists = tokio::task::spawn_blocking(move || crypto_fs.exists(&file_path))
+            .await
+            .unwrap();
+
+        if exists {
+            let file_path = dir_path.join(name_str);
             Ok(self.get_or_create_handle(file_path))
         } else {
             Err(nfsstat3::NFS3ERR_NOENT)
@@ -208,44 +225,45 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             .get_path_from_handle(&handle)
             .ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        let metadata = self
-            .crypto_fs
-            .metadata(&path)
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        let crypto_fs = self.crypto_fs.clone();
+        tokio::task::spawn_blocking(move || {
+            let metadata = crypto_fs.metadata(&path).map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
-        if metadata.is_dir {
-            return Err(nfsstat3::NFS3ERR_ISDIR);
-        }
+            if metadata.is_dir {
+                return Err(nfsstat3::NFS3ERR_ISDIR);
+            }
 
-        let mut file = self
-            .crypto_fs
-            .open_file(&path, *OpenOptions::new().read(true))
-            .map_err(|e| {
-                error!("Failed to open file for read: {:?}", e);
+            let mut file = crypto_fs
+                .open_file(&path, *OpenOptions::new().read(true))
+                .map_err(|e| {
+                    error!("Failed to open file for read: {:?}", e);
+                    nfsstat3::NFS3ERR_IO
+                })?;
+
+            // Get the cleartext file size
+            let file_size = file.seek(SeekFrom::End(0)).map_err(|e| {
+                error!("Failed to get file size: {:?}", e);
                 nfsstat3::NFS3ERR_IO
             })?;
 
-        // Get the cleartext file size
-        let file_size = file.seek(SeekFrom::End(0)).map_err(|e| {
-            error!("Failed to get file size: {:?}", e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+            file.seek(SeekFrom::Start(offset)).map_err(|e| {
+                error!("Failed to seek: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })?;
 
-        file.seek(SeekFrom::Start(offset)).map_err(|e| {
-            error!("Failed to seek: {:?}", e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+            let mut buffer = vec![0u8; count as usize];
+            let bytes_read = file.read(&mut buffer).map_err(|e| {
+                error!("Failed to read: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })?;
 
-        let mut buffer = vec![0u8; count as usize];
-        let bytes_read = file.read(&mut buffer).map_err(|e| {
-            error!("Failed to read: {:?}", e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+            buffer.truncate(bytes_read);
+            let eof = (offset + bytes_read as u64) >= file_size;
 
-        buffer.truncate(bytes_read);
-        let eof = (offset + bytes_read as u64) >= file_size;
-
-        Ok((buffer, eof))
+            Ok((buffer, eof))
+        })
+        .await
+        .unwrap()
     }
 
     async fn write(&self, handle: u64, offset: u64, data: &[u8]) -> Result<fattr3, nfsstat3> {
@@ -260,48 +278,51 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             .get_path_from_handle(&handle)
             .ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        let mut file = self
-            .crypto_fs
-            .open_file(&path, *OpenOptions::new().write(true).read(true))
-            .map_err(|e| {
-                error!("Failed to open file for write: {:?}", e);
+        let crypto_fs = self.crypto_fs.clone();
+        let data = data.to_vec(); // Need to own data to move it
+
+        tokio::task::spawn_blocking(move || {
+            let mut file = crypto_fs
+                .open_file(&path, *OpenOptions::new().write(true).read(true))
+                .map_err(|e| {
+                    error!("Failed to open file for write: {:?}", e);
+                    nfsstat3::NFS3ERR_IO
+                })?;
+
+            file.seek(SeekFrom::Start(offset)).map_err(|e| {
+                error!("Failed to seek: {:?}", e);
                 nfsstat3::NFS3ERR_IO
             })?;
 
-        file.seek(SeekFrom::Start(offset)).map_err(|e| {
-            error!("Failed to seek: {:?}", e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+            file.write_all(&data).map_err(|e| {
+                error!("Failed to write: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })?;
 
-        file.write_all(data).map_err(|e| {
-            error!("Failed to write: {:?}", e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+            file.flush().map_err(|e| {
+                error!("Failed to flush: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })?;
 
-        file.flush().map_err(|e| {
-            error!("Failed to flush: {:?}", e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+            // Get the actual file size by seeking to the end (this gives us the cleartext size)
+            let file_size = file.seek(SeekFrom::End(0)).map_err(|e| {
+                error!("Failed to get file size: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })?;
 
-        // Get the actual file size by seeking to the end (this gives us the cleartext size)
-        let file_size = file.seek(SeekFrom::End(0)).map_err(|e| {
-            error!("Failed to get file size: {:?}", e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+            // Explicitly drop the file to ensure it's closed and flushed before getting metadata
+            drop(file);
 
-        // Explicitly drop the file to ensure it's closed and flushed before getting metadata
-        drop(file);
+            // Get metadata and update the size to the cleartext size
+            let mut metadata = crypto_fs.metadata(&path).map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
-        // Get metadata and update the size to the cleartext size
-        let mut metadata = self
-            .crypto_fs
-            .metadata(&path)
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            // Override the size with the cleartext size we got from seeking
+            metadata.len = file_size;
 
-        // Override the size with the cleartext size we got from seeking
-        metadata.len = file_size;
-
-        Ok(self.metadata_to_fattr3(metadata, handle))
+            Ok(NfsServer::<FS>::metadata_to_fattr3(metadata, handle))
+        })
+        .await
+        .unwrap()
     }
 
     async fn create(
@@ -310,37 +331,45 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         name: &nfsstring,
         _sattr: sattr3,
     ) -> Result<(u64, fattr3), nfsstat3> {
-        let name_str = String::from_utf8_lossy(name);
+        let name_str = String::from_utf8_lossy(name).to_string();
         debug!("NFS CREATE: dir_handle={}, name={}", dir_handle, name_str);
 
         let dir_path = self
             .get_path_from_handle(&dir_handle)
             .ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        let file_path = dir_path.join(name_str.as_ref());
+        let crypto_fs = self.crypto_fs.clone();
+        let file_path = dir_path.join(&name_str);
+        // Clone for spawn_blocking
+        let file_path_clone = file_path.clone();
 
-        let file = self.crypto_fs.create_file(&file_path).map_err(|e| {
-            error!("Failed to create file: {:?}", e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+        let metadata = tokio::task::spawn_blocking(move || {
+            let file = crypto_fs.create_file(&file_path_clone).map_err(|e| {
+                error!("Failed to create file: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })?;
 
-        // Explicitly drop the file to ensure it's closed and flushed
-        drop(file);
+            // Explicitly drop the file to ensure it's closed and flushed
+            drop(file);
 
-        let handle = self.get_or_create_handle(file_path.clone());
-        let mut metadata = self
-            .crypto_fs
-            .metadata(&file_path)
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            let mut metadata = crypto_fs
+                .metadata(&file_path_clone)
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
-        // Newly created files have 0 cleartext size even though they have encrypted headers
-        metadata.len = 0;
+            // Newly created files have 0 cleartext size even though they have encrypted headers
+            metadata.len = 0;
+            Ok(metadata)
+        })
+        .await
+        .unwrap()?;
 
-        Ok((handle, self.metadata_to_fattr3(metadata, handle)))
+        let handle = self.get_or_create_handle(file_path);
+
+        Ok((handle, NfsServer::<FS>::metadata_to_fattr3(metadata, handle)))
     }
 
     async fn create_exclusive(&self, dir_handle: u64, name: &nfsstring) -> Result<u64, nfsstat3> {
-        let name_str = String::from_utf8_lossy(name);
+        let name_str = String::from_utf8_lossy(name).to_string();
         debug!(
             "NFS CREATE_EXCLUSIVE: dir_handle={}, name={}",
             dir_handle, name_str
@@ -350,42 +379,55 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             .get_path_from_handle(&dir_handle)
             .ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        let file_path = dir_path.join(name_str.as_ref());
+        let crypto_fs = self.crypto_fs.clone();
+        let file_path = dir_path.join(&name_str);
+        // Clone for spawn_blocking
+        let file_path_clone = file_path.clone();
 
-        if self.crypto_fs.exists(&file_path) {
-            return Err(nfsstat3::NFS3ERR_EXIST);
-        }
+        tokio::task::spawn_blocking(move || {
+            if crypto_fs.exists(&file_path_clone) {
+                return Err(nfsstat3::NFS3ERR_EXIST);
+            }
 
-        self.crypto_fs.create_file(&file_path).map_err(|e| {
-            error!("Failed to create file exclusively: {:?}", e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+            crypto_fs.create_file(&file_path_clone).map_err(|e| {
+                error!("Failed to create file exclusively: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })?;
+            Ok(())
+        })
+        .await
+        .unwrap()?;
 
         Ok(self.get_or_create_handle(file_path))
     }
 
     async fn mkdir(&self, dir_handle: u64, name: &nfsstring) -> Result<(u64, fattr3), nfsstat3> {
-        let name_str = String::from_utf8_lossy(name);
+        let name_str = String::from_utf8_lossy(name).to_string();
         debug!("NFS MKDIR: dir_handle={}, name={}", dir_handle, name_str);
 
         let dir_path = self
             .get_path_from_handle(&dir_handle)
             .ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        let new_dir_path = dir_path.join(name_str.as_ref());
+        let new_dir_path = dir_path.join(&name_str);
+        let crypto_fs = self.crypto_fs.clone();
+        let new_dir_path_clone = new_dir_path.clone();
 
-        self.crypto_fs.create_dir(&new_dir_path).map_err(|e| {
-            error!("Failed to create directory: {:?}", e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+        let metadata = tokio::task::spawn_blocking(move || {
+            crypto_fs.create_dir(&new_dir_path_clone).map_err(|e| {
+                error!("Failed to create directory: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })?;
 
-        let handle = self.get_or_create_handle(new_dir_path.clone());
-        let metadata = self
-            .crypto_fs
-            .metadata(&new_dir_path)
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            crypto_fs
+                .metadata(&new_dir_path_clone)
+                .map_err(|_| nfsstat3::NFS3ERR_IO)
+        })
+        .await
+        .unwrap()?;
 
-        Ok((handle, self.metadata_to_fattr3(metadata, handle)))
+        let handle = self.get_or_create_handle(new_dir_path);
+        Ok((handle, NfsServer::<FS>::metadata_to_fattr3(metadata, handle)))
     }
 
     async fn symlink(
@@ -400,19 +442,24 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
     }
 
     async fn remove(&self, dir_handle: u64, name: &nfsstring) -> Result<(), nfsstat3> {
-        let name_str = String::from_utf8_lossy(name);
+        let name_str = String::from_utf8_lossy(name).to_string();
         debug!("NFS REMOVE: dir_handle={}, name={}", dir_handle, name_str);
 
         let dir_path = self
             .get_path_from_handle(&dir_handle)
             .ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        let file_path = dir_path.join(name_str.as_ref());
+        let file_path = dir_path.join(&name_str);
+        let crypto_fs = self.crypto_fs.clone();
 
-        self.crypto_fs.remove_file(&file_path).map_err(|e| {
-            error!("Failed to remove file: {:?}", e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+        tokio::task::spawn_blocking(move || {
+            crypto_fs.remove_file(&file_path).map_err(|e| {
+                error!("Failed to remove file: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })
+        })
+        .await
+        .unwrap()?;
 
         Ok(())
     }
@@ -424,8 +471,8 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         to_dir: u64,
         to_name: &nfsstring,
     ) -> Result<(), nfsstat3> {
-        let from_name_str = String::from_utf8_lossy(from_name);
-        let to_name_str = String::from_utf8_lossy(to_name);
+        let from_name_str = String::from_utf8_lossy(from_name).to_string();
+        let to_name_str = String::from_utf8_lossy(to_name).to_string();
         debug!(
             "NFS RENAME: from_dir={}, from_name={}, to_dir={}, to_name={}",
             from_dir, from_name_str, to_dir, to_name_str
@@ -438,23 +485,27 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             .get_path_from_handle(&to_dir)
             .ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        let from_path = from_dir_path.join(from_name_str.as_ref());
-        let to_path = to_dir_path.join(to_name_str.as_ref());
+        let from_path = from_dir_path.join(&from_name_str);
+        let to_path = to_dir_path.join(&to_name_str);
+        let crypto_fs = self.crypto_fs.clone();
 
-        let metadata = self
-            .crypto_fs
-            .metadata(&from_path)
-            .map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
+        tokio::task::spawn_blocking(move || {
+            let metadata = crypto_fs
+                .metadata(&from_path)
+                .map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
 
-        if metadata.is_dir {
-            self.crypto_fs.move_dir(&from_path, &to_path)
-        } else {
-            self.crypto_fs.move_file(&from_path, &to_path)
-        }
-        .map_err(|e| {
-            error!("Failed to rename: {:?}", e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+            if metadata.is_dir {
+                crypto_fs.move_dir(&from_path, &to_path)
+            } else {
+                crypto_fs.move_file(&from_path, &to_path)
+            }
+            .map_err(|e| {
+                error!("Failed to rename: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })
+        })
+        .await
+        .unwrap()?;
 
         Ok(())
     }
@@ -474,10 +525,25 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             .get_path_from_handle(&handle)
             .ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        let entries = self.crypto_fs.read_dir(&path).map_err(|e| {
-            error!("Failed to read directory: {:?}", e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+        let crypto_fs = self.crypto_fs.clone();
+
+        // Split readdir into two parts: reading entries (blocking) and processing them (requires self interaction for handle map which is just mutex)
+        // Wait, self.get_or_create_handle uses a Mutex, which is std::sync::Mutex, so it blocks the thread.
+        // It's just memory lookup, so it's fast. But strict separation might be cleaner.
+        // However, we can't call self methods inside spawn_blocking easily unless we Arc<Self>.
+        // NfsServer is not Arced usually.
+
+        // Let's gather the entries first.
+
+        let path_clone = path.clone();
+        let entries = tokio::task::spawn_blocking(move || {
+            crypto_fs.read_dir(&path_clone).map_err(|e| {
+                error!("Failed to read directory: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            }).map(|iter| iter.collect::<Vec<_>>())
+        })
+        .await
+        .unwrap()?;
 
         let mut dirlist = Vec::new();
         let mut entry_count = 0;
@@ -502,28 +568,35 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             entry_count += 1;
         }
 
-        let dirlist = dirlist
-            .into_iter()
-            .map(|(fileid, name, _cookie)| {
-                // Get metadata for each entry to populate attr field
-                let entry_path = path.join(String::from_utf8_lossy(&name).as_ref());
-                let attr = if let Ok(metadata) = self.crypto_fs.metadata(&entry_path) {
-                    self.metadata_to_fattr3(metadata, fileid)
-                } else {
-                    // Default attributes if metadata fails
-                    fattr3::default()
-                };
+        // Now we need metadata for each entry. This is potentially N blocking calls.
 
-                DirEntry {
-                    fileid,
-                    name: nfsstring::from(name),
-                    attr,
-                }
-            })
-            .collect();
+        let crypto_fs = self.crypto_fs.clone();
+        // We can do this in parallel or sequential in blocking block.
+        // Since we need to return Result, let's do one big blocking block for metadata fetches.
+
+        // We need to map dirlist -> DirEntry.
+        // We have fileid, name, cookie.
+
+        let path_clone = path.clone();
+        let dirlist_with_meta = tokio::task::spawn_blocking(move || {
+            dirlist.into_iter().map(|(fileid, name, _cookie)| {
+                 let entry_path = path_clone.join(String::from_utf8_lossy(&name).as_ref());
+                 let attr = if let Ok(metadata) = crypto_fs.metadata(&entry_path) {
+                     NfsServer::<FS>::metadata_to_fattr3(metadata, fileid)
+                 } else {
+                     fattr3::default()
+                 };
+
+                 DirEntry {
+                     fileid,
+                     name: nfsstring::from(name),
+                     attr,
+                 }
+            }).collect::<Vec<_>>()
+        }).await.unwrap();
 
         Ok(ReadDirResult {
-            entries: dirlist,
+            entries: dirlist_with_meta,
             end: entry_count < max_entries,
         })
     }

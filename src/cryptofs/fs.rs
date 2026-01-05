@@ -557,6 +557,9 @@ pub struct CryptoFsFile {
 
     /// Stores the most frequently used chunks of the file to decrease read operations
     chunk_cache: LruCache<u64, Arc<[u8]>>,
+
+    /// Buffer for reading chunks to avoid repeated allocations
+    read_buffer: Vec<u8>,
 }
 
 impl CryptoFsFile {
@@ -584,6 +587,7 @@ impl CryptoFsFile {
             header,
             metadata,
             chunk_cache: LruCache::new(CHUNK_CACHE_CAP),
+            read_buffer: Vec::with_capacity(FILE_CHUNK_LENGTH),
         })
     }
 
@@ -607,6 +611,7 @@ impl CryptoFsFile {
             header,
             metadata,
             chunk_cache: LruCache::new(CHUNK_CACHE_CAP),
+            read_buffer: Vec::with_capacity(FILE_CHUNK_LENGTH),
         })
     }
 
@@ -643,8 +648,9 @@ impl CryptoFsFile {
         self.rfs_file.seek(SeekFrom::Start(
             (chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
         ))?;
-        let mut chunk = vec![0u8; FILE_CHUNK_LENGTH];
-        let read_bytes = self.rfs_file.read(&mut chunk)?;
+
+        self.read_buffer.resize(FILE_CHUNK_LENGTH, 0);
+        let read_bytes = self.rfs_file.read(&mut self.read_buffer)?;
 
         let payload_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
         let cleartext_size = calculate_cleartext_size(self.metadata.len);
@@ -662,7 +668,7 @@ impl CryptoFsFile {
             return Ok(zero_chunk);
         }
 
-        let chunk_slice = &chunk[..read_bytes];
+        let chunk_slice = &self.read_buffer[..read_bytes];
         let min_chunk_len = FILE_CHUNK_CONTENT_NONCE_LENGTH + FILE_CHUNK_CONTENT_MAC_LENGTH;
         let mut effective_len = chunk_slice.len();
 

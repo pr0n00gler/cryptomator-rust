@@ -54,16 +54,18 @@ fn bench_encrypt_chunk(c: &mut Criterion) {
     for (size, chunk) in &inputs {
         group.throughput(Throughput::Bytes(*size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), chunk, |b, chunk| {
+            let mut output = vec![0u8; FILE_CHUNK_LENGTH];
             b.iter(|| {
-                let encrypted = cryptor
+                let len = cryptor
                     .encrypt_chunk(
                         &header_nonce,
                         &file_key,
                         BENCH_CHUNK_NUMBER,
                         chunk.as_slice(),
+                        &mut output,
                     )
                     .expect("failed to encrypt chunk");
-                black_box(encrypted);
+                black_box(&output[..len]);
             });
         });
     }
@@ -80,14 +82,17 @@ fn bench_decrypt_chunk(c: &mut Criterion) {
         .iter()
         .map(|&size| {
             let plain = make_chunk_data(size);
-            let encrypted = cryptor
+            let mut encrypted = vec![0u8; FILE_CHUNK_LENGTH];
+            let len = cryptor
                 .encrypt_chunk(
                     &header_nonce,
                     &file_key,
                     BENCH_CHUNK_NUMBER,
                     plain.as_slice(),
+                    &mut encrypted,
                 )
                 .expect("failed to encrypt chunk");
+            encrypted.truncate(len);
             (size, encrypted)
         })
         .collect();
@@ -96,16 +101,18 @@ fn bench_decrypt_chunk(c: &mut Criterion) {
     for (size, chunk) in &encrypted_inputs {
         group.throughput(Throughput::Bytes(*size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), chunk, |b, chunk| {
+            let mut output = vec![0u8; FILE_CHUNK_LENGTH];
             b.iter(|| {
-                let decrypted = cryptor
+                let len = cryptor
                     .decrypt_chunk(
                         &header_nonce,
                         &file_key,
                         BENCH_CHUNK_NUMBER,
                         chunk.as_slice(),
+                        &mut output,
                     )
                     .expect("failed to decrypt chunk");
-                black_box(decrypted);
+                black_box(&output[..len]);
             });
         });
     }

@@ -143,18 +143,9 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         let crypto_fs = self.crypto_fs.clone();
         tokio::task::spawn_blocking(move || {
-            let mut metadata = crypto_fs
+            let metadata = crypto_fs
                 .metadata(&path)
                 .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-
-            // For files, get the actual cleartext size by opening and seeking
-            if !metadata.is_dir {
-                if let Ok(mut file) = crypto_fs.open_file(&path, *OpenOptions::new().read(true)) {
-                    if let Ok(size) = file.seek(SeekFrom::End(0)) {
-                        metadata.len = size;
-                    }
-                }
-            }
 
             Ok(NfsServer::<FS>::metadata_to_fattr3(metadata, handle))
         })
@@ -308,22 +299,13 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
                 nfsstat3::NFS3ERR_IO
             })?;
 
-            // Get the actual file size by seeking to the end (this gives us the cleartext size)
-            let file_size = file.seek(SeekFrom::End(0)).map_err(|e| {
-                error!("Failed to get file size: {:?}", e);
-                nfsstat3::NFS3ERR_IO
-            })?;
-
             // Explicitly drop the file to ensure it's closed and flushed before getting metadata
             drop(file);
 
-            // Get metadata and update the size to the cleartext size
-            let mut metadata = crypto_fs
+            // Get metadata
+            let metadata = crypto_fs
                 .metadata(&path)
                 .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-
-            // Override the size with the cleartext size we got from seeking
-            metadata.len = file_size;
 
             Ok(NfsServer::<FS>::metadata_to_fattr3(metadata, handle))
         })

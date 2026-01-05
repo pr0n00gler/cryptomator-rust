@@ -82,15 +82,8 @@ impl DavFile for DFile {
         let crypto_fs_file = self.crypto_fs_file.clone();
         async move {
             tokio::task::spawn_blocking(move || {
-                let mut guard = crypto_fs_file.lock().unwrap();
-                let mut metadata = guard.metadata().unwrap();
-
-                // Get the actual cleartext size by seeking to the end
-                if !metadata.is_dir {
-                    if let Ok(size) = guard.seek(SeekFrom::End(0)) {
-                        metadata.len = size;
-                    }
-                }
+                let guard = crypto_fs_file.lock().unwrap();
+                let metadata = guard.metadata().unwrap();
 
                 Ok(Box::new(metadata) as Box<dyn DavMetaData>)
             })
@@ -267,18 +260,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
 
         async move {
             tokio::task::spawn_blocking(move || {
-                let mut metadata = crypto_fs.metadata(&path_buf)?;
-
-                // For files, get the actual cleartext size by opening and seeking
-                if !metadata.is_dir {
-                    if let Ok(mut file) =
-                        crypto_fs.open_file(&path_buf, *cryptoOpenOptions::new().read(true))
-                    {
-                        if let Ok(size) = file.seek(SeekFrom::End(0)) {
-                            metadata.len = size;
-                        }
-                    }
-                }
+                let metadata = crypto_fs.metadata(&path_buf)?;
 
                 Ok(Box::new(metadata) as Box<dyn DavMetaData>)
             })

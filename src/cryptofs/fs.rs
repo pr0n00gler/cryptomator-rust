@@ -520,13 +520,20 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
 
     pub fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
-        if real_path.is_shorten {
+        let mut metadata = if real_path.is_shorten {
             let contents_file = real_path.full_path.join(CONTENTS_FILENAME);
             if self.file_system_provider.exists(&contents_file) {
-                return Ok(self.file_system_provider.metadata(&contents_file)?);
+                self.file_system_provider.metadata(&contents_file)?
+            } else {
+                self.file_system_provider.metadata(real_path)?
             }
+        } else {
+            self.file_system_provider.metadata(real_path)?
+        };
+        if !metadata.is_dir {
+            metadata.len = calculate_cleartext_size(metadata.len);
         }
-        Ok(self.file_system_provider.metadata(real_path)?)
+        Ok(metadata)
     }
 
     pub fn stats<P: AsRef<Path>>(&self, path: P) -> Result<Stats, FileSystemError> {
@@ -579,7 +586,10 @@ impl CryptoFsFile {
         reader.read_exact(&mut encrypted_header)?;
 
         let header = cryptor.decrypt_file_header(&encrypted_header)?;
-        let metadata = reader.metadata()?;
+        let mut metadata = reader.metadata()?;
+        if !metadata.is_dir {
+            metadata.len = calculate_cleartext_size(metadata.len);
+        }
         Ok(CryptoFsFile {
             cryptor,
             rfs_file: reader,
@@ -603,7 +613,10 @@ impl CryptoFsFile {
         let encrypted_header = cryptor.encrypt_file_header(&header)?;
         rfs_file.write_all(encrypted_header.as_slice())?;
         rfs_file.flush()?;
-        let metadata = rfs_file.metadata()?;
+        let mut metadata = rfs_file.metadata()?;
+        if !metadata.is_dir {
+            metadata.len = calculate_cleartext_size(metadata.len);
+        }
         Ok(CryptoFsFile {
             cryptor,
             rfs_file,
@@ -634,7 +647,7 @@ impl CryptoFsFile {
     /// Updates metadata according to a real file
     fn update_metadata(&mut self) -> Result<(), FileSystemError> {
         self.metadata = self.rfs_file.metadata()?;
-        self.metadata.len = self.real_file_size()?;
+        self.metadata.len = self.file_size()?;
         Ok(())
     }
 
@@ -685,15 +698,18 @@ impl CryptoFsFile {
             return Ok(zero_chunk);
         }
 
+
+        let mut decrypted_buffer = vec![0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH];
         let decrypt_attempt = self.cryptor.decrypt_chunk(
             &self.header.nonce,
             &self.header.payload.content_key,
             chunk_index,
             &chunk_slice[..effective_len],
+            &mut decrypted_buffer,
         );
 
-        let decrypted_chunk = match decrypt_attempt {
-            Ok(data) => data,
+        let decrypted_len = match decrypt_attempt {
+            Ok(len) => len,
             Err(err) => {
                 if effective_len != chunk_slice.len() {
                     match self.cryptor.decrypt_chunk(
@@ -701,8 +717,9 @@ impl CryptoFsFile {
                         &self.header.payload.content_key,
                         chunk_index,
                         chunk_slice,
+                        &mut decrypted_buffer,
                     ) {
-                        Ok(data) => data,
+                        Ok(len) => len,
                         Err(_) => {
                             error!(chunk_index, "Failed to decrypt chunk: {:?}", err);
                             return Err(err.into());
@@ -715,7 +732,8 @@ impl CryptoFsFile {
             }
         };
 
-        let decrypted_chunk = Arc::<[u8]>::from(decrypted_chunk);
+        decrypted_buffer.truncate(decrypted_len);
+        let decrypted_chunk = Arc::<[u8]>::from(decrypted_buffer.into_boxed_slice());
 
         self.chunk_cache
             .insert(chunk_index, Arc::clone(&decrypted_chunk));
@@ -818,6 +836,9 @@ impl Write for CryptoFsFile {
         };
 
         let mut n: usize = 0;
+        let mut encrypted_buffer = vec![0u8; FILE_CHUNK_LENGTH];
+        let zero_plain = vec![0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH];
+
         while n < buf.len() {
             let offset_in_chunk = (self.current_pos % payload_len) as usize;
             let available_in_chunk = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH - offset_in_chunk;
@@ -834,14 +855,14 @@ impl Write for CryptoFsFile {
                     break;
                 }
 
-                let zero_plain = vec![0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH];
-                let encrypted_zero = match self.cryptor.encrypt_chunk(
+                let encrypted_len = match self.cryptor.encrypt_chunk(
                     &self.header.nonce,
                     &self.header.payload.content_key,
                     missing_index,
                     &zero_plain,
+                    &mut encrypted_buffer,
                 ) {
-                    Ok(c) => c,
+                    Ok(len) => len,
                     Err(e) => {
                         error!("Failed to encrypt zero chunk: {:?}", e);
                         return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
@@ -851,9 +872,9 @@ impl Write for CryptoFsFile {
                 self.rfs_file.seek(SeekFrom::Start(
                     (missing_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
                 ))?;
-                self.rfs_file.write_all(&encrypted_zero)?;
+                self.rfs_file.write_all(&encrypted_buffer[..encrypted_len])?;
 
-                let zero_arc: Arc<[u8]> = Arc::from(zero_plain.into_boxed_slice());
+                let zero_arc: Arc<[u8]> = Arc::from(zero_plain.clone().into_boxed_slice());
                 self.chunk_cache.insert(missing_index, zero_arc);
 
                 known_cleartext_size += payload_len;
@@ -893,13 +914,14 @@ impl Write for CryptoFsFile {
                 .copy_from_slice(&buf[n..n + slice_len]);
             n += slice_len;
 
-            let encrypted_chunk = match self.cryptor.encrypt_chunk(
+            let encrypted_len = match self.cryptor.encrypt_chunk(
                 &self.header.nonce,
                 &self.header.payload.content_key,
                 chunk_index,
                 &chunk,
+                &mut encrypted_buffer,
             ) {
-                Ok(c) => c,
+                Ok(len) => len,
                 Err(e) => {
                     error!("Failed to encrypt chunk: {:?}", e);
                     return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
@@ -909,7 +931,7 @@ impl Write for CryptoFsFile {
             self.rfs_file.seek(SeekFrom::Start(
                 (chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
             ))?;
-            self.rfs_file.write_all(&encrypted_chunk)?;
+            self.rfs_file.write_all(&encrypted_buffer[..encrypted_len])?;
 
             self.current_pos += slice_len as u64;
 

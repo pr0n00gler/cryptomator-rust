@@ -143,7 +143,9 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         let crypto_fs = self.crypto_fs.clone();
         tokio::task::spawn_blocking(move || {
-            let mut metadata = crypto_fs.metadata(&path).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            let mut metadata = crypto_fs
+                .metadata(&path)
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
             // For files, get the actual cleartext size by opening and seeking
             if !metadata.is_dir {
@@ -227,7 +229,9 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         let crypto_fs = self.crypto_fs.clone();
         tokio::task::spawn_blocking(move || {
-            let metadata = crypto_fs.metadata(&path).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            let metadata = crypto_fs
+                .metadata(&path)
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
             if metadata.is_dir {
                 return Err(nfsstat3::NFS3ERR_ISDIR);
@@ -314,7 +318,9 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             drop(file);
 
             // Get metadata and update the size to the cleartext size
-            let mut metadata = crypto_fs.metadata(&path).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            let mut metadata = crypto_fs
+                .metadata(&path)
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
             // Override the size with the cleartext size we got from seeking
             metadata.len = file_size;
@@ -365,7 +371,10 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         let handle = self.get_or_create_handle(file_path);
 
-        Ok((handle, NfsServer::<FS>::metadata_to_fattr3(metadata, handle)))
+        Ok((
+            handle,
+            NfsServer::<FS>::metadata_to_fattr3(metadata, handle),
+        ))
     }
 
     async fn create_exclusive(&self, dir_handle: u64, name: &nfsstring) -> Result<u64, nfsstat3> {
@@ -427,7 +436,10 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         .unwrap()?;
 
         let handle = self.get_or_create_handle(new_dir_path);
-        Ok((handle, NfsServer::<FS>::metadata_to_fattr3(metadata, handle)))
+        Ok((
+            handle,
+            NfsServer::<FS>::metadata_to_fattr3(metadata, handle),
+        ))
     }
 
     async fn symlink(
@@ -537,10 +549,13 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         let path_clone = path.clone();
         let entries = tokio::task::spawn_blocking(move || {
-            crypto_fs.read_dir(&path_clone).map_err(|e| {
-                error!("Failed to read directory: {:?}", e);
-                nfsstat3::NFS3ERR_IO
-            }).map(|iter| iter.collect::<Vec<_>>())
+            crypto_fs
+                .read_dir(&path_clone)
+                .map_err(|e| {
+                    error!("Failed to read directory: {:?}", e);
+                    nfsstat3::NFS3ERR_IO
+                })
+                .map(|iter| iter.collect::<Vec<_>>())
         })
         .await
         .unwrap()?;
@@ -579,21 +594,26 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         let path_clone = path.clone();
         let dirlist_with_meta = tokio::task::spawn_blocking(move || {
-            dirlist.into_iter().map(|(fileid, name, _cookie)| {
-                 let entry_path = path_clone.join(String::from_utf8_lossy(&name).as_ref());
-                 let attr = if let Ok(metadata) = crypto_fs.metadata(&entry_path) {
-                     NfsServer::<FS>::metadata_to_fattr3(metadata, fileid)
-                 } else {
-                     fattr3::default()
-                 };
+            dirlist
+                .into_iter()
+                .map(|(fileid, name, _cookie)| {
+                    let entry_path = path_clone.join(String::from_utf8_lossy(&name).as_ref());
+                    let attr = if let Ok(metadata) = crypto_fs.metadata(&entry_path) {
+                        NfsServer::<FS>::metadata_to_fattr3(metadata, fileid)
+                    } else {
+                        fattr3::default()
+                    };
 
-                 DirEntry {
-                     fileid,
-                     name: nfsstring::from(name),
-                     attr,
-                 }
-            }).collect::<Vec<_>>()
-        }).await.unwrap();
+                    DirEntry {
+                        fileid,
+                        name: nfsstring::from(name),
+                        attr,
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap();
 
         Ok(ReadDirResult {
             entries: dirlist_with_meta,

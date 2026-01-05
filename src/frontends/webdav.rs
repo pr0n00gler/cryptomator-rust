@@ -204,9 +204,10 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
                     return Err(FsError::Exists);
                 }
                 if (create || create_new) && !exists {
-                    return Ok(Box::new(DFile::new(Box::new(
-                        crypto_fs.create_file(&path_buf)?,
-                    ))) as Box<dyn DavFile>);
+                    return Ok(
+                        Box::new(DFile::new(Box::new(crypto_fs.create_file(&path_buf)?)))
+                            as Box<dyn DavFile>,
+                    );
                 }
                 Ok(Box::new(DFile::new(Box::new(
                     crypto_fs.open_file(
@@ -245,16 +246,16 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
                 // The return type is Result<FsStream...>.
 
                 let collected_entries: Vec<Box<dyn DavDirEntry>> = entries
-                        .map(|e| Box::new(e) as Box<dyn DavDirEntry>)
-                        .collect();
+                    .map(|e| Box::new(e) as Box<dyn DavDirEntry>)
+                    .collect();
 
                 Ok(collected_entries)
             })
             .await
             .unwrap()
             .map(|collected_entries| {
-               let strm = futures::stream::iter(collected_entries);
-               Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>
+                let strm = futures::stream::iter(collected_entries);
+                Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>
             })
         }
         .boxed()
@@ -270,8 +271,8 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
 
                 // For files, get the actual cleartext size by opening and seeking
                 if !metadata.is_dir {
-                    if let Ok(mut file) = crypto_fs
-                        .open_file(&path_buf, *cryptoOpenOptions::new().read(true))
+                    if let Ok(mut file) =
+                        crypto_fs.open_file(&path_buf, *cryptoOpenOptions::new().read(true))
                     {
                         if let Ok(size) = file.seek(SeekFrom::End(0)) {
                             metadata.len = size;
@@ -292,8 +293,8 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         let path_buf = path.as_pathbuf();
         async move {
             tokio::task::spawn_blocking(move || Ok(crypto_fs.create_dir(path_buf)?))
-            .await
-            .unwrap()
+                .await
+                .unwrap()
         }
         .boxed()
     }
@@ -303,8 +304,8 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         let path_buf = path.as_pathbuf();
         async move {
             tokio::task::spawn_blocking(move || Ok(crypto_fs.remove_dir(path_buf)?))
-            .await
-            .unwrap()
+                .await
+                .unwrap()
         }
         .boxed()
     }
@@ -314,8 +315,8 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         let path_buf = path.as_pathbuf();
         async move {
             tokio::task::spawn_blocking(move || Ok(crypto_fs.remove_file(path_buf)?))
-            .await
-            .unwrap()
+                .await
+                .unwrap()
         }
         .boxed()
     }
@@ -329,11 +330,9 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
             tokio::task::spawn_blocking(move || {
                 let from_metadata = crypto_fs.metadata(&from_buf)?;
                 if from_metadata.is_dir {
-                    return Ok(crypto_fs
-                        .move_dir(&from_buf, &to_buf)?);
+                    return Ok(crypto_fs.move_dir(&from_buf, &to_buf)?);
                 }
-                Ok(crypto_fs
-                    .move_file(&from_buf, &to_buf)?)
+                Ok(crypto_fs.move_file(&from_buf, &to_buf)?)
             })
             .await
             .unwrap()
@@ -347,12 +346,9 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         let to_buf = to.as_pathbuf();
 
         async move {
-            tokio::task::spawn_blocking(move || {
-                Ok(crypto_fs
-                    .copy_file(from_buf, to_buf)?)
-            })
-            .await
-            .unwrap()
+            tokio::task::spawn_blocking(move || Ok(crypto_fs.copy_file(from_buf, to_buf)?))
+                .await
+                .unwrap()
         }
         .boxed()
     }

@@ -9,6 +9,7 @@ use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+use tracing::{debug, error, info, instrument, warn};
 use webdav_handler::davpath::DavPath;
 use webdav_handler::fs::{
     DavDirEntry, DavFile, DavFileSystem, DavMetaData, FsError, FsFuture, FsResult, FsStream,
@@ -21,13 +22,22 @@ impl From<FileSystemError> for FsError {
             FileSystemError::PathDoesNotExist(_) => FsError::NotFound,
             FileSystemError::CryptoError(CryptoError::IoError(i)) => match i.kind() {
                 ErrorKind::NotFound => FsError::NotFound,
-                _ => FsError::GeneralFailure,
+                _ => {
+                    error!("WebDAV IO error (crypto): {:?}", i);
+                    FsError::GeneralFailure
+                }
             },
             FileSystemError::IoError(s) => match s.kind() {
                 ErrorKind::NotFound => FsError::NotFound,
-                _ => FsError::GeneralFailure,
+                _ => {
+                    error!("WebDAV IO error: {:?}", s);
+                    FsError::GeneralFailure
+                }
             },
-            _ => FsError::GeneralFailure,
+            e => {
+                error!("WebDAV filesystem error: {:?}", e);
+                FsError::GeneralFailure
+            }
         }
     }
 }
@@ -78,6 +88,7 @@ impl DFile {
 }
 
 impl DavFile for DFile {
+    #[instrument(skip(self))]
     fn metadata(&mut self) -> FsFuture<Box<dyn DavMetaData>> {
         let crypto_fs_file = self.crypto_fs_file.clone();
         async move {
@@ -93,12 +104,15 @@ impl DavFile for DFile {
         .boxed()
     }
 
+    #[instrument(skip(self, buf))]
     fn write_buf(&mut self, buf: Box<dyn Buf + Send>) -> FsFuture<'_, ()> {
         let crypto_fs_file = self.crypto_fs_file.clone();
         async move {
             tokio::task::spawn_blocking(move || {
+                let chunk = buf.chunk();
+                debug!("WebDAV write_buf: {} bytes", chunk.len());
                 let mut guard = crypto_fs_file.lock().unwrap();
-                Ok(guard.write_all(buf.chunk())?)
+                Ok(guard.write_all(chunk)?)
             })
             .await
             .unwrap()
@@ -106,10 +120,12 @@ impl DavFile for DFile {
         .boxed()
     }
 
+    #[instrument(skip(self, buf), fields(len = buf.len()))]
     fn write_bytes(&mut self, buf: Bytes) -> FsFuture<()> {
         let crypto_fs_file = self.crypto_fs_file.clone();
         async move {
             tokio::task::spawn_blocking(move || {
+                debug!("WebDAV write_bytes: {} bytes", buf.len());
                 let mut guard = crypto_fs_file.lock().unwrap();
                 Ok(guard.write_all(buf.as_ref())?)
             })
@@ -119,13 +135,16 @@ impl DavFile for DFile {
         .boxed()
     }
 
+    #[instrument(skip(self))]
     fn read_bytes(&mut self, count: usize) -> FsFuture<bytes::Bytes> {
         let crypto_fs_file = self.crypto_fs_file.clone();
         async move {
             tokio::task::spawn_blocking(move || {
+                debug!("WebDAV read_bytes: {} bytes", count);
                 let mut buf = vec![0u8; count];
                 let mut guard = crypto_fs_file.lock().unwrap();
-                guard.read_exact(buf.as_mut_slice())?;
+                let n = guard.read(buf.as_mut_slice())?;
+                buf.truncate(n);
                 Ok(bytes::Bytes::from(buf))
             })
             .await
@@ -134,10 +153,12 @@ impl DavFile for DFile {
         .boxed()
     }
 
+    #[instrument(skip(self))]
     fn seek(&mut self, pos: SeekFrom) -> FsFuture<u64> {
         let crypto_fs_file = self.crypto_fs_file.clone();
         async move {
             tokio::task::spawn_blocking(move || {
+                debug!("WebDAV seek: {:?}", pos);
                 let mut guard = crypto_fs_file.lock().unwrap();
                 Ok(guard.seek(pos)?)
             })
@@ -147,10 +168,12 @@ impl DavFile for DFile {
         .boxed()
     }
 
+    #[instrument(skip(self))]
     fn flush(&mut self) -> FsFuture<()> {
         let crypto_fs_file = self.crypto_fs_file.clone();
         async move {
             tokio::task::spawn_blocking(move || {
+                debug!("WebDAV flush");
                 let mut guard = crypto_fs_file.lock().unwrap();
                 Ok(guard.flush()?)
             })
@@ -173,6 +196,7 @@ impl<FS: 'static + FileSystem> WebDav<FS> {
 }
 
 impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
+    #[instrument(skip(self, options), fields(path = %path.as_url_string()))]
     fn open<'a>(
         &'a self,
         path: &'a DavPath,
@@ -192,6 +216,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
 
         async move {
             tokio::task::spawn_blocking(move || {
+                debug!("WebDAV open: {:?}", path_buf);
                 let exists = crypto_fs.exists(&path_buf);
                 if create_new && exists {
                     return Err(FsError::Exists);
@@ -221,6 +246,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         .boxed()
     }
 
+    #[instrument(skip(self, _meta), fields(path = %path.as_url_string()))]
     fn read_dir<'a>(
         &'a self,
         path: &'a DavPath,
@@ -231,6 +257,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
 
         async move {
             tokio::task::spawn_blocking(move || {
+                debug!("WebDAV read_dir: {:?}", path_buf);
                 let entries = crypto_fs.read_dir(&path_buf)?;
                 // We must collect entires here inside blocking block?
                 // entries is Iterator. map creates lazy iterator.
@@ -254,12 +281,14 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         .boxed()
     }
 
+    #[instrument(skip(self), fields(path = %path.as_url_string()))]
     fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
         let crypto_fs = self.crypto_fs.clone();
         let path_buf = path.as_pathbuf();
 
         async move {
             tokio::task::spawn_blocking(move || {
+                debug!("WebDAV metadata: {:?}", path_buf);
                 let metadata = crypto_fs.metadata(&path_buf)?;
 
                 Ok(Box::new(metadata) as Box<dyn DavMetaData>)
@@ -270,39 +299,52 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         .boxed()
     }
 
+    #[instrument(skip(self), fields(path = %path.as_url_string()))]
     fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         let crypto_fs = self.crypto_fs.clone();
         let path_buf = path.as_pathbuf();
         async move {
-            tokio::task::spawn_blocking(move || Ok(crypto_fs.create_dir(path_buf)?))
-                .await
-                .unwrap()
+            tokio::task::spawn_blocking(move || {
+                info!("WebDAV create_dir: {:?}", path_buf);
+                Ok(crypto_fs.create_dir(path_buf)?)
+            })
+            .await
+            .unwrap()
         }
         .boxed()
     }
 
+    #[instrument(skip(self), fields(path = %path.as_url_string()))]
     fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         let crypto_fs = self.crypto_fs.clone();
         let path_buf = path.as_pathbuf();
         async move {
-            tokio::task::spawn_blocking(move || Ok(crypto_fs.remove_dir(path_buf)?))
-                .await
-                .unwrap()
+            tokio::task::spawn_blocking(move || {
+                info!("WebDAV remove_dir: {:?}", path_buf);
+                Ok(crypto_fs.remove_dir(path_buf)?)
+            })
+            .await
+            .unwrap()
         }
         .boxed()
     }
 
+    #[instrument(skip(self), fields(path = %path.as_url_string()))]
     fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         let crypto_fs = self.crypto_fs.clone();
         let path_buf = path.as_pathbuf();
         async move {
-            tokio::task::spawn_blocking(move || Ok(crypto_fs.remove_file(path_buf)?))
-                .await
-                .unwrap()
+            tokio::task::spawn_blocking(move || {
+                info!("WebDAV remove_file: {:?}", path_buf);
+                Ok(crypto_fs.remove_file(path_buf)?)
+            })
+            .await
+            .unwrap()
         }
         .boxed()
     }
 
+    #[instrument(skip(self), fields(from = %from.as_url_string(), to = %to.as_url_string()))]
     fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         let crypto_fs = self.crypto_fs.clone();
         let from_buf = from.as_pathbuf();
@@ -310,6 +352,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
 
         async move {
             tokio::task::spawn_blocking(move || {
+                info!("WebDAV rename: {:?} -> {:?}", from_buf, to_buf);
                 let from_metadata = crypto_fs.metadata(&from_buf)?;
                 if from_metadata.is_dir {
                     return Ok(crypto_fs.move_dir(&from_buf, &to_buf)?);
@@ -322,23 +365,29 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         .boxed()
     }
 
+    #[instrument(skip(self), fields(from = %from.as_url_string(), to = %to.as_url_string()))]
     fn copy<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         let crypto_fs = self.crypto_fs.clone();
         let from_buf = from.as_pathbuf();
         let to_buf = to.as_pathbuf();
 
         async move {
-            tokio::task::spawn_blocking(move || Ok(crypto_fs.copy_file(from_buf, to_buf)?))
-                .await
-                .unwrap()
+            tokio::task::spawn_blocking(move || {
+                info!("WebDAV copy: {:?} -> {:?}", from_buf, to_buf);
+                Ok(crypto_fs.copy_file(from_buf, to_buf)?)
+            })
+            .await
+            .unwrap()
         }
         .boxed()
     }
 
+    #[instrument(skip(self))]
     fn get_quota(&self) -> FsFuture<(u64, Option<u64>)> {
         let crypto_fs = self.crypto_fs.clone();
         async move {
             tokio::task::spawn_blocking(move || {
+                debug!("WebDAV get_quota");
                 let stats = crypto_fs.stats(Path::new(&Component::RootDir))?;
                 Ok((
                     stats.total_space - stats.free_space,

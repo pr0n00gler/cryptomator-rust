@@ -1,0 +1,158 @@
+use crate::crypto::{
+    CipherCombo, Cryptor, MasterKey, MasterKeyJson, Vault, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE,
+    DEFAULT_SHORTENING_THRESHOLD,
+};
+use crate::cryptofs::{parent_path, CryptoFs, FileSystem, OpenOptions};
+use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use std::io::Write;
+use std::path::Path;
+use tracing::info;
+
+pub const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
+
+pub fn create_vault<FS, P>(
+    fs: FS,
+    vault_path: P,
+    full_storage_path: P,
+    password: &str,
+    scrypt_cost: u64,
+    scrypt_block_size: u32,
+) -> Result<()>
+where
+    FS: FileSystem + 'static,
+    P: AsRef<Path>,
+{
+    info!("Generating master key...");
+    let mk_json = MasterKeyJson::create(password, scrypt_cost, scrypt_block_size)
+        .context("failed to generate master key file")?;
+    info!("Master key generated!");
+
+    info!("Saving master key to a file...");
+    let masterkey_path = parent_path(&vault_path).join(DEFAULT_MASTER_KEY_FILE);
+    let mk_file = fs
+        .clone()
+        .create_file(masterkey_path)
+        .map_err(|e| anyhow!("failed to create masterkey file: {e}"))?;
+    serde_json::to_writer(mk_file, &mk_json).context("failed to write master key file")?;
+    info!("Master key saved!");
+
+    let masterkey =
+        MasterKey::from_masterkey_json(mk_json, password).context("failed to decrypt masterkey")?;
+    let mut key: Vec<u8> = Vec::with_capacity(64);
+    key.extend_from_slice(&masterkey.primary_master_key);
+    key.extend_from_slice(&masterkey.hmac_master_key);
+
+    let vault = Vault::create_vault(
+        &key,
+        DEFAULT_FORMAT,
+        CipherCombo::SIV_CTRMAC,
+        DEFAULT_SHORTENING_THRESHOLD,
+    )
+    .context("failed to create vault")?;
+
+    info!("Writing vault file...");
+    let mut vault_file = fs
+        .clone()
+        .create_file(&vault_path)
+        .map_err(|e| anyhow!("failed to create vault file: {e}"))?;
+    vault_file
+        .write_all(vault.as_bytes())
+        .context("failed to write data to vault file")?;
+
+    fs.create_dir(&full_storage_path)
+        .map_err(|e| anyhow!("failed to create storage directory: {e}"))?;
+    info!("Vault created!");
+
+    Ok(())
+}
+
+pub fn migrate_v7_to_v8<FS, P>(fs: FS, vault_path: P, password: &str) -> Result<()>
+where
+    FS: FileSystem + 'static,
+    P: AsRef<Path>,
+{
+    info!("Reading old masterkey file...");
+    let masterkey_path = parent_path(&vault_path).join(DEFAULT_MASTER_KEY_FILE);
+    let mut mk_file = fs
+        .clone()
+        .open_file(&masterkey_path, OpenOptions::new())
+        .map_err(|e| anyhow!("failed to open masterkey file: {e}"))?;
+
+    let mut mk_json: MasterKeyJson =
+        serde_json::from_reader(&mut mk_file).context("failed to read masterkey file")?;
+
+    info!("Removing old masterkey file...");
+    fs.clone()
+        .remove_file(&masterkey_path)
+        .map_err(|e| anyhow!("failed to delete old masterkey file: {e}"))?;
+
+    let masterkey = MasterKey::from_masterkey_json(mk_json.clone(), password)
+        .context("failed to decrypt master key file")?;
+
+    let mut key: Vec<u8> = Vec::with_capacity(64);
+    key.extend_from_slice(&masterkey.primary_master_key);
+    key.extend_from_slice(&masterkey.hmac_master_key);
+
+    info!("Creating new vault definition...");
+    let vault = Vault::create_vault(
+        &key,
+        DEFAULT_FORMAT,
+        CipherCombo::SIV_CTRMAC,
+        DEFAULT_SHORTENING_THRESHOLD,
+    )
+    .context("failed to create vault")?;
+
+    mk_json.version = 999;
+    let mut version_mac: Hmac<Sha256> =
+        Hmac::new_from_slice(&masterkey.hmac_master_key).context("failed to create HMAC")?;
+    version_mac.update(&mk_json.version.to_be_bytes());
+    let version_mac_bytes = version_mac.finalize().into_bytes();
+    mk_json.versionMac = STANDARD.encode(version_mac_bytes);
+
+    info!("Rewriting masterkey file...");
+    let mk_file = fs
+        .clone()
+        .create_file(&masterkey_path)
+        .map_err(|e| anyhow!("failed to create masterkey file: {e}"))?;
+    serde_json::to_writer(mk_file, &mk_json).context("failed to write masterkey file")?;
+
+    info!("Writing updated vault file...");
+    let mut vault_file = fs
+        .create_file(&vault_path)
+        .map_err(|e| anyhow!("failed to create vault file: {e}"))?;
+    vault_file
+        .write_all(vault.as_bytes())
+        .context("failed to write vault file")?;
+    info!("Vault migrated!");
+
+    Ok(())
+}
+
+pub fn prepare_crypto_fs<FS, P>(
+    fs: FS,
+    vault_path: P,
+    full_storage_path: P,
+    password: &str,
+) -> Result<CryptoFs<FS>>
+where
+    FS: FileSystem + 'static,
+    P: AsRef<Path>,
+{
+    info!("Unlocking the storage...");
+    info!("Deriving keys...");
+    let vault = Vault::open(&fs, &vault_path, password).context("failed to open vault")?;
+    let cryptor = Cryptor::new(vault);
+
+    let storage_path = full_storage_path
+        .as_ref()
+        .to_str()
+        .ok_or_else(|| anyhow!("failed to convert Path to &str"))?;
+
+    let crypto_fs = CryptoFs::new(storage_path, cryptor, fs)
+        .map_err(|e| anyhow!("failed to unlock storage: {e}"))?;
+    info!("Storage unlocked!");
+    Ok(crypto_fs)
+}

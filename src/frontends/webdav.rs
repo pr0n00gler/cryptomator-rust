@@ -5,8 +5,9 @@ use crate::cryptofs::{
 };
 use bytes::{Buf, Bytes};
 use futures::{future, future::FutureExt};
-use std::io::{ErrorKind, Read, SeekFrom, Write};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use webdav_handler::davpath::DavPath;
 use webdav_handler::fs::{
@@ -63,46 +64,100 @@ impl DavMetaData for Metadata {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct DFile {
-    crypto_fs_file: Box<dyn File>,
+    crypto_fs_file: Arc<Mutex<Box<dyn File>>>,
 }
 
 impl DFile {
     fn new(f: Box<dyn File>) -> DFile {
-        DFile { crypto_fs_file: f }
+        DFile {
+            crypto_fs_file: Arc::new(Mutex::new(f)),
+        }
     }
 }
 
 impl DavFile for DFile {
     fn metadata(&mut self) -> FsFuture<Box<dyn DavMetaData>> {
-        async move { Ok(Box::new(self.crypto_fs_file.metadata().unwrap()) as Box<dyn DavMetaData>) }
-            .boxed()
+        let crypto_fs_file = self.crypto_fs_file.clone();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let guard = crypto_fs_file.lock().unwrap();
+                let metadata = guard.metadata().unwrap();
+
+                Ok(Box::new(metadata) as Box<dyn DavMetaData>)
+            })
+            .await
+            .unwrap()
+        }
+        .boxed()
     }
 
     fn write_buf(&mut self, buf: Box<dyn Buf + Send>) -> FsFuture<'_, ()> {
-        async move { Ok(self.crypto_fs_file.write_all(buf.chunk())?) }.boxed()
+        let crypto_fs_file = self.crypto_fs_file.clone();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let mut guard = crypto_fs_file.lock().unwrap();
+                Ok(guard.write_all(buf.chunk())?)
+            })
+            .await
+            .unwrap()
+        }
+        .boxed()
     }
 
     fn write_bytes(&mut self, buf: Bytes) -> FsFuture<()> {
-        async move { Ok(self.crypto_fs_file.write_all(buf.as_ref())?) }.boxed()
+        let crypto_fs_file = self.crypto_fs_file.clone();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let mut guard = crypto_fs_file.lock().unwrap();
+                Ok(guard.write_all(buf.as_ref())?)
+            })
+            .await
+            .unwrap()
+        }
+        .boxed()
     }
 
     fn read_bytes(&mut self, count: usize) -> FsFuture<bytes::Bytes> {
+        let crypto_fs_file = self.crypto_fs_file.clone();
         async move {
-            let mut buf = vec![0u8; count];
-            self.crypto_fs_file.read_exact(buf.as_mut_slice())?;
-            Ok(bytes::Bytes::from(buf))
+            tokio::task::spawn_blocking(move || {
+                let mut buf = vec![0u8; count];
+                let mut guard = crypto_fs_file.lock().unwrap();
+                guard.read_exact(buf.as_mut_slice())?;
+                Ok(bytes::Bytes::from(buf))
+            })
+            .await
+            .unwrap()
         }
         .boxed()
     }
 
     fn seek(&mut self, pos: SeekFrom) -> FsFuture<u64> {
-        async move { Ok(self.crypto_fs_file.seek(pos)?) }.boxed()
+        let crypto_fs_file = self.crypto_fs_file.clone();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let mut guard = crypto_fs_file.lock().unwrap();
+                Ok(guard.seek(pos)?)
+            })
+            .await
+            .unwrap()
+        }
+        .boxed()
     }
 
     fn flush(&mut self) -> FsFuture<()> {
-        async move { Ok(self.crypto_fs_file.flush()?) }.boxed()
+        let crypto_fs_file = self.crypto_fs_file.clone();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let mut guard = crypto_fs_file.lock().unwrap();
+                Ok(guard.flush()?)
+            })
+            .await
+            .unwrap()
+        }
+        .boxed()
     }
 }
 
@@ -123,28 +178,45 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         path: &'a DavPath,
         options: OpenOptions,
     ) -> FsFuture<'a, Box<dyn DavFile>> {
+        let crypto_fs = self.crypto_fs.clone();
+        let path_buf = path.as_pathbuf();
+        // Since OpenOptions is not Clone (it's from webdav-handler), we need to reconstruct or manually pass values.
+        // Or we can just extract what we need.
+        // Wait, options.create_new etc are bool fields.
+        let create_new = options.create_new;
+        let create = options.create;
+        let read = options.read;
+        let append = options.append;
+        let truncate = options.truncate;
+        let write = options.write;
+
         async move {
-            let exists = self.crypto_fs.exists(path.as_pathbuf());
-            if options.create_new && exists {
-                return Err(FsError::Exists);
-            }
-            if (options.create || options.create_new) && !exists {
-                return Ok(Box::new(DFile::new(Box::new(
-                    self.crypto_fs.create_file(path.as_pathbuf())?,
-                ))) as Box<dyn DavFile>);
-            }
-            Ok(Box::new(DFile::new(Box::new(
-                self.crypto_fs.open_file(
-                    path.as_pathbuf(),
-                    *(cryptoOpenOptions::new()
-                        .read(options.read)
-                        .create_new(options.create_new)
-                        .create(options.create)
-                        .append(options.append)
-                        .truncate(options.truncate)
-                        .write(options.write)),
-                )?,
-            ))) as Box<dyn DavFile>)
+            tokio::task::spawn_blocking(move || {
+                let exists = crypto_fs.exists(&path_buf);
+                if create_new && exists {
+                    return Err(FsError::Exists);
+                }
+                if (create || create_new) && !exists {
+                    return Ok(
+                        Box::new(DFile::new(Box::new(crypto_fs.create_file(&path_buf)?)))
+                            as Box<dyn DavFile>,
+                    );
+                }
+                Ok(Box::new(DFile::new(Box::new(
+                    crypto_fs.open_file(
+                        &path_buf,
+                        *(cryptoOpenOptions::new()
+                            .read(read)
+                            .create_new(create_new)
+                            .create(create)
+                            .append(append)
+                            .truncate(truncate)
+                            .write(write)),
+                    )?,
+                ))) as Box<dyn DavFile>)
+            })
+            .await
+            .unwrap()
         }
         .boxed()
     }
@@ -154,69 +226,127 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         path: &'a DavPath,
         _meta: ReadDirMeta,
     ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
+        let crypto_fs = self.crypto_fs.clone();
+        let path_buf = path.as_pathbuf();
+
         async move {
-            let entries = self.crypto_fs.read_dir(path.as_pathbuf())?;
-            let strm = futures::stream::iter(
-                entries
+            tokio::task::spawn_blocking(move || {
+                let entries = crypto_fs.read_dir(&path_buf)?;
+                // We must collect entires here inside blocking block?
+                // entries is Iterator. map creates lazy iterator.
+                // We need to collect to Vec to return it safely out of closure.
+                // Or construct the stream inside?
+                // The return type is Result<FsStream...>.
+
+                let collected_entries: Vec<Box<dyn DavDirEntry>> = entries
                     .map(|e| Box::new(e) as Box<dyn DavDirEntry>)
-                    .collect::<Vec<Box<dyn DavDirEntry>>>(),
-            );
-            Ok(Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>)
+                    .collect();
+
+                Ok(collected_entries)
+            })
+            .await
+            .unwrap()
+            .map(|collected_entries| {
+                let strm = futures::stream::iter(collected_entries);
+                Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>
+            })
         }
         .boxed()
     }
 
     fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
+        let crypto_fs = self.crypto_fs.clone();
+        let path_buf = path.as_pathbuf();
+
         async move {
-            let metadata = self.crypto_fs.metadata(path.as_pathbuf())?;
-            Ok(Box::new(metadata) as Box<dyn DavMetaData>)
+            tokio::task::spawn_blocking(move || {
+                let metadata = crypto_fs.metadata(&path_buf)?;
+
+                Ok(Box::new(metadata) as Box<dyn DavMetaData>)
+            })
+            .await
+            .unwrap()
         }
         .boxed()
     }
 
     fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        async move { Ok(self.crypto_fs.create_dir(path.as_pathbuf())?) }.boxed()
+        let crypto_fs = self.crypto_fs.clone();
+        let path_buf = path.as_pathbuf();
+        async move {
+            tokio::task::spawn_blocking(move || Ok(crypto_fs.create_dir(path_buf)?))
+                .await
+                .unwrap()
+        }
+        .boxed()
     }
 
     fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        async move { Ok(self.crypto_fs.remove_dir(path.as_pathbuf())?) }.boxed()
+        let crypto_fs = self.crypto_fs.clone();
+        let path_buf = path.as_pathbuf();
+        async move {
+            tokio::task::spawn_blocking(move || Ok(crypto_fs.remove_dir(path_buf)?))
+                .await
+                .unwrap()
+        }
+        .boxed()
     }
 
     fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        async move { Ok(self.crypto_fs.remove_file(path.as_pathbuf())?) }.boxed()
+        let crypto_fs = self.crypto_fs.clone();
+        let path_buf = path.as_pathbuf();
+        async move {
+            tokio::task::spawn_blocking(move || Ok(crypto_fs.remove_file(path_buf)?))
+                .await
+                .unwrap()
+        }
+        .boxed()
     }
 
     fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
+        let crypto_fs = self.crypto_fs.clone();
+        let from_buf = from.as_pathbuf();
+        let to_buf = to.as_pathbuf();
+
         async move {
-            let from_metadata = self.crypto_fs.metadata(from.as_pathbuf())?;
-            if from_metadata.is_dir {
-                return Ok(self
-                    .crypto_fs
-                    .move_dir(from.as_pathbuf(), to.as_pathbuf())?);
-            }
-            Ok(self
-                .crypto_fs
-                .move_file(from.as_pathbuf(), to.as_pathbuf())?)
+            tokio::task::spawn_blocking(move || {
+                let from_metadata = crypto_fs.metadata(&from_buf)?;
+                if from_metadata.is_dir {
+                    return Ok(crypto_fs.move_dir(&from_buf, &to_buf)?);
+                }
+                Ok(crypto_fs.move_file(&from_buf, &to_buf)?)
+            })
+            .await
+            .unwrap()
         }
         .boxed()
     }
 
     fn copy<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
+        let crypto_fs = self.crypto_fs.clone();
+        let from_buf = from.as_pathbuf();
+        let to_buf = to.as_pathbuf();
+
         async move {
-            Ok(self
-                .crypto_fs
-                .copy_file(from.as_pathbuf(), to.as_pathbuf())?)
+            tokio::task::spawn_blocking(move || Ok(crypto_fs.copy_file(from_buf, to_buf)?))
+                .await
+                .unwrap()
         }
         .boxed()
     }
 
     fn get_quota(&self) -> FsFuture<(u64, Option<u64>)> {
+        let crypto_fs = self.crypto_fs.clone();
         async move {
-            let stats = self.crypto_fs.stats(Path::new(&Component::RootDir))?;
-            Ok((
-                stats.total_space - stats.free_space,
-                Some(stats.total_space),
-            ))
+            tokio::task::spawn_blocking(move || {
+                let stats = crypto_fs.stats(Path::new(&Component::RootDir))?;
+                Ok((
+                    stats.total_space - stats.free_space,
+                    Some(stats.total_space),
+                ))
+            })
+            .await
+            .unwrap()
         }
         .boxed()
     }

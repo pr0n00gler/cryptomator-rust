@@ -505,6 +505,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "aes-siv",
+ "anyhow",
  "async-trait",
  "base32",
  "base64 0.22.1",

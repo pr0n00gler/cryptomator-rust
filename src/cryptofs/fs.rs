@@ -1,6 +1,7 @@
 use crate::crypto::{
-    calculate_cleartext_size, shorten_name, Cryptor, FileHeader, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH,
-    FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH,
+    calculate_cleartext_size, shorten_name, Cryptor, FileHeader, FILE_CHUNK_CONTENT_MAC_LENGTH,
+    FILE_CHUNK_CONTENT_NONCE_LENGTH, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, FILE_CHUNK_LENGTH,
+    FILE_HEADER_LENGTH,
 };
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist};
 use crate::cryptofs::filesystem::Metadata;
@@ -9,7 +10,6 @@ use crate::cryptofs::{
     FileSystemError, OpenOptions, Stats,
 };
 use lru_cache::LruCache;
-use std::cmp::Ordering;
 use std::error::Error;
 use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -148,8 +148,8 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
                     dir_id = dir_uuid;
                 }
                 other => {
-                    let component_str = other.as_os_str().to_str().unwrap_or_default().to_string();
-                    error!("Invalid path {:?}", component_str);
+                    let component_str = other.as_os_str().to_string_lossy().to_string();
+                    error!("Invalid path component: {:?}", component_str);
                     return Err(InvalidPathError(component_str));
                 }
             }
@@ -213,11 +213,13 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         &self,
         de: DirEntry,
         dir_id: &[u8],
+        virtual_parent_path: &Path,
     ) -> Result<DirEntry, FileSystemError> {
-        let mut guard = self.dir_entries_cache.lock()?;
-        if guard.contains_key(&de.path) {
-            let virtual_dir_entry = guard.get_mut(&de.path).unwrap();
-            return Ok(virtual_dir_entry.clone());
+        {
+            let mut guard = self.dir_entries_cache.lock()?;
+            if let Some(virtual_dir_entry) = guard.get_mut(&de.path) {
+                return Ok(virtual_dir_entry.clone());
+            }
         }
 
         let mut metadata = de.metadata;
@@ -251,13 +253,17 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             metadata.len
         };
 
+        let decrypted_filename = self.cryptor.decrypt_filename(ciphertext_filename, dir_id)?;
         let virtual_dir_entry = DirEntry {
-            path: Default::default(), //TODO
+            path: virtual_parent_path.join(&decrypted_filename),
             metadata,
-            file_name: OsString::from(self.cryptor.decrypt_filename(ciphertext_filename, dir_id)?),
+            file_name: OsString::from(decrypted_filename),
         };
 
-        guard.insert(de.path, virtual_dir_entry.clone());
+        {
+            let mut guard = self.dir_entries_cache.lock()?;
+            guard.insert(de.path, virtual_dir_entry.clone());
+        }
 
         Ok(virtual_dir_entry)
     }
@@ -306,12 +312,13 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         &self,
         path: P,
     ) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError> {
-        let dir_id = self.dir_id_from_path(path)?;
+        let dir_id = self.dir_id_from_path(&path)?;
         let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
+        let virtual_parent_path = path.as_ref().to_path_buf();
         let dir_entries: Result<Vec<DirEntry>, FileSystemError> = self
             .file_system_provider
             .read_dir(real_path)?
-            .map(|de| self.virtual_dir_entry_from_real(de, dir_id.as_slice()))
+            .map(|de| self.virtual_dir_entry_from_real(de, dir_id.as_slice(), &virtual_parent_path))
             .collect();
         Ok(Box::new(dir_entries?.into_iter()))
     }
@@ -423,40 +430,48 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
 
     pub fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         let real_path = self.filepath_to_real_path(&path)?;
+        let key = real_path.full_path.clone();
+
         if real_path.is_shorten {
-            return Ok(self.file_system_provider.remove_dir(real_path)?);
+            self.file_system_provider.remove_dir(real_path)?;
+        } else {
+            self.file_system_provider.remove_file(real_path)?;
         }
 
-        let key = path.as_ref().to_path_buf();
-        let mut guard = self.dir_entries_cache.lock()?;
-        guard.remove(&key);
+        {
+            let mut guard = self.dir_entries_cache.lock()?;
+            guard.remove(&key);
+        }
+        {
+            let mut guard = self.dir_uuids_cache.lock()?;
+            guard.remove(&key);
+        }
 
-        Ok(self.file_system_provider.remove_file(real_path)?)
+        Ok(())
     }
 
     pub fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
-        let dir_entries = self.read_dir(&path)?;
         let real_dir_path = self.filepath_to_real_path(&path)?;
+        let dir_entries = self.read_dir(&path)?;
 
         for entry in dir_entries {
-            let full_path = PathBuf::new();
-            let full_path = full_path.join(&path).join(&entry.file_name);
+            let mut full_path = path.as_ref().to_path_buf();
+            full_path.push(&entry.file_name);
 
-            let real_path = self.filepath_to_real_path(&full_path)?;
             if entry.metadata.is_dir {
                 self.remove_dir(&full_path)?;
-            } else if real_path.is_shorten {
-                self.file_system_provider.remove_dir(&real_path)?;
             } else {
-                self.file_system_provider.remove_file(real_path)?;
+                self.remove_file(&full_path)?;
             }
         }
 
-        let mut guard = self.dir_uuids_cache.lock()?;
-        guard.clear();
-
-        let mut guard = self.dir_entries_cache.lock()?;
-        guard.clear();
+        {
+            let key = &real_dir_path.full_path;
+            let mut guard_uuids = self.dir_uuids_cache.lock()?;
+            guard_uuids.remove(key);
+            let mut guard_entries = self.dir_entries_cache.lock()?;
+            guard_entries.remove(key);
+        }
 
         Ok(self.file_system_provider.remove_dir(real_dir_path)?)
     }
@@ -520,13 +535,20 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
 
     pub fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, FileSystemError> {
         let real_path = self.filepath_to_real_path(path)?;
-        if real_path.is_shorten {
+        let mut metadata = if real_path.is_shorten {
             let contents_file = real_path.full_path.join(CONTENTS_FILENAME);
             if self.file_system_provider.exists(&contents_file) {
-                return Ok(self.file_system_provider.metadata(&contents_file)?);
+                self.file_system_provider.metadata(&contents_file)?
+            } else {
+                self.file_system_provider.metadata(real_path)?
             }
+        } else {
+            self.file_system_provider.metadata(real_path)?
+        };
+        if !metadata.is_dir {
+            metadata.len = calculate_cleartext_size(metadata.len);
         }
-        Ok(self.file_system_provider.metadata(real_path)?)
+        Ok(metadata)
     }
 
     pub fn stats<P: AsRef<Path>>(&self, path: P) -> Result<Stats, FileSystemError> {
@@ -557,6 +579,9 @@ pub struct CryptoFsFile {
 
     /// Stores the most frequently used chunks of the file to decrease read operations
     chunk_cache: LruCache<u64, Arc<[u8]>>,
+
+    /// Buffer for reading chunks to avoid repeated allocations
+    read_buffer: Vec<u8>,
 }
 
 impl CryptoFsFile {
@@ -576,17 +601,18 @@ impl CryptoFsFile {
         reader.read_exact(&mut encrypted_header)?;
 
         let header = cryptor.decrypt_file_header(&encrypted_header)?;
-        let metadata = reader.metadata()?;
+        let mut metadata = reader.metadata()?;
+        if !metadata.is_dir {
+            metadata.len = calculate_cleartext_size(metadata.len);
+        }
         Ok(CryptoFsFile {
             cryptor,
             rfs_file: reader,
             current_pos: 0,
             header,
-            metadata: Metadata {
-                len: calculate_cleartext_size(metadata.len),
-                ..metadata
-            },
+            metadata,
             chunk_cache: LruCache::new(CHUNK_CACHE_CAP),
+            read_buffer: Vec::with_capacity(FILE_CHUNK_LENGTH),
         })
     }
 
@@ -603,7 +629,9 @@ impl CryptoFsFile {
         rfs_file.write_all(encrypted_header.as_slice())?;
         rfs_file.flush()?;
         let mut metadata = rfs_file.metadata()?;
-        metadata.len = 0;
+        if !metadata.is_dir {
+            metadata.len = calculate_cleartext_size(metadata.len);
+        }
         Ok(CryptoFsFile {
             cryptor,
             rfs_file,
@@ -611,6 +639,7 @@ impl CryptoFsFile {
             header,
             metadata,
             chunk_cache: LruCache::new(CHUNK_CACHE_CAP),
+            read_buffer: Vec::with_capacity(FILE_CHUNK_LENGTH),
         })
     }
 
@@ -633,33 +662,66 @@ impl CryptoFsFile {
     /// Updates metadata according to a real file
     fn update_metadata(&mut self) -> Result<(), FileSystemError> {
         self.metadata = self.rfs_file.metadata()?;
-        self.metadata.len = self.real_file_size()?;
+        self.metadata.len = self.file_size()?;
         Ok(())
     }
 
     /// Reads and returns cleartext chunk of the data.
     fn read_chunk(&mut self, chunk_index: u64) -> Result<Arc<[u8]>, FileSystemError> {
-        if self.metadata.modified >= self.rfs_file.metadata()?.modified {
-            if let Some(chunk) = self.chunk_cache.get_mut(&chunk_index) {
-                return Ok(Arc::clone(chunk));
-            }
-        }
+        let real_metadata = self.rfs_file.metadata()?;
+        self.metadata.len = calculate_cleartext_size(real_metadata.len);
+        self.metadata.modified = real_metadata.modified;
+
         self.rfs_file.seek(SeekFrom::Start(
             (chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
         ))?;
-        let mut chunk = [0u8; FILE_CHUNK_LENGTH];
-        let read_bytes = self.rfs_file.read(&mut chunk)?;
+
+        self.read_buffer.resize(FILE_CHUNK_LENGTH, 0);
+        let read_bytes = self.rfs_file.read(&mut self.read_buffer)?;
+
+        let payload_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        let chunk_start_clear = chunk_index * payload_len;
+        let expected_plain_len = if self.metadata.len > chunk_start_clear {
+            std::cmp::min(payload_len, self.metadata.len - chunk_start_clear) as usize
+        } else {
+            0
+        };
+
         if read_bytes == 0 {
-            return Ok(Arc::<[u8]>::from(Vec::new()));
+            let zero_chunk: Arc<[u8]> = Arc::from(vec![0u8; expected_plain_len]);
+            self.chunk_cache
+                .insert(chunk_index, Arc::clone(&zero_chunk));
+            return Ok(zero_chunk);
         }
-        let decrypted_chunk = self.cryptor.decrypt_chunk(
+
+        let chunk_slice = &self.read_buffer[..read_bytes];
+        let min_chunk_len = FILE_CHUNK_CONTENT_NONCE_LENGTH + FILE_CHUNK_CONTENT_MAC_LENGTH;
+
+        // Simplified check for zero-filled (sparse) chunks
+        if read_bytes >= min_chunk_len && chunk_slice.iter().all(|&b| b == 0) {
+            let zero_chunk: Arc<[u8]> = Arc::from(vec![0u8; expected_plain_len]);
+            self.chunk_cache
+                .insert(chunk_index, Arc::clone(&zero_chunk));
+            return Ok(zero_chunk);
+        }
+
+        let mut decrypted_buffer = vec![0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH];
+        let decrypted_len = match self.cryptor.decrypt_chunk(
             &self.header.nonce,
             &self.header.payload.content_key,
             chunk_index,
-            &chunk[..read_bytes],
-        )?;
+            chunk_slice,
+            &mut decrypted_buffer,
+        ) {
+            Ok(len) => len,
+            Err(err) => {
+                error!(chunk_index, "Failed to decrypt chunk: {:?}", err);
+                return Err(err.into());
+            }
+        };
 
-        let decrypted_chunk = Arc::<[u8]>::from(decrypted_chunk);
+        decrypted_buffer.truncate(decrypted_len);
+        let decrypted_chunk = Arc::<[u8]>::from(decrypted_buffer.into_boxed_slice());
 
         self.chunk_cache
             .insert(chunk_index, Arc::clone(&decrypted_chunk));
@@ -687,38 +749,63 @@ impl Seek for CryptoFsFile {
 
 impl Read for CryptoFsFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let mut chunk_index = self.current_pos / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        let payload_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        let total_plain_size = match self.file_size() {
+            Ok(size) => size,
+            Err(e) => {
+                error!("Failed to determine cleartext file size: {:?}", e);
+                return Err(std::io::Error::other(e));
+            }
+        };
         let mut n: usize = 0;
         while n < buf.len() {
-            let offset = (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize;
+            if self.current_pos >= total_plain_size {
+                break;
+            }
+
+            let chunk_index = self.current_pos / payload_len;
+            let offset = (self.current_pos % payload_len) as usize;
+            let remaining_total = (total_plain_size - self.current_pos) as usize;
+            let remaining_buf = buf.len() - n;
+            let max_read = remaining_total.min(remaining_buf);
+            if max_read == 0 {
+                break;
+            }
+
+            let available_in_chunk = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH - offset;
+            let slice_len = max_read.min(available_in_chunk);
 
             let chunk = match self.read_chunk(chunk_index) {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("Failed to read chunk: {:?}", e);
+                    error!(chunk_index, "Failed to read chunk: {:?}", e);
                     return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                 }
             };
 
             let chunk_slice = chunk.as_ref();
-
-            if chunk_slice.is_empty() {
-                break;
-            }
-            if offset >= chunk_slice.len() {
-                break;
-            }
-
-            let slice_len = match (buf.len() - n).cmp(&(chunk_slice.len() - offset)) {
-                Ordering::Less => buf.len() - n,
-                Ordering::Greater => chunk_slice.len() - offset,
-                Ordering::Equal => buf.len() - n,
+            let data_available = if offset < chunk_slice.len() {
+                chunk_slice.len() - offset
+            } else {
+                0
             };
-            buf[n..n + slice_len].copy_from_slice(&chunk_slice[offset..offset + slice_len]);
-            n += slice_len;
 
-            self.current_pos += slice_len as u64;
-            chunk_index += 1;
+            let copy_len = slice_len.min(data_available);
+
+            if copy_len > 0 {
+                buf[n..n + copy_len].copy_from_slice(&chunk_slice[offset..offset + copy_len]);
+                n += copy_len;
+                self.current_pos += copy_len as u64;
+            }
+
+            if slice_len > copy_len {
+                let zero_len = slice_len - copy_len;
+                for byte in &mut buf[n..n + zero_len] {
+                    *byte = 0;
+                }
+                n += zero_len;
+                self.current_pos += zero_len as u64;
+            }
         }
         Ok(n)
     }
@@ -726,59 +813,89 @@ impl Read for CryptoFsFile {
 
 impl Write for CryptoFsFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut chunk_index = self.current_pos / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
-        let file_size = match self.real_file_size() {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to determine cleartext file size: {:?}", e);
-                return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
-            }
-        };
+        let payload_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        let mut known_cleartext_size = self.file_size().map_err(std::io::Error::other)?;
 
-        let chunks_count = file_size / FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        // If we're writing past the end of the file, fill the gap with zeros
+        while known_cleartext_size < self.current_pos {
+            let chunk_idx = known_cleartext_size / payload_len;
+            let offset_in_chunk = (known_cleartext_size % payload_len) as usize;
+            let fill_len = payload_len.min(self.current_pos - known_cleartext_size);
+
+            let mut chunk_data = if chunk_idx * payload_len < known_cleartext_size {
+                match self.read_chunk(chunk_idx) {
+                    Ok(c) => Vec::from(c.as_ref()),
+                    Err(_) => vec![0u8; offset_in_chunk],
+                }
+            } else {
+                vec![0u8; offset_in_chunk]
+            };
+
+            chunk_data.resize(offset_in_chunk + fill_len as usize, 0);
+
+            let mut encrypted_buffer = vec![0u8; FILE_CHUNK_LENGTH];
+            let encrypted_len = match self.cryptor.encrypt_chunk(
+                &self.header.nonce,
+                &self.header.payload.content_key,
+                chunk_idx,
+                &chunk_data,
+                &mut encrypted_buffer,
+            ) {
+                Ok(len) => len,
+                Err(e) => {
+                    error!("Failed to encrypt fill chunk: {:?}", e);
+                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+                }
+            };
+
+            self.rfs_file.seek(SeekFrom::Start(
+                (chunk_idx * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
+            ))?;
+            self.rfs_file
+                .write_all(&encrypted_buffer[..encrypted_len])?;
+            self.chunk_cache.insert(chunk_idx, chunk_data.into());
+
+            known_cleartext_size += fill_len;
+            self.metadata.len = known_cleartext_size;
+        }
 
         let mut n: usize = 0;
+        let mut encrypted_buffer = vec![0u8; FILE_CHUNK_LENGTH];
+
         while n < buf.len() {
-            let mut chunk: Vec<u8>;
-            let slice_len: usize;
-            if chunk_index > chunks_count || file_size == FILE_HEADER_LENGTH as u64 {
-                slice_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH.min(buf.len() - n);
-                chunk = Vec::with_capacity(FILE_CHUNK_CONTENT_PAYLOAD_LENGTH);
-                chunk.extend_from_slice(&buf[n..n + slice_len]);
-                n += slice_len;
-            } else {
-                let cached_chunk = match self.read_chunk(chunk_index) {
-                    Ok(c) => c,
+            let chunk_index = self.current_pos / payload_len;
+            let offset_in_chunk = (self.current_pos % payload_len) as usize;
+            let slice_len =
+                (payload_len - offset_in_chunk as u64).min((buf.len() - n) as u64) as usize;
+
+            let mut chunk = if chunk_index * payload_len < known_cleartext_size {
+                match self.read_chunk(chunk_index) {
+                    Ok(c) => Vec::from(c.as_ref()),
                     Err(e) => {
                         error!("Failed to read chunk: {:?}", e);
                         return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                     }
-                };
-
-                let offset = (self.current_pos % FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64) as usize;
-                slice_len = if offset + buf.len() - n > FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
-                    FILE_CHUNK_CONTENT_PAYLOAD_LENGTH - offset
-                } else {
-                    buf.len() - n
-                };
-
-                let mut buf_chunk = Vec::from(cached_chunk.as_ref());
-                if buf_chunk.len() < offset + slice_len {
-                    buf_chunk.resize(offset + slice_len, 0u8);
                 }
+            } else {
+                vec![0u8; offset_in_chunk]
+            };
 
-                buf_chunk[offset..offset + slice_len].copy_from_slice(&buf[n..n + slice_len]);
-                n += slice_len;
-                chunk = buf_chunk;
+            if chunk.len() < offset_in_chunk + slice_len {
+                chunk.resize(offset_in_chunk + slice_len, 0u8);
             }
 
-            let encrypted_chunk = match self.cryptor.encrypt_chunk(
+            chunk[offset_in_chunk..offset_in_chunk + slice_len]
+                .copy_from_slice(&buf[n..n + slice_len]);
+            n += slice_len;
+
+            let encrypted_len = match self.cryptor.encrypt_chunk(
                 &self.header.nonce,
                 &self.header.payload.content_key,
                 chunk_index,
                 &chunk,
+                &mut encrypted_buffer,
             ) {
-                Ok(c) => c,
+                Ok(len) => len,
                 Err(e) => {
                     error!("Failed to encrypt chunk: {:?}", e);
                     return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
@@ -788,13 +905,13 @@ impl Write for CryptoFsFile {
             self.rfs_file.seek(SeekFrom::Start(
                 (chunk_index * FILE_CHUNK_LENGTH as u64) + FILE_HEADER_LENGTH as u64,
             ))?;
-            self.rfs_file.write_all(&encrypted_chunk)?;
+            self.rfs_file
+                .write_all(&encrypted_buffer[..encrypted_len])?;
 
             self.current_pos += slice_len as u64;
-
             self.chunk_cache.insert(chunk_index, chunk.into());
-
-            chunk_index += 1;
+            known_cleartext_size = known_cleartext_size.max(self.current_pos);
+            self.metadata.len = known_cleartext_size;
         }
 
         if let Err(e) = self.update_metadata() {

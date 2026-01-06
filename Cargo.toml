@@ -42,6 +42,7 @@ fs2 = "0.4.3"
 jwt = "0.16.0"
 async-trait = "0.1.89"
 nfsserve = "0.10.2"
+subtle = "2.6.1"
 
 [profile.release]
 rpath = false

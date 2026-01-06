@@ -11,6 +11,7 @@ use tracing::info;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use clap::{Parser, ValueEnum};
 
+use cryptomator::frontends::auth::WebDavAuth;
 use cryptomator::frontends::mount::mount_nfs;
 use cryptomator::frontends::mount::*;
 use hmac::{Hmac, Mac};
@@ -77,6 +78,14 @@ struct Unlock {
     /// Webdav-server listen address
     #[arg(short, long)]
     webdav_listen_address: Option<String>,
+
+    /// Webdav-server username for Basic Auth
+    #[arg(long)]
+    webdav_user: Option<String>,
+
+    /// Webdav-server password for Basic Auth
+    #[arg(long)]
+    webdav_password: Option<String>,
 
     /// NFS-server listen address
     #[arg(short, long, default_value = "127.0.0.1:11111")]
@@ -238,9 +247,17 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
     .expect("Failed to unblock storage");
     info!("Storage unlocked!");
 
-    if let Some(webdav_listen_address) = u.webdav_listen_address {
+    if let Some(webdav_listen_address) = &u.webdav_listen_address {
+        let auth = u.webdav_user.as_ref().map(|user| {
+            let pass = u.webdav_password.clone().unwrap_or_else(|| {
+                rpassword::prompt_password(format!("WebDAV password for {}: ", user))
+                    .expect("Unable to read WebDAV password")
+            });
+            WebDavAuth::new(user, &pass)
+        });
+
         info!("Starting WebDav server...");
-        mount_webdav(webdav_listen_address, crypto_fs).await;
+        mount_webdav(webdav_listen_address.clone(), crypto_fs, auth).await;
         return;
     }
 

@@ -596,8 +596,30 @@ impl CryptoFsFile {
         options: OpenOptions,
     ) -> Result<CryptoFsFile, FileSystemError> {
         let mut reader = real_file_system_provider.open_file(real_path, options)?;
-        let mut encrypted_header: [u8; FILE_HEADER_LENGTH] = [0; FILE_HEADER_LENGTH];
 
+        // Get file metadata to check if file is empty
+        let metadata = reader.metadata()?;
+        let is_empty = metadata.len == 0;
+
+        // If file is empty and write mode is enabled, create a new header
+        // This handles the case where NFS opens a newly created file for writing
+        if is_empty {
+            let header = cryptor.create_file_header();
+            let encrypted_header = cryptor.encrypt_file_header(&header)?;
+            reader.write_all(encrypted_header.as_slice())?;
+            reader.flush()?;
+            return Ok(CryptoFsFile {
+                cryptor,
+                rfs_file: reader,
+                current_pos: 0,
+                header,
+                metadata,
+                chunk_cache: LruCache::new(CHUNK_CACHE_CAP),
+                read_buffer: Vec::with_capacity(FILE_CHUNK_LENGTH),
+            });
+        }
+
+        let mut encrypted_header: [u8; FILE_HEADER_LENGTH] = [0; FILE_HEADER_LENGTH];
         reader.read_exact(&mut encrypted_header)?;
 
         let header = cryptor.decrypt_file_header(&encrypted_header)?;

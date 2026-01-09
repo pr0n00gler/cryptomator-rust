@@ -430,3 +430,140 @@ fn crypto_fs_move_dir<P: AsRef<Path>>(dir1: P, child_dir: P, file: P, dst_dir: P
     check_file.read_to_end(&mut data_check).unwrap();
     assert_eq!(data, data_check);
 }
+
+/// Tests for NFS write issues - opening empty files for writing
+#[test]
+fn test_open_empty_file_for_write() {
+    // Test that opening a newly created empty file for write works
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    let file_path = "/empty-file-test.dat";
+
+    // Create a file using create_file (which writes the header)
+    crypto_fs.create_file(file_path).unwrap();
+
+    // Now open the file with write mode - this should NOT fail with UnexpectedEof
+    let mut file = crypto_fs
+        .open_file(file_path, *OpenOptions::new().write(true))
+        .unwrap();
+
+    // Write some data
+    let test_data = b"Hello, World!";
+    file.write_all(test_data).unwrap();
+    file.flush().unwrap();
+    drop(file);
+
+    // Reopen and verify the data
+    let mut file = crypto_fs
+        .open_file(file_path, OpenOptions::new())
+        .unwrap();
+    let mut read_data = Vec::new();
+    file.read_to_end(&mut read_data).unwrap();
+    assert_eq!(read_data, test_data);
+
+    crypto_fs.remove_file(file_path).unwrap();
+}
+
+#[test]
+fn test_nfs_style_write_to_empty_file() {
+    // Simulates NFS behavior: open empty file with write flag and write to it
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    let file_path = "/nfs-style-test.dat";
+
+    // Step 1: Create the file (simulates NFS create)
+    {
+        let mut file = crypto_fs
+            .open_file(file_path, *OpenOptions::new().write(true).create(true))
+            .unwrap();
+
+        // Step 2: Write data directly (this is where UnexpectedEof would occur)
+        let test_data = b"NFS style write test data";
+        file.write_all(test_data).unwrap();
+        file.flush().unwrap();
+    }
+
+    // Verify the file was written correctly
+    let mut file = crypto_fs
+        .open_file(file_path, OpenOptions::new())
+        .unwrap();
+    let mut read_data = Vec::new();
+    file.read_to_end(&mut read_data).unwrap();
+    assert_eq!(read_data, b"NFS style write test data");
+
+    crypto_fs.remove_file(file_path).unwrap();
+}
+
+#[test]
+fn test_write_operations_on_reopened_file() {
+    // Test that multiple write operations work correctly on a reopened file
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    let file_path = "/reopen-write-test.dat";
+
+    // Create initial file with some data
+    {
+        let mut file = crypto_fs.create_file(file_path).unwrap();
+        file.write_all(b"Initial data").unwrap();
+        file.flush().unwrap();
+    }
+
+    // Reopen and append more data
+    {
+        let mut file = crypto_fs
+            .open_file(file_path, *OpenOptions::new().write(true))
+            .unwrap();
+        file.seek(std::io::SeekFrom::End(0)).unwrap();
+        file.write_all(b" - appended data").unwrap();
+        file.flush().unwrap();
+    }
+
+    // Verify complete data
+    let mut file = crypto_fs
+        .open_file(file_path, OpenOptions::new())
+        .unwrap();
+    let mut read_data = Vec::new();
+    file.read_to_end(&mut read_data).unwrap();
+    assert_eq!(read_data, b"Initial data - appended data");
+
+    crypto_fs.remove_file(file_path).unwrap();
+}
+
+#[test]
+fn test_no_unexpected_eof_on_empty_read() {
+    // Ensure reading from an empty file doesn't cause UnexpectedEof
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    let file_path = "/empty-read-test.dat";
+
+    // Create file
+    crypto_fs.create_file(file_path).unwrap();
+
+    // Open for read (empty file should not cause errors)
+    let mut file = crypto_fs
+        .open_file(file_path, OpenOptions::new())
+        .unwrap();
+
+    // Read should return 0 bytes (empty file)
+    let mut buf = [0u8; 100];
+    let read_count = file.read(&mut buf).unwrap();
+    assert_eq!(read_count, 0);
+
+    crypto_fs.remove_file(file_path).unwrap();
+}

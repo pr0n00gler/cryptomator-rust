@@ -458,9 +458,7 @@ fn test_open_empty_file_for_write() {
     drop(file);
 
     // Reopen and verify the data
-    let mut file = crypto_fs
-        .open_file(file_path, OpenOptions::new())
-        .unwrap();
+    let mut file = crypto_fs.open_file(file_path, OpenOptions::new()).unwrap();
     let mut read_data = Vec::new();
     file.read_to_end(&mut read_data).unwrap();
     assert_eq!(read_data, test_data);
@@ -492,9 +490,7 @@ fn test_nfs_style_write_to_empty_file() {
     }
 
     // Verify the file was written correctly
-    let mut file = crypto_fs
-        .open_file(file_path, OpenOptions::new())
-        .unwrap();
+    let mut file = crypto_fs.open_file(file_path, OpenOptions::new()).unwrap();
     let mut read_data = Vec::new();
     file.read_to_end(&mut read_data).unwrap();
     assert_eq!(read_data, b"NFS style write test data");
@@ -531,9 +527,7 @@ fn test_write_operations_on_reopened_file() {
     }
 
     // Verify complete data
-    let mut file = crypto_fs
-        .open_file(file_path, OpenOptions::new())
-        .unwrap();
+    let mut file = crypto_fs.open_file(file_path, OpenOptions::new()).unwrap();
     let mut read_data = Vec::new();
     file.read_to_end(&mut read_data).unwrap();
     assert_eq!(read_data, b"Initial data - appended data");
@@ -556,9 +550,7 @@ fn test_no_unexpected_eof_on_empty_read() {
     crypto_fs.create_file(file_path).unwrap();
 
     // Open for read (empty file should not cause errors)
-    let mut file = crypto_fs
-        .open_file(file_path, OpenOptions::new())
-        .unwrap();
+    let mut file = crypto_fs.open_file(file_path, OpenOptions::new()).unwrap();
 
     // Read should return 0 bytes (empty file)
     let mut buf = [0u8; 100];

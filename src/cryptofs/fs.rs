@@ -318,6 +318,11 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         let dir_entries: Result<Vec<DirEntry>, FileSystemError> = self
             .file_system_provider
             .read_dir(real_path)?
+            .filter(|de| {
+                de.file_name != DIR_FILENAME
+                    && de.file_name != FULL_NAME_FILENAME
+                    && de.file_name != CONTENTS_FILENAME
+            })
             .map(|de| self.virtual_dir_entry_from_real(de, dir_id.as_slice(), &virtual_parent_path))
             .collect();
         Ok(Box::new(dir_entries?.into_iter()))
@@ -596,8 +601,12 @@ impl CryptoFsFile {
         options: OpenOptions,
     ) -> Result<CryptoFsFile, FileSystemError> {
         let mut reader = real_file_system_provider.open_file(real_path, options)?;
-        let mut encrypted_header: [u8; FILE_HEADER_LENGTH] = [0; FILE_HEADER_LENGTH];
 
+        if options.truncate {
+            return Self::create_file(cryptor, reader);
+        }
+
+        let mut encrypted_header: [u8; FILE_HEADER_LENGTH] = [0; FILE_HEADER_LENGTH];
         reader.read_exact(&mut encrypted_header)?;
 
         let header = cryptor.decrypt_file_header(&encrypted_header)?;

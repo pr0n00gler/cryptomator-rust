@@ -76,7 +76,6 @@ impl FileSystem for LocalFs {
                 .truncate(true)
                 .write(true)
                 .read(true)
-                .create_new(true)
                 .open(path)?,
         ))
     }

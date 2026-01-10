@@ -1,4 +1,4 @@
-use crate::cryptofs::{CryptoFs, FileSystem, Metadata, OpenOptions};
+use crate::cryptofs::{CryptoFs, FileSystem, FileSystemError, Metadata, OpenOptions};
 use async_trait::async_trait;
 use nfsserve::nfs::{fattr3, fileid3, ftype3, nfsstat3, nfsstring, nfstime3, sattr3, specdata3};
 use nfsserve::vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
@@ -16,6 +16,12 @@ pub struct NfsServer<FS: FileSystem> {
 }
 
 impl<FS: FileSystem> NfsServer<FS> {
+    fn fs_error_to_nfs(e: FileSystemError) -> nfsstat3 {
+        match e {
+            FileSystemError::PathDoesNotExist(_) => nfsstat3::NFS3ERR_NOENT,
+            _ => nfsstat3::NFS3ERR_IO,
+        }
+    }
     pub fn new(crypto_fs: CryptoFs<FS>) -> Self {
         let mut handle_map = HashMap::new();
         handle_map.insert(1, PathBuf::from("/"));
@@ -145,7 +151,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         tokio::task::spawn_blocking(move || {
             let metadata = crypto_fs
                 .metadata(&path)
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                .map_err(|e| NfsServer::<FS>::fs_error_to_nfs(e))?;
 
             Ok(NfsServer::<FS>::metadata_to_fattr3(metadata, handle))
         })
@@ -169,7 +175,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
                     // self.apply_sattr3(&mut metadata, &sattr);
                     Ok(NfsServer::<FS>::metadata_to_fattr3(metadata, handle))
                 }
-                Err(_) => Err(nfsstat3::NFS3ERR_IO),
+                Err(e) => Err(NfsServer::<FS>::fs_error_to_nfs(e)),
             }
         })
         .await
@@ -222,7 +228,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         tokio::task::spawn_blocking(move || {
             let metadata = crypto_fs
                 .metadata(&path)
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                .map_err(|e| NfsServer::<FS>::fs_error_to_nfs(e))?;
 
             if metadata.is_dir {
                 return Err(nfsstat3::NFS3ERR_ISDIR);
@@ -232,7 +238,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
                 .open_file(&path, *OpenOptions::new().read(true))
                 .map_err(|e| {
                     error!("Failed to open file for read: {:?}", e);
-                    nfsstat3::NFS3ERR_IO
+                    NfsServer::<FS>::fs_error_to_nfs(e)
                 })?;
 
             // Get the cleartext file size
@@ -281,7 +287,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
                 .open_file(&path, *OpenOptions::new().write(true).read(true))
                 .map_err(|e| {
                     error!("Failed to open file for write: {:?}", e);
-                    nfsstat3::NFS3ERR_IO
+                    NfsServer::<FS>::fs_error_to_nfs(e)
                 })?;
 
             file.seek(SeekFrom::Start(offset)).map_err(|e| {
@@ -305,7 +311,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             // Get metadata
             let metadata = crypto_fs
                 .metadata(&path)
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                .map_err(|e| NfsServer::<FS>::fs_error_to_nfs(e))?;
 
             Ok(NfsServer::<FS>::metadata_to_fattr3(metadata, handle))
         })
@@ -342,7 +348,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
             let mut metadata = crypto_fs
                 .metadata(&file_path_clone)
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                .map_err(|e| NfsServer::<FS>::fs_error_to_nfs(e))?;
 
             // Newly created files have 0 cleartext size even though they have encrypted headers
             metadata.len = 0;
@@ -382,7 +388,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
             crypto_fs.create_file(&file_path_clone).map_err(|e| {
                 error!("Failed to create file exclusively: {:?}", e);
-                nfsstat3::NFS3ERR_IO
+                NfsServer::<FS>::fs_error_to_nfs(e)
             })?;
             Ok(())
         })
@@ -407,12 +413,12 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         let metadata = tokio::task::spawn_blocking(move || {
             crypto_fs.create_dir(&new_dir_path_clone).map_err(|e| {
                 error!("Failed to create directory: {:?}", e);
-                nfsstat3::NFS3ERR_IO
+                NfsServer::<FS>::fs_error_to_nfs(e)
             })?;
 
             crypto_fs
                 .metadata(&new_dir_path_clone)
-                .map_err(|_| nfsstat3::NFS3ERR_IO)
+                .map_err(|e| NfsServer::<FS>::fs_error_to_nfs(e))
         })
         .await
         .unwrap()?;
@@ -449,7 +455,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         tokio::task::spawn_blocking(move || {
             crypto_fs.remove_file(&file_path).map_err(|e| {
                 error!("Failed to remove file: {:?}", e);
-                nfsstat3::NFS3ERR_IO
+                NfsServer::<FS>::fs_error_to_nfs(e)
             })
         })
         .await
@@ -495,7 +501,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             }
             .map_err(|e| {
                 error!("Failed to rename: {:?}", e);
-                nfsstat3::NFS3ERR_IO
+                NfsServer::<FS>::fs_error_to_nfs(e)
             })
         })
         .await
@@ -535,7 +541,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
                 .read_dir(&path_clone)
                 .map_err(|e| {
                     error!("Failed to read directory: {:?}", e);
-                    nfsstat3::NFS3ERR_IO
+                    NfsServer::<FS>::fs_error_to_nfs(e)
                 })
                 .map(|iter| iter.collect::<Vec<_>>())
         })

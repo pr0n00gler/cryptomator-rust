@@ -538,6 +538,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid 1.18.1",
  "webdav-handler",
+ "zeroize",
 ]
 
 [[package]]
@@ -2952,6 +2953,6 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.5.5"
+version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94693807d016b2f2d2e14420eb3bfcca689311ff775dcf113d74ea624b7cdf07"
+checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"

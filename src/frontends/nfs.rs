@@ -11,43 +11,100 @@ use tracing::{debug, error};
 
 pub struct NfsServer<FS: FileSystem> {
     crypto_fs: CryptoFs<FS>,
-    handle_map: Arc<Mutex<HashMap<u64, PathBuf>>>,
+    handle_to_path: Arc<Mutex<HashMap<u64, PathBuf>>>,
+    path_to_handle: Arc<Mutex<HashMap<PathBuf, u64>>>,
     next_handle: Arc<Mutex<u64>>,
 }
 
 impl<FS: FileSystem> NfsServer<FS> {
     pub fn new(crypto_fs: CryptoFs<FS>) -> Self {
-        let mut handle_map = HashMap::new();
-        handle_map.insert(1, PathBuf::from("/"));
+        let mut handle_to_path = HashMap::new();
+        let mut path_to_handle = HashMap::new();
+        let root = PathBuf::from("/");
+        handle_to_path.insert(1, root.clone());
+        path_to_handle.insert(root, 1);
 
         NfsServer {
             crypto_fs,
-            handle_map: Arc::new(Mutex::new(handle_map)),
+            handle_to_path: Arc::new(Mutex::new(handle_to_path)),
+            path_to_handle: Arc::new(Mutex::new(path_to_handle)),
             next_handle: Arc::new(Mutex::new(2)),
         }
     }
 
-    fn get_or_create_handle(&self, path: PathBuf) -> u64 {
-        let mut handle_map = self.handle_map.lock().unwrap();
+    fn get_or_create_handle(&self, path: PathBuf) -> Result<u64, nfsstat3> {
+        let mut path_to_handle = self
+            .path_to_handle
+            .lock()
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        if let Some(&handle) = path_to_handle.get(&path) {
+            return Ok(handle);
+        }
 
-        // Check if path already has a handle
-        for (handle, p) in handle_map.iter() {
-            if p == &path {
-                return *handle;
+        let mut next_handle = self.next_handle.lock().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        let mut handle_to_path = self
+            .handle_to_path
+            .lock()
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+        let handle = *next_handle;
+        *next_handle += 1;
+        path_to_handle.insert(path.clone(), handle);
+        handle_to_path.insert(handle, path);
+        Ok(handle)
+    }
+
+    fn get_path_from_handle(&self, handle: &u64) -> Result<PathBuf, nfsstat3> {
+        let handle_to_path = self
+            .handle_to_path
+            .lock()
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        handle_to_path
+            .get(handle)
+            .cloned()
+            .ok_or(nfsstat3::NFS3ERR_STALE)
+    }
+
+    fn forget_path(&self, path: &PathBuf) -> Result<(), nfsstat3> {
+        let mut path_to_handle = self
+            .path_to_handle
+            .lock()
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        let mut handle_to_path = self
+            .handle_to_path
+            .lock()
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        if let Some(handle) = path_to_handle.remove(path) {
+            handle_to_path.remove(&handle);
+        }
+        Ok(())
+    }
+
+    fn update_path(&self, old_path: &PathBuf, new_path: PathBuf) -> Result<(), nfsstat3> {
+        let mut path_to_handle = self
+            .path_to_handle
+            .lock()
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        let mut handle_to_path = self
+            .handle_to_path
+            .lock()
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+        let mut updates = Vec::new();
+        for (path, handle) in path_to_handle.iter() {
+            if path.starts_with(old_path) {
+                let suffix = path.strip_prefix(old_path).unwrap_or(path.as_path());
+                let updated = new_path.join(suffix);
+                updates.push((path.clone(), updated, *handle));
             }
         }
 
-        // Create new handle
-        let mut next_handle = self.next_handle.lock().unwrap();
-        let handle = *next_handle;
-        *next_handle += 1;
-        handle_map.insert(handle, path);
-        handle
-    }
-
-    fn get_path_from_handle(&self, handle: &u64) -> Option<PathBuf> {
-        let handle_map = self.handle_map.lock().unwrap();
-        handle_map.get(handle).cloned()
+        for (old, new, handle) in updates {
+            path_to_handle.remove(&old);
+            path_to_handle.insert(new.clone(), handle);
+            handle_to_path.insert(handle, new);
+        }
+        Ok(())
     }
 
     fn metadata_to_fattr3(metadata: Metadata, handle: u64) -> fattr3 {
@@ -137,9 +194,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
     async fn getattr(&self, handle: u64) -> Result<fattr3, nfsstat3> {
         debug!("NFS GETATTR: handle={}", handle);
 
-        let path = self
-            .get_path_from_handle(&handle)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let path = self.get_path_from_handle(&handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         tokio::task::spawn_blocking(move || {
@@ -150,15 +205,16 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             Ok(NfsServer::<FS>::metadata_to_fattr3(metadata, handle))
         })
         .await
-        .unwrap()
+        .map_err(|e| {
+            error!("NFS getattr task join error: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?
     }
 
     async fn setattr(&self, handle: u64, sattr: sattr3) -> Result<fattr3, nfsstat3> {
         debug!("NFS SETATTR: handle={}, sattr={:?}", handle, sattr);
 
-        let path = self
-            .get_path_from_handle(&handle)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let path = self.get_path_from_handle(&handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         tokio::task::spawn_blocking(move || {
@@ -173,16 +229,17 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             }
         })
         .await
-        .unwrap()
+        .map_err(|e| {
+            error!("NFS setattr task join error: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?
     }
 
     async fn lookup(&self, dir_handle: u64, name: &nfsstring) -> Result<u64, nfsstat3> {
         let name_str = String::from_utf8_lossy(name).to_string(); // Clone to move into block
         debug!("NFS LOOKUP: dir_handle={}, name={}", dir_handle, name_str);
 
-        let dir_path = self
-            .get_path_from_handle(&dir_handle)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let dir_path = self.get_path_from_handle(&dir_handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         let file_path = dir_path.join(&name_str);
@@ -193,11 +250,14 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         let exists = tokio::task::spawn_blocking(move || crypto_fs.exists(&file_path))
             .await
-            .unwrap();
+            .map_err(|e| {
+                error!("NFS lookup task join error: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })?;
 
         if exists {
             let file_path = dir_path.join(name_str);
-            Ok(self.get_or_create_handle(file_path))
+            self.get_or_create_handle(file_path)
         } else {
             Err(nfsstat3::NFS3ERR_NOENT)
         }
@@ -214,9 +274,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             handle, offset, count
         );
 
-        let path = self
-            .get_path_from_handle(&handle)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let path = self.get_path_from_handle(&handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         tokio::task::spawn_blocking(move || {
@@ -258,7 +316,10 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             Ok((buffer, eof))
         })
         .await
-        .unwrap()
+        .map_err(|e| {
+            error!("NFS read task join error: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?
     }
 
     async fn write(&self, handle: u64, offset: u64, data: &[u8]) -> Result<fattr3, nfsstat3> {
@@ -269,9 +330,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             data.len()
         );
 
-        let path = self
-            .get_path_from_handle(&handle)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let path = self.get_path_from_handle(&handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         let data = data.to_vec(); // Need to own data to move it
@@ -310,7 +369,10 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             Ok(NfsServer::<FS>::metadata_to_fattr3(metadata, handle))
         })
         .await
-        .unwrap()
+        .map_err(|e| {
+            error!("NFS write task join error: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })?
     }
 
     async fn create(
@@ -322,9 +384,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         let name_str = String::from_utf8_lossy(name).to_string();
         debug!("NFS CREATE: dir_handle={}, name={}", dir_handle, name_str);
 
-        let dir_path = self
-            .get_path_from_handle(&dir_handle)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let dir_path = self.get_path_from_handle(&dir_handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         let file_path = dir_path.join(&name_str);
@@ -349,9 +409,12 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             Ok(metadata)
         })
         .await
-        .unwrap()?;
+        .map_err(|e| {
+            error!("NFS create task join error: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })??;
 
-        let handle = self.get_or_create_handle(file_path);
+        let handle = self.get_or_create_handle(file_path)?;
 
         Ok((
             handle,
@@ -366,9 +429,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             dir_handle, name_str
         );
 
-        let dir_path = self
-            .get_path_from_handle(&dir_handle)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let dir_path = self.get_path_from_handle(&dir_handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         let file_path = dir_path.join(&name_str);
@@ -387,18 +448,19 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             Ok(())
         })
         .await
-        .unwrap()?;
+        .map_err(|e| {
+            error!("NFS create_exclusive task join error: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })??;
 
-        Ok(self.get_or_create_handle(file_path))
+        self.get_or_create_handle(file_path)
     }
 
     async fn mkdir(&self, dir_handle: u64, name: &nfsstring) -> Result<(u64, fattr3), nfsstat3> {
         let name_str = String::from_utf8_lossy(name).to_string();
         debug!("NFS MKDIR: dir_handle={}, name={}", dir_handle, name_str);
 
-        let dir_path = self
-            .get_path_from_handle(&dir_handle)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let dir_path = self.get_path_from_handle(&dir_handle)?;
 
         let new_dir_path = dir_path.join(&name_str);
         let crypto_fs = self.crypto_fs.clone();
@@ -415,9 +477,12 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
                 .map_err(|_| nfsstat3::NFS3ERR_IO)
         })
         .await
-        .unwrap()?;
+        .map_err(|e| {
+            error!("NFS mkdir task join error: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })??;
 
-        let handle = self.get_or_create_handle(new_dir_path);
+        let handle = self.get_or_create_handle(new_dir_path)?;
         Ok((
             handle,
             NfsServer::<FS>::metadata_to_fattr3(metadata, handle),
@@ -439,22 +504,25 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         let name_str = String::from_utf8_lossy(name).to_string();
         debug!("NFS REMOVE: dir_handle={}, name={}", dir_handle, name_str);
 
-        let dir_path = self
-            .get_path_from_handle(&dir_handle)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let dir_path = self.get_path_from_handle(&dir_handle)?;
 
         let file_path = dir_path.join(&name_str);
         let crypto_fs = self.crypto_fs.clone();
+        let file_path_clone = file_path.clone();
 
         tokio::task::spawn_blocking(move || {
-            crypto_fs.remove_file(&file_path).map_err(|e| {
+            crypto_fs.remove_file(&file_path_clone).map_err(|e| {
                 error!("Failed to remove file: {:?}", e);
                 nfsstat3::NFS3ERR_IO
             })
         })
         .await
-        .unwrap()?;
+        .map_err(|e| {
+            error!("NFS remove task join error: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })??;
 
+        self.forget_path(&file_path)?;
         Ok(())
     }
 
@@ -472,26 +540,24 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             from_dir, from_name_str, to_dir, to_name_str
         );
 
-        let from_dir_path = self
-            .get_path_from_handle(&from_dir)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
-        let to_dir_path = self
-            .get_path_from_handle(&to_dir)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let from_dir_path = self.get_path_from_handle(&from_dir)?;
+        let to_dir_path = self.get_path_from_handle(&to_dir)?;
 
         let from_path = from_dir_path.join(&from_name_str);
         let to_path = to_dir_path.join(&to_name_str);
         let crypto_fs = self.crypto_fs.clone();
+        let from_path_clone = from_path.clone();
+        let to_path_clone = to_path.clone();
 
         tokio::task::spawn_blocking(move || {
             let metadata = crypto_fs
-                .metadata(&from_path)
+                .metadata(&from_path_clone)
                 .map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
 
             if metadata.is_dir {
-                crypto_fs.move_dir(&from_path, &to_path)
+                crypto_fs.move_dir(&from_path_clone, &to_path_clone)
             } else {
-                crypto_fs.move_file(&from_path, &to_path)
+                crypto_fs.move_file(&from_path_clone, &to_path_clone)
             }
             .map_err(|e| {
                 error!("Failed to rename: {:?}", e);
@@ -499,8 +565,12 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             })
         })
         .await
-        .unwrap()?;
+        .map_err(|e| {
+            error!("NFS rename task join error: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })??;
 
+        self.update_path(&from_path, to_path)?;
         Ok(())
     }
 
@@ -515,21 +585,11 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             handle, cookie, max_entries
         );
 
-        let path = self
-            .get_path_from_handle(&handle)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let path = self.get_path_from_handle(&handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
-
-        // Split readdir into two parts: reading entries (blocking) and processing them (requires self interaction for handle map which is just mutex)
-        // Wait, self.get_or_create_handle uses a Mutex, which is std::sync::Mutex, so it blocks the thread.
-        // It's just memory lookup, so it's fast. But strict separation might be cleaner.
-        // However, we can't call self methods inside spawn_blocking easily unless we Arc<Self>.
-        // NfsServer is not Arced usually.
-
-        // Let's gather the entries first.
-
         let path_clone = path.clone();
+
         let entries = tokio::task::spawn_blocking(move || {
             crypto_fs
                 .read_dir(&path_clone)
@@ -540,66 +600,50 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
                 .map(|iter| iter.collect::<Vec<_>>())
         })
         .await
-        .unwrap()?;
+        .map_err(|e| {
+            error!("NFS readdir task join error: {:?}", e);
+            nfsstat3::NFS3ERR_IO
+        })??;
 
-        let mut dirlist = Vec::new();
-        let mut entry_count = 0;
-        let mut current_cookie = 0u64;
+        let mut resolved_entries: Vec<(String, fileid3, Metadata)> = entries
+            .into_iter()
+            .map(|entry| {
+                let name = entry.filename_string().unwrap_or_default();
+                let entry_path = path.join(&name);
+                let fileid = self.get_or_create_handle(entry_path)? as fileid3;
+                Ok((name, fileid, entry.metadata))
+            })
+            .collect::<Result<Vec<_>, nfsstat3>>()?;
 
-        for entry in entries {
-            current_cookie += 1;
+        resolved_entries.sort_by(|left, right| left.0.cmp(&right.0));
 
-            if current_cookie <= cookie {
+        let mut dirlist_with_meta = Vec::new();
+        let mut found_start = cookie == 0;
+        let mut has_more = false;
+
+        for (name, fileid, metadata) in resolved_entries {
+            if !found_start {
+                if fileid == cookie {
+                    found_start = true;
+                }
                 continue;
             }
 
-            if entry_count >= max_entries {
+            if dirlist_with_meta.len() >= max_entries {
+                has_more = true;
                 break;
             }
 
-            let name = entry.filename_string().unwrap_or_default();
-            let entry_path = path.join(&name);
-            let fileid = self.get_or_create_handle(entry_path) as fileid3;
-
-            dirlist.push((fileid, name.into_bytes(), current_cookie));
-            entry_count += 1;
+            dirlist_with_meta.push(DirEntry {
+                fileid,
+                name: nfsstring::from(name.into_bytes()),
+                attr: NfsServer::<FS>::metadata_to_fattr3(metadata, fileid),
+            });
         }
-
-        // Now we need metadata for each entry. This is potentially N blocking calls.
-
-        let crypto_fs = self.crypto_fs.clone();
-        // We can do this in parallel or sequential in blocking block.
-        // Since we need to return Result, let's do one big blocking block for metadata fetches.
-
-        // We need to map dirlist -> DirEntry.
-        // We have fileid, name, cookie.
-
-        let path_clone = path.clone();
-        let dirlist_with_meta = tokio::task::spawn_blocking(move || {
-            dirlist
-                .into_iter()
-                .map(|(fileid, name, _cookie)| {
-                    let entry_path = path_clone.join(String::from_utf8_lossy(&name).as_ref());
-                    let attr = if let Ok(metadata) = crypto_fs.metadata(&entry_path) {
-                        NfsServer::<FS>::metadata_to_fattr3(metadata, fileid)
-                    } else {
-                        fattr3::default()
-                    };
-
-                    DirEntry {
-                        fileid,
-                        name: nfsstring::from(name),
-                        attr,
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .await
-        .unwrap();
 
         Ok(ReadDirResult {
             entries: dirlist_with_meta,
-            end: entry_count < max_entries,
+            end: !has_more,
         })
     }
 

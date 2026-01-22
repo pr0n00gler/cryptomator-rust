@@ -2,8 +2,11 @@ use cryptomator::crypto::{Cryptor, Vault, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH};
 use cryptomator::cryptofs::CryptoFs;
 use cryptomator::frontends::nfs::NfsServer;
 use cryptomator::providers::{LocalFs, MemoryFs};
-use nfsserve::nfs::{ftype3, nfsstring, sattr3};
-use nfsserve::vfs::NFSFileSystem;
+use nfsserve::nfs::{
+    ftype3, nfsstat3, nfsstring, sattr3, set_atime, set_gid3, set_mode3, set_mtime, set_size3,
+    set_uid3,
+};
+use nfsserve::vfs::{NFSFileSystem, VFSCapabilities};
 
 const PATH_TO_VAULT: &str = "tests/test_storage/vault.cryptomator";
 const DEFAULT_PASSWORD: &str = "12345678";
@@ -345,6 +348,43 @@ async fn test_nfs_rename_file() {
 }
 
 #[tokio::test]
+async fn test_nfs_rename_directory_updates_child_handle() {
+    let nfs = setup_nfs_server();
+    let root_handle = nfs.root_dir();
+
+    let dirname: nfsstring = b"parent".to_vec().into();
+    let (dir_handle, _) = nfs.mkdir(root_handle, &dirname).await.unwrap();
+
+    let filename: nfsstring = b"child.txt".to_vec().into();
+    let (file_handle, _) = nfs
+        .create(dir_handle, &filename, sattr3::default())
+        .await
+        .unwrap();
+
+    let payload = b"rename-child-handle";
+    nfs.write(file_handle, 0, payload).await.unwrap();
+
+    let new_dirname: nfsstring = b"parent-renamed".to_vec().into();
+    nfs.rename(root_handle, &dirname, root_handle, &new_dirname)
+        .await
+        .unwrap();
+
+    let renamed_dir_handle = nfs.lookup(root_handle, &new_dirname).await.unwrap();
+    let child_handle_after = nfs.lookup(renamed_dir_handle, &filename).await.unwrap();
+
+    let (read_data, _) = nfs
+        .read(child_handle_after, 0, payload.len() as u32)
+        .await
+        .unwrap();
+    assert_eq!(read_data, payload);
+
+    assert_eq!(
+        file_handle, child_handle_after,
+        "child handle should remain stable across parent directory rename"
+    );
+}
+
+#[tokio::test]
 async fn test_nfs_readdir() {
     let nfs = setup_nfs_server();
     let root_handle = nfs.root_dir();
@@ -394,4 +434,235 @@ async fn test_nfs_large_write() {
         .await
         .unwrap();
     assert_eq!(read_data, large_data);
+}
+
+#[tokio::test]
+async fn test_nfs_setattr() {
+    let nfs = setup_nfs_server();
+    let root_handle = nfs.root_dir();
+
+    let filename: nfsstring = b"setattr_test.txt".to_vec().into();
+    let (file_handle, _) = nfs
+        .create(root_handle, &filename, sattr3::default())
+        .await
+        .unwrap();
+
+    let sattr = sattr3 {
+        mode: set_mode3::Void,
+        uid: set_uid3::Void,
+        gid: set_gid3::Void,
+        size: set_size3::Void,
+        atime: set_atime::DONT_CHANGE,
+        mtime: set_mtime::DONT_CHANGE,
+    };
+
+    let result = nfs.setattr(file_handle, sattr).await;
+    assert!(result.is_ok());
+    let attr = result.unwrap();
+    assert_eq!(attr.fileid, file_handle);
+    // Note: implementation currently ignores attribute changes, so we just verify it returns OK and valid attributes
+}
+
+#[tokio::test]
+async fn test_nfs_create_exclusive() {
+    let nfs = setup_nfs_server();
+    let root_handle = nfs.root_dir();
+
+    let filename: nfsstring = b"exclusive_test.txt".to_vec().into();
+
+    // Success
+    let result = nfs.create_exclusive(root_handle, &filename).await;
+    assert!(result.is_ok());
+    let file_handle = result.unwrap();
+
+    // Verify it exists
+    let lookup_result = nfs.lookup(root_handle, &filename).await;
+    assert_eq!(lookup_result.unwrap(), file_handle);
+
+    // Failure (existing file)
+    let result2 = nfs.create_exclusive(root_handle, &filename).await;
+    assert!(matches!(result2, Err(nfsstat3::NFS3ERR_EXIST)));
+}
+
+#[tokio::test]
+async fn test_nfs_symlink_not_supported() {
+    let nfs = setup_nfs_server();
+    let root_handle = nfs.root_dir();
+    let name: nfsstring = b"link".to_vec().into();
+    let target: nfsstring = b"target".to_vec().into();
+
+    let result = nfs
+        .symlink(root_handle, &name, &target, &sattr3::default())
+        .await;
+    assert!(matches!(result, Err(nfsstat3::NFS3ERR_NOTSUPP)));
+}
+
+#[tokio::test]
+async fn test_nfs_readlink_not_supported() {
+    let nfs = setup_nfs_server();
+    // Assuming handle 1 is root, but let's just use any handle
+    let result = nfs.readlink(1).await;
+    assert!(matches!(result, Err(nfsstat3::NFS3ERR_NOTSUPP)));
+}
+
+#[tokio::test]
+async fn test_nfs_capabilities() {
+    let nfs = setup_nfs_server();
+    let caps = nfs.capabilities();
+    assert!(matches!(caps, VFSCapabilities::ReadWrite));
+}
+
+#[tokio::test]
+async fn test_nfs_readdir_pagination() {
+    let nfs = setup_nfs_server();
+    let root_handle = nfs.root_dir();
+
+    // Create 5 files
+    for i in 0..5 {
+        let filename: nfsstring = format!("file{}.txt", i).into_bytes().into();
+        nfs.create(root_handle, &filename, sattr3::default())
+            .await
+            .unwrap();
+    }
+
+    // Read first 2 entries
+    let result1 = nfs.readdir(root_handle, 0, 2).await.unwrap();
+    assert_eq!(result1.entries.len(), 2);
+    assert!(!result1.end);
+
+    let cookie1 = result1.entries.last().unwrap().fileid;
+
+    // Read next 2 entries using the last fileid cookie from result1
+    let result2 = nfs.readdir(root_handle, cookie1, 2).await.unwrap();
+    assert_eq!(result2.entries.len(), 2);
+    assert!(!result2.end);
+
+    let cookie2 = result2.entries.last().unwrap().fileid;
+
+    // Read last entry using the last fileid cookie from result2
+    let result3 = nfs.readdir(root_handle, cookie2, 2).await.unwrap();
+    assert_eq!(result3.entries.len(), 1);
+    assert!(result3.end);
+
+    // Verify all files were seen and are unique
+    let mut names = std::collections::HashSet::new();
+    for e in result1.entries {
+        names.insert(String::from_utf8_lossy(&e.name).to_string());
+    }
+    for e in result2.entries {
+        names.insert(String::from_utf8_lossy(&e.name).to_string());
+    }
+    for e in result3.entries {
+        names.insert(String::from_utf8_lossy(&e.name).to_string());
+    }
+
+    assert_eq!(names.len(), 5);
+    for i in 0..5 {
+        assert!(names.contains(&format!("file{}.txt", i)));
+    }
+}
+
+#[tokio::test]
+async fn test_nfs_readdir_start_after_uses_fileid() {
+    let nfs = setup_nfs_server();
+    let root_handle = nfs.root_dir();
+
+    for i in 0..3 {
+        let filename: nfsstring = format!("cookie_file{}.txt", i).into_bytes().into();
+        nfs.create(root_handle, &filename, sattr3::default())
+            .await
+            .unwrap();
+    }
+
+    let all_entries = nfs.readdir(root_handle, 0, 10).await.unwrap();
+    assert_eq!(all_entries.entries.len(), 3);
+
+    let first_entry = all_entries.entries.first().unwrap();
+    let next_entries = nfs
+        .readdir(root_handle, first_entry.fileid, 10)
+        .await
+        .unwrap();
+
+    assert_eq!(next_entries.entries.len(), all_entries.entries.len() - 1);
+    assert_eq!(
+        next_entries.entries.first().unwrap().fileid,
+        all_entries.entries[1].fileid
+    );
+}
+
+#[tokio::test]
+async fn test_nfs_read_directory_error() {
+    let nfs = setup_nfs_server();
+    let root_handle = nfs.root_dir();
+
+    let result = nfs.read(root_handle, 0, 100).await;
+    assert!(matches!(result, Err(nfsstat3::NFS3ERR_ISDIR)));
+}
+
+#[tokio::test]
+async fn test_nfs_lookup_nonexistent() {
+    let nfs = setup_nfs_server();
+    let root_handle = nfs.root_dir();
+    let filename: nfsstring = b"nonexistent".to_vec().into();
+
+    let result = nfs.lookup(root_handle, &filename).await;
+    assert!(matches!(result, Err(nfsstat3::NFS3ERR_NOENT)));
+}
+
+#[tokio::test]
+async fn test_nfs_stale_handle() {
+    let nfs = setup_nfs_server();
+    let stale_handle = 9999u64;
+    let name: nfsstring = b"test".to_vec().into();
+
+    assert!(matches!(
+        nfs.getattr(stale_handle).await,
+        Err(nfsstat3::NFS3ERR_STALE)
+    ));
+    assert!(matches!(
+        nfs.setattr(stale_handle, sattr3::default()).await,
+        Err(nfsstat3::NFS3ERR_STALE)
+    ));
+    assert!(matches!(
+        nfs.lookup(stale_handle, &name).await,
+        Err(nfsstat3::NFS3ERR_STALE)
+    ));
+    assert!(matches!(
+        nfs.read(stale_handle, 0, 100).await,
+        Err(nfsstat3::NFS3ERR_STALE)
+    ));
+    assert!(matches!(
+        nfs.write(stale_handle, 0, b"data").await,
+        Err(nfsstat3::NFS3ERR_STALE)
+    ));
+    assert!(matches!(
+        nfs.remove(stale_handle, &name).await,
+        Err(nfsstat3::NFS3ERR_STALE)
+    ));
+    assert!(matches!(
+        nfs.rename(stale_handle, &name, 1, &name).await,
+        Err(nfsstat3::NFS3ERR_STALE)
+    ));
+    assert!(matches!(
+        nfs.rename(1, &name, stale_handle, &name).await,
+        Err(nfsstat3::NFS3ERR_STALE)
+    ));
+    assert!(matches!(
+        nfs.readdir(stale_handle, 0, 10).await,
+        Err(nfsstat3::NFS3ERR_STALE)
+    ));
+}
+
+#[tokio::test]
+async fn test_nfs_rename_errors() {
+    let nfs = setup_nfs_server();
+    let root_handle = nfs.root_dir();
+    let old_name: nfsstring = b"old.txt".to_vec().into();
+    let new_name: nfsstring = b"new.txt".to_vec().into();
+
+    // Rename non-existent file
+    let result = nfs
+        .rename(root_handle, &old_name, root_handle, &new_name)
+        .await;
+    assert!(matches!(result, Err(nfsstat3::NFS3ERR_NOENT)));
 }

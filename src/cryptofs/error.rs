@@ -84,8 +84,36 @@ impl From<std::sync::PoisonError<std::sync::MutexGuard<'_, LruCache<PathBuf, Dir
     }
 }
 
+impl From<std::sync::PoisonError<std::sync::MutexGuard<'_, LruCache<PathBuf, String>>>>
+    for FileSystemError
+{
+    fn from(
+        err: std::sync::PoisonError<std::sync::MutexGuard<LruCache<PathBuf, String>>>,
+    ) -> FileSystemError {
+        FileSystemError::UnknownError(err.to_string())
+    }
+}
+
 impl From<Box<dyn Error>> for FileSystemError {
     fn from(err: Box<dyn Error>) -> Self {
         FileSystemError::UnknownError(err.to_string())
+    }
+}
+
+impl From<FileSystemError> for std::io::Error {
+    fn from(err: FileSystemError) -> std::io::Error {
+        match err {
+            FileSystemError::IoError(e) => e,
+            FileSystemError::PathDoesNotExist(path) => {
+                std::io::Error::new(std::io::ErrorKind::NotFound, path)
+            }
+            FileSystemError::InvalidPathError(path) => {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, path)
+            }
+            FileSystemError::CryptoError(e) => {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+            }
+            _ => std::io::Error::other(err.to_string()),
+        }
     }
 }

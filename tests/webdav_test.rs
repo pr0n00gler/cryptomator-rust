@@ -273,12 +273,10 @@ async fn test_webdav_remove_file() {
 }
 
 #[tokio::test]
-async fn test_webdav_rename_file() {
+async fn test_webdav_write_buf() {
     let webdav = setup_webdav_server();
-    let old_path = DavPath::new("/old_name.txt").unwrap();
-    let new_path = DavPath::new("/new_name.txt").unwrap();
+    let file_path = DavPath::new("/write_buf_test.txt").unwrap();
 
-    // Create and write to file
     let options = OpenOptions {
         read: true,
         write: true,
@@ -288,28 +286,70 @@ async fn test_webdav_rename_file() {
         create_new: false,
     };
 
-    let mut file = webdav.open(&old_path, options).await.unwrap();
-    let test_data = b"rename test data";
-    file.write_bytes(bytes::Bytes::from(test_data.to_vec()))
-        .await
-        .unwrap();
+    let mut file = webdav.open(&file_path, options).await.unwrap();
+
+    // Write data using write_buf
+    let test_data = b"Hello from write_buf!";
+    let buf = Box::new(std::io::Cursor::new(test_data.to_vec()));
+    file.write_buf(buf).await.unwrap();
     file.flush().await.unwrap();
-    drop(file);
 
-    // Rename file
-    let result = webdav.rename(&old_path, &new_path).await;
+    // Verify
+    file.seek(SeekFrom::Start(0)).await.unwrap();
+    let read_data = file.read_bytes(test_data.len()).await.unwrap();
+    assert_eq!(read_data.as_ref(), test_data);
+}
+
+#[tokio::test]
+async fn test_webdav_get_quota() {
+    let webdav = setup_webdav_server();
+    let result = webdav.get_quota().await;
     assert!(result.is_ok());
+    let (used, total) = result.unwrap();
+    // In MemoryFs, stats might be 0 or some default
+    assert!(total.is_some());
+    assert!(total.unwrap() >= used);
+}
 
-    // Verify old path doesn't exist
-    let old_metadata = webdav.metadata(&old_path).await;
-    assert!(old_metadata.is_err());
+#[tokio::test]
+async fn test_webdav_open_create_new_exists() {
+    let webdav = setup_webdav_server();
+    let file_path = DavPath::new("/exists.txt").unwrap();
 
-    // Verify new path exists
-    let new_metadata = webdav.metadata(&new_path).await;
-    assert!(new_metadata.is_ok());
+    // Create it first
+    let options = OpenOptions {
+        read: false,
+        write: true,
+        append: false,
+        truncate: false,
+        create: true,
+        create_new: false,
+    };
+    webdav.open(&file_path, options).await.unwrap();
 
-    // Verify data is intact
-    let read_options = OpenOptions {
+    // Try to create_new
+    let options_new = OpenOptions {
+        read: false,
+        write: true,
+        append: false,
+        truncate: false,
+        create: true,
+        create_new: true,
+    };
+    let result = webdav.open(&file_path, options_new).await;
+    assert!(result.is_err());
+    // Should be FsError::Exists
+    if let Err(e) = result {
+        assert_eq!(e, webdav_handler::fs::FsError::Exists);
+    }
+}
+
+#[tokio::test]
+async fn test_webdav_open_not_found() {
+    let webdav = setup_webdav_server();
+    let file_path = DavPath::new("/not_found.txt").unwrap();
+
+    let options = OpenOptions {
         read: true,
         write: false,
         append: false,
@@ -317,10 +357,18 @@ async fn test_webdav_rename_file() {
         create: false,
         create_new: false,
     };
+    let result = webdav.open(&file_path, options).await;
+    assert!(result.is_err());
+}
 
-    let mut file = webdav.open(&new_path, read_options).await.unwrap();
-    let read_data = file.read_bytes(test_data.len()).await.unwrap();
-    assert_eq!(read_data.as_ref(), test_data);
+#[tokio::test]
+async fn test_webdav_read_dir_not_found() {
+    let webdav = setup_webdav_server();
+    let dir_path = DavPath::new("/nonexistent_dir").unwrap();
+
+    use webdav_handler::fs::ReadDirMeta;
+    let result = webdav.read_dir(&dir_path, ReadDirMeta::None).await;
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -428,4 +476,60 @@ async fn test_webdav_remove_dir() {
     // Verify it's gone
     let metadata_result = webdav.metadata(&dir_path).await;
     assert!(metadata_result.is_err());
+}
+
+#[tokio::test]
+async fn test_webdav_rename_file() {
+    let webdav = setup_webdav_server();
+    let source_path = DavPath::new("/source_rename.txt").unwrap();
+    let dest_path = DavPath::new("/dest_rename.txt").unwrap();
+
+    // 1. Create and write source file
+    let options = OpenOptions {
+        read: false,
+        write: true,
+        append: false,
+        truncate: false,
+        create: true,
+        create_new: false,
+    };
+
+    let mut file = webdav.open(&source_path, options).await.unwrap();
+    let test_data = b"rename test data";
+    file.write_bytes(bytes::Bytes::from(test_data.to_vec()))
+        .await
+        .unwrap();
+    file.flush().await.unwrap();
+    drop(file);
+
+    // 2. Perform Rename
+    let result = webdav.rename(&source_path, &dest_path).await;
+    assert!(result.is_ok(), "Rename failed: {:?}", result.err());
+
+    // 3. Verify destination exists and source is gone
+    assert!(
+        webdav.metadata(&dest_path).await.is_ok(),
+        "Destination file should exist"
+    );
+    assert!(
+        webdav.metadata(&source_path).await.is_err(),
+        "Source file should no longer exist"
+    );
+
+    // 4. Verify content integrity in destination
+    let read_options = OpenOptions {
+        read: true,
+        write: false,
+        append: false,
+        truncate: false,
+        create: false,
+        create_new: false,
+    };
+    let mut dest_file = webdav.open(&dest_path, read_options).await.unwrap();
+    let read_data = dest_file.read_bytes(test_data.len()).await.unwrap();
+    assert_eq!(
+        read_data.as_ref(),
+        test_data,
+        "Data corruption after rename"
+    );
 }

@@ -16,24 +16,34 @@ use webdav_handler::fs::{
     OpenOptions, ReadDirMeta,
 };
 
+fn map_io_error(e: &std::io::Error) -> FsError {
+    match e.kind() {
+        ErrorKind::NotFound => FsError::NotFound,
+        ErrorKind::AlreadyExists => FsError::Exists,
+        ErrorKind::PermissionDenied => FsError::Forbidden,
+        _ => FsError::GeneralFailure,
+    }
+}
+
 impl From<FileSystemError> for FsError {
     fn from(fse: FileSystemError) -> Self {
         match fse {
             FileSystemError::PathDoesNotExist(_) => FsError::NotFound,
-            FileSystemError::CryptoError(CryptoError::IoError(i)) => match i.kind() {
-                ErrorKind::NotFound => FsError::NotFound,
-                _ => {
+            FileSystemError::CryptoError(CryptoError::IoError(ref i)) => {
+                let res = map_io_error(i);
+                if res == FsError::GeneralFailure {
                     error!("WebDAV IO error (crypto): {:?}", i);
-                    FsError::GeneralFailure
                 }
-            },
-            FileSystemError::IoError(s) => match s.kind() {
-                ErrorKind::NotFound => FsError::NotFound,
-                _ => {
+                res
+            }
+            FileSystemError::IoError(ref s) => {
+                let res = map_io_error(s);
+                if res == FsError::GeneralFailure {
                     error!("WebDAV IO error: {:?}", s);
-                    FsError::GeneralFailure
                 }
-            },
+                res
+            }
+            FileSystemError::InvalidPathError(_) => FsError::Forbidden,
             e => {
                 error!("WebDAV filesystem error: {:?}", e);
                 FsError::GeneralFailure
@@ -93,29 +103,46 @@ impl DavFile for DFile {
         let crypto_fs_file = self.crypto_fs_file.clone();
         async move {
             tokio::task::spawn_blocking(move || {
-                let guard = crypto_fs_file.lock().unwrap();
-                let metadata = guard.metadata().unwrap();
+                let guard = crypto_fs_file.lock().map_err(|_| FsError::GeneralFailure)?;
+                let metadata = guard.metadata().map_err(|e| {
+                    error!("WebDAV metadata error: {:?}", e);
+                    FsError::GeneralFailure
+                })?;
 
                 Ok(Box::new(metadata) as Box<dyn DavMetaData>)
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV metadata join error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
 
     #[instrument(skip(self, buf))]
-    fn write_buf(&mut self, buf: Box<dyn Buf + Send>) -> FsFuture<'_, ()> {
+    fn write_buf(&mut self, mut buf: Box<dyn Buf + Send>) -> FsFuture<'_, ()> {
         let crypto_fs_file = self.crypto_fs_file.clone();
         async move {
             tokio::task::spawn_blocking(move || {
-                let chunk = buf.chunk();
-                debug!("WebDAV write_buf: {} bytes", chunk.len());
-                let mut guard = crypto_fs_file.lock().unwrap();
-                Ok(guard.write_all(chunk)?)
+                let mut guard = crypto_fs_file.lock().map_err(|_| FsError::GeneralFailure)?;
+                while buf.has_remaining() {
+                    let chunk = buf.chunk();
+                    debug!("WebDAV write_buf: {} bytes", chunk.len());
+                    guard.write_all(chunk).map_err(|e| {
+                        error!("WebDAV write_buf error: {:?}", e);
+                        FsError::GeneralFailure
+                    })?;
+                    let len = chunk.len();
+                    buf.advance(len);
+                }
+                Ok(())
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV write_buf join error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -126,11 +153,18 @@ impl DavFile for DFile {
         async move {
             tokio::task::spawn_blocking(move || {
                 debug!("WebDAV write_bytes: {} bytes", buf.len());
-                let mut guard = crypto_fs_file.lock().unwrap();
-                Ok(guard.write_all(buf.as_ref())?)
+                let mut guard = crypto_fs_file.lock().map_err(|_| FsError::GeneralFailure)?;
+                guard.write_all(buf.as_ref()).map_err(|e| {
+                    error!("WebDAV write_bytes error: {:?}", e);
+                    FsError::GeneralFailure
+                })?;
+                Ok(())
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV write_bytes join error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -142,13 +176,19 @@ impl DavFile for DFile {
             tokio::task::spawn_blocking(move || {
                 debug!("WebDAV read_bytes: {} bytes", count);
                 let mut buf = vec![0u8; count];
-                let mut guard = crypto_fs_file.lock().unwrap();
-                let n = guard.read(buf.as_mut_slice())?;
+                let mut guard = crypto_fs_file.lock().map_err(|_| FsError::GeneralFailure)?;
+                let n = guard.read(buf.as_mut_slice()).map_err(|e| {
+                    error!("WebDAV read_bytes error: {:?}", e);
+                    FsError::GeneralFailure
+                })?;
                 buf.truncate(n);
                 Ok(bytes::Bytes::from(buf))
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV read_bytes join error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -159,11 +199,17 @@ impl DavFile for DFile {
         async move {
             tokio::task::spawn_blocking(move || {
                 debug!("WebDAV seek: {:?}", pos);
-                let mut guard = crypto_fs_file.lock().unwrap();
-                Ok(guard.seek(pos)?)
+                let mut guard = crypto_fs_file.lock().map_err(|_| FsError::GeneralFailure)?;
+                guard.seek(pos).map_err(|e| {
+                    error!("WebDAV seek error: {:?}", e);
+                    FsError::GeneralFailure
+                })
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV seek join error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -174,11 +220,17 @@ impl DavFile for DFile {
         async move {
             tokio::task::spawn_blocking(move || {
                 debug!("WebDAV flush");
-                let mut guard = crypto_fs_file.lock().unwrap();
-                Ok(guard.flush()?)
+                let mut guard = crypto_fs_file.lock().map_err(|_| FsError::GeneralFailure)?;
+                guard.flush().map_err(|e| {
+                    error!("WebDAV flush error: {:?}", e);
+                    FsError::GeneralFailure
+                })
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV flush join error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -241,7 +293,10 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
                 ))) as Box<dyn DavFile>)
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV open spawn error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -272,7 +327,10 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
                 Ok(collected_entries)
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV read_dir spawn error: {:?}", e);
+                FsError::GeneralFailure
+            })?
             .map(|collected_entries| {
                 let strm = futures::stream::iter(collected_entries);
                 Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>
@@ -294,7 +352,10 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
                 Ok(Box::new(metadata) as Box<dyn DavMetaData>)
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV metadata spawn error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -309,7 +370,10 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
                 Ok(crypto_fs.create_dir(path_buf)?)
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV create_dir spawn error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -324,7 +388,10 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
                 Ok(crypto_fs.remove_dir(path_buf)?)
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV remove_dir spawn error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -339,7 +406,10 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
                 Ok(crypto_fs.remove_file(path_buf)?)
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV remove_file spawn error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -353,14 +423,13 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         async move {
             tokio::task::spawn_blocking(move || {
                 info!("WebDAV rename: {:?} -> {:?}", from_buf, to_buf);
-                let from_metadata = crypto_fs.metadata(&from_buf)?;
-                if from_metadata.is_dir {
-                    return Ok(crypto_fs.move_dir(&from_buf, &to_buf)?);
-                }
-                Ok(crypto_fs.move_file(&from_buf, &to_buf)?)
+                Ok(crypto_fs.move_path(&from_buf, &to_buf)?)
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV rename spawn error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -374,10 +443,13 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         async move {
             tokio::task::spawn_blocking(move || {
                 info!("WebDAV copy: {:?} -> {:?}", from_buf, to_buf);
-                Ok(crypto_fs.copy_file(from_buf, to_buf)?)
+                Ok(crypto_fs.copy_path(&from_buf, &to_buf)?)
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV copy spawn error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -395,8 +467,136 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
                 ))
             })
             .await
-            .unwrap()
+            .map_err(|e| {
+                error!("WebDAV get_quota spawn error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Error as IoError;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_fs_error_from_filesystem_error() {
+        assert_eq!(
+            FsError::from(FileSystemError::PathDoesNotExist("test".to_string())),
+            FsError::NotFound
+        );
+        assert_eq!(
+            FsError::from(FileSystemError::IoError(IoError::new(
+                ErrorKind::NotFound,
+                "not found"
+            ))),
+            FsError::NotFound
+        );
+        assert_eq!(
+            FsError::from(FileSystemError::IoError(IoError::new(
+                ErrorKind::AlreadyExists,
+                "exists"
+            ))),
+            FsError::Exists
+        );
+        assert_eq!(
+            FsError::from(FileSystemError::IoError(IoError::new(
+                ErrorKind::PermissionDenied,
+                "forbidden"
+            ))),
+            FsError::Forbidden
+        );
+        assert_eq!(
+            FsError::from(FileSystemError::IoError(IoError::other("other"))),
+            FsError::GeneralFailure
+        );
+        assert_eq!(
+            FsError::from(FileSystemError::InvalidPathError("invalid".to_string())),
+            FsError::Forbidden
+        );
+        assert_eq!(
+            FsError::from(FileSystemError::UnknownError("unknown".to_string())),
+            FsError::GeneralFailure
+        );
+    }
+
+    #[test]
+    fn test_fs_error_from_crypto_io_error() {
+        assert_eq!(
+            FsError::from(FileSystemError::CryptoError(CryptoError::IoError(
+                IoError::new(ErrorKind::NotFound, "not found")
+            ))),
+            FsError::NotFound
+        );
+        assert_eq!(
+            FsError::from(FileSystemError::CryptoError(CryptoError::IoError(
+                IoError::new(ErrorKind::AlreadyExists, "exists")
+            ))),
+            FsError::Exists
+        );
+        assert_eq!(
+            FsError::from(FileSystemError::CryptoError(CryptoError::IoError(
+                IoError::new(ErrorKind::PermissionDenied, "forbidden")
+            ))),
+            FsError::Forbidden
+        );
+        assert_eq!(
+            FsError::from(FileSystemError::CryptoError(CryptoError::IoError(
+                IoError::other("other")
+            ))),
+            FsError::GeneralFailure
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dav_dir_entry() {
+        let metadata = Metadata {
+            is_dir: true,
+            is_file: false,
+            len: 1024,
+            modified: SystemTime::now(),
+            accessed: SystemTime::now(),
+            created: SystemTime::now(),
+            #[cfg(unix)]
+            uid: 1000,
+            #[cfg(unix)]
+            gid: 1000,
+        };
+        let entry = DirEntry {
+            path: PathBuf::from("/test"),
+            metadata,
+            file_name: "test".into(),
+        };
+
+        assert_eq!(entry.name(), b"test");
+        let meta = entry.metadata().await.unwrap();
+        assert_eq!(meta.len(), 1024);
+        assert!(meta.is_dir());
+    }
+
+    #[test]
+    fn test_dav_metadata() {
+        let now = SystemTime::now();
+        let metadata = Metadata {
+            is_dir: false,
+            is_file: true,
+            len: 2048,
+            modified: now,
+            accessed: now,
+            created: now,
+            #[cfg(unix)]
+            uid: 1000,
+            #[cfg(unix)]
+            gid: 1000,
+        };
+
+        assert_eq!(metadata.len(), 2048);
+        assert_eq!(metadata.modified().unwrap(), now);
+        assert_eq!(metadata.accessed().unwrap(), now);
+        assert_eq!(metadata.created().unwrap(), now);
+        assert!(!metadata.is_dir());
     }
 }

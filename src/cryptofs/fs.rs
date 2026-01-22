@@ -328,10 +328,14 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
                     )));
                 };
                 let mut shard = self.lock_shard(&real_path)?;
-                shard
-                    .shortened_names
-                    .insert(real_path.clone(), name.clone());
-                name
+                if let Some(existing) = shard.shortened_names.get_mut(&real_path).cloned() {
+                    existing
+                } else {
+                    shard
+                        .shortened_names
+                        .insert(real_path.clone(), name.clone());
+                    name
+                }
             };
 
             if let Ok(m) = self

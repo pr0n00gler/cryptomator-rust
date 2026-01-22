@@ -11,43 +11,63 @@ use tracing::{debug, error};
 
 pub struct NfsServer<FS: FileSystem> {
     crypto_fs: CryptoFs<FS>,
-    handle_map: Arc<Mutex<HashMap<u64, PathBuf>>>,
+    handle_to_path: Arc<Mutex<HashMap<u64, PathBuf>>>,
+    path_to_handle: Arc<Mutex<HashMap<PathBuf, u64>>>,
     next_handle: Arc<Mutex<u64>>,
 }
 
 impl<FS: FileSystem> NfsServer<FS> {
     pub fn new(crypto_fs: CryptoFs<FS>) -> Self {
-        let mut handle_map = HashMap::new();
-        handle_map.insert(1, PathBuf::from("/"));
+        let mut handle_to_path = HashMap::new();
+        let mut path_to_handle = HashMap::new();
+        let root = PathBuf::from("/");
+        handle_to_path.insert(1, root.clone());
+        path_to_handle.insert(root, 1);
 
         NfsServer {
             crypto_fs,
-            handle_map: Arc::new(Mutex::new(handle_map)),
+            handle_to_path: Arc::new(Mutex::new(handle_to_path)),
+            path_to_handle: Arc::new(Mutex::new(path_to_handle)),
             next_handle: Arc::new(Mutex::new(2)),
         }
     }
 
     fn get_or_create_handle(&self, path: PathBuf) -> u64 {
-        let mut handle_map = self.handle_map.lock().unwrap();
-
-        // Check if path already has a handle
-        for (handle, p) in handle_map.iter() {
-            if p == &path {
-                return *handle;
-            }
+        let mut path_to_handle = self.path_to_handle.lock().unwrap();
+        if let Some(&handle) = path_to_handle.get(&path) {
+            return handle;
         }
 
-        // Create new handle
         let mut next_handle = self.next_handle.lock().unwrap();
+        let mut handle_to_path = self.handle_to_path.lock().unwrap();
+
         let handle = *next_handle;
         *next_handle += 1;
-        handle_map.insert(handle, path);
+        path_to_handle.insert(path.clone(), handle);
+        handle_to_path.insert(handle, path);
         handle
     }
 
     fn get_path_from_handle(&self, handle: &u64) -> Option<PathBuf> {
-        let handle_map = self.handle_map.lock().unwrap();
-        handle_map.get(handle).cloned()
+        let handle_to_path = self.handle_to_path.lock().unwrap();
+        handle_to_path.get(handle).cloned()
+    }
+
+    fn forget_path(&self, path: &PathBuf) {
+        let mut path_to_handle = self.path_to_handle.lock().unwrap();
+        let mut handle_to_path = self.handle_to_path.lock().unwrap();
+        if let Some(handle) = path_to_handle.remove(path) {
+            handle_to_path.remove(&handle);
+        }
+    }
+
+    fn update_path(&self, old_path: &PathBuf, new_path: PathBuf) {
+        let mut path_to_handle = self.path_to_handle.lock().unwrap();
+        let mut handle_to_path = self.handle_to_path.lock().unwrap();
+        if let Some(handle) = path_to_handle.remove(old_path) {
+            path_to_handle.insert(new_path.clone(), handle);
+            handle_to_path.insert(handle, new_path);
+        }
     }
 
     fn metadata_to_fattr3(metadata: Metadata, handle: u64) -> fattr3 {
@@ -445,9 +465,10 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         let file_path = dir_path.join(&name_str);
         let crypto_fs = self.crypto_fs.clone();
+        let file_path_clone = file_path.clone();
 
         tokio::task::spawn_blocking(move || {
-            crypto_fs.remove_file(&file_path).map_err(|e| {
+            crypto_fs.remove_file(&file_path_clone).map_err(|e| {
                 error!("Failed to remove file: {:?}", e);
                 nfsstat3::NFS3ERR_IO
             })
@@ -455,6 +476,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         .await
         .unwrap()?;
 
+        self.forget_path(&file_path);
         Ok(())
     }
 
@@ -482,16 +504,18 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         let from_path = from_dir_path.join(&from_name_str);
         let to_path = to_dir_path.join(&to_name_str);
         let crypto_fs = self.crypto_fs.clone();
+        let from_path_clone = from_path.clone();
+        let to_path_clone = to_path.clone();
 
         tokio::task::spawn_blocking(move || {
             let metadata = crypto_fs
-                .metadata(&from_path)
+                .metadata(&from_path_clone)
                 .map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
 
             if metadata.is_dir {
-                crypto_fs.move_dir(&from_path, &to_path)
+                crypto_fs.move_dir(&from_path_clone, &to_path_clone)
             } else {
-                crypto_fs.move_file(&from_path, &to_path)
+                crypto_fs.move_file(&from_path_clone, &to_path_clone)
             }
             .map_err(|e| {
                 error!("Failed to rename: {:?}", e);
@@ -501,6 +525,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         .await
         .unwrap()?;
 
+        self.update_path(&from_path, to_path);
         Ok(())
     }
 
@@ -520,16 +545,8 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             .ok_or(nfsstat3::NFS3ERR_STALE)?;
 
         let crypto_fs = self.crypto_fs.clone();
-
-        // Split readdir into two parts: reading entries (blocking) and processing them (requires self interaction for handle map which is just mutex)
-        // Wait, self.get_or_create_handle uses a Mutex, which is std::sync::Mutex, so it blocks the thread.
-        // It's just memory lookup, so it's fast. But strict separation might be cleaner.
-        // However, we can't call self methods inside spawn_blocking easily unless we Arc<Self>.
-        // NfsServer is not Arced usually.
-
-        // Let's gather the entries first.
-
         let path_clone = path.clone();
+
         let entries = tokio::task::spawn_blocking(move || {
             crypto_fs
                 .read_dir(&path_clone)
@@ -542,8 +559,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         .await
         .unwrap()?;
 
-        let mut dirlist = Vec::new();
-        let mut entry_count = 0;
+        let mut dirlist_with_meta = Vec::new();
         let mut current_cookie = 0u64;
 
         for entry in entries {
@@ -553,7 +569,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
                 continue;
             }
 
-            if entry_count >= max_entries {
+            if dirlist_with_meta.len() >= max_entries {
                 break;
             }
 
@@ -561,45 +577,16 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             let entry_path = path.join(&name);
             let fileid = self.get_or_create_handle(entry_path) as fileid3;
 
-            dirlist.push((fileid, name.into_bytes(), current_cookie));
-            entry_count += 1;
+            dirlist_with_meta.push(DirEntry {
+                fileid,
+                name: nfsstring::from(name.into_bytes()),
+                attr: NfsServer::<FS>::metadata_to_fattr3(entry.metadata, fileid),
+            });
         }
-
-        // Now we need metadata for each entry. This is potentially N blocking calls.
-
-        let crypto_fs = self.crypto_fs.clone();
-        // We can do this in parallel or sequential in blocking block.
-        // Since we need to return Result, let's do one big blocking block for metadata fetches.
-
-        // We need to map dirlist -> DirEntry.
-        // We have fileid, name, cookie.
-
-        let path_clone = path.clone();
-        let dirlist_with_meta = tokio::task::spawn_blocking(move || {
-            dirlist
-                .into_iter()
-                .map(|(fileid, name, _cookie)| {
-                    let entry_path = path_clone.join(String::from_utf8_lossy(&name).as_ref());
-                    let attr = if let Ok(metadata) = crypto_fs.metadata(&entry_path) {
-                        NfsServer::<FS>::metadata_to_fattr3(metadata, fileid)
-                    } else {
-                        fattr3::default()
-                    };
-
-                    DirEntry {
-                        fileid,
-                        name: nfsstring::from(name),
-                        attr,
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .await
-        .unwrap();
 
         Ok(ReadDirResult {
             entries: dirlist_with_meta,
-            end: entry_count < max_entries,
+            end: current_cookie <= (cookie + max_entries as u64),
         })
     }
 

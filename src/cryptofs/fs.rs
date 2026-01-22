@@ -534,14 +534,19 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     pub fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
         let real_path = self.filepath_to_real_path(&path)?;
         let key = real_path.full_path.clone();
+        let is_shorten = real_path.is_shorten;
 
-        if real_path.is_shorten {
+        if is_shorten {
             self.file_system_provider.remove_dir(real_path)?;
         } else {
             self.file_system_provider.remove_file(real_path)?;
         }
 
         self.invalidate_caches(&key)?;
+        if is_shorten {
+            self.invalidate_caches(key.join(FULL_NAME_FILENAME))?;
+            self.invalidate_caches(key.join(CONTENTS_FILENAME))?;
+        }
 
         Ok(())
     }

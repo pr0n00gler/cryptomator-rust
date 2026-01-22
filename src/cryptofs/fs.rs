@@ -5,8 +5,8 @@ use crate::crypto::{
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist};
 use crate::cryptofs::filesystem::Metadata;
 use crate::cryptofs::{
-    component_to_string, last_path_component, parent_path, DirEntry, File, FileSystem,
-    FileSystemError, OpenOptions, Stats,
+    last_path_component, parent_path, DirEntry, File, FileSystem, FileSystemError, OpenOptions,
+    Stats,
 };
 use lru_cache::LruCache;
 use std::convert::TryFrom;
@@ -374,65 +374,75 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     /// Creates the directory at this path
     /// Similar to create_dir_all()
     pub fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
-        let mut parent_dir_id: Vec<u8> = vec![];
-        let mut path_buf = PathBuf::new();
+        let mut current_dir_id: Vec<u8> = vec![];
 
-        let components = Path::new(path.as_ref()).components();
-        for component in components {
-            let path = component_to_string(component)?;
-            path_buf = path_buf.join(Path::new(&path));
-            let dir_id = self.dir_id_from_path(&path_buf);
+        for component in path.as_ref().components() {
+            match component {
+                std::path::Component::RootDir => current_dir_id.clear(),
+                std::path::Component::Normal(path_name) => {
+                    let component_name = path_name.to_str().ok_or_else(|| {
+                        FileSystemError::InvalidPathError(path_name.to_string_lossy().into_owned())
+                    })?;
 
-            match dir_id {
-                Ok(id) => parent_dir_id = id,
-                Err(e) => match e {
-                    PathDoesNotExist(_) => {
-                        let encrypted_name = self
-                            .cryptor
-                            .encrypt_filename(path, parent_dir_id.as_slice())?;
-                        let full_encrypted_name = encrypted_name.clone() + ENCRYPTED_FILE_EXT;
-                        let (storage_name, is_shorten) =
-                            self.shorten_if_needed(full_encrypted_name.clone());
-
-                        let mut real_path = self.real_path_from_dir_id(parent_dir_id.as_slice())?;
-                        real_path.push(&storage_name);
-                        self.file_system_provider.create_dir_all(&real_path)?;
-
-                        if is_shorten {
-                            let mut name_writer = self
-                                .file_system_provider
-                                .create_file(real_path.join(FULL_NAME_FILENAME))?;
-                            name_writer.write_all(full_encrypted_name.as_bytes())?
+                    match self.resolve_component(&current_dir_id, component_name) {
+                        Ok(id) => current_dir_id = id,
+                        Err(FileSystemError::PathDoesNotExist(_)) => {
+                            current_dir_id =
+                                self.create_dir_entry(&current_dir_id, component_name)?;
                         }
-
-                        real_path = real_path.join(DIR_FILENAME);
-
-                        let mut writer = self.file_system_provider.create_file(&real_path)?;
-                        let dir_uuid = uuid::Uuid::new_v4();
-                        writer.write_all(dir_uuid.to_string().as_bytes())?;
-
-                        let dir_id_hash = self
-                            .cryptor
-                            .get_dir_id_hash(dir_uuid.to_string().as_bytes())?;
-
-                        let real_folder_path = self
-                            .root_folder
-                            .join(&dir_id_hash[..2])
-                            .join(&dir_id_hash[2..]);
-
-                        self.file_system_provider
-                            .create_dir_all(&real_folder_path)?;
-
-                        parent_dir_id = Vec::from(dir_uuid.to_string().as_bytes());
+                        Err(e) => return Err(e),
                     }
-                    _ => {
-                        error!("Failed to get dir_id from path {:?}: {:?}", path_buf, e);
-                        return Err(e);
-                    }
-                },
+                }
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    return Err(FileSystemError::InvalidPathError(
+                        ".. is not supported".to_string(),
+                    ));
+                }
+                _ => {}
             }
         }
         Ok(())
+    }
+
+    /// Internal helper to create a directory entry (dir.c9r, name.c9s, and sharded content folder)
+    fn create_dir_entry(
+        &self,
+        parent_dir_id: &[u8],
+        name: &str,
+    ) -> Result<Vec<u8>, FileSystemError> {
+        let encrypted_name = self.cryptor.encrypt_filename(name, parent_dir_id)?;
+        let full_encrypted_name = encrypted_name + ENCRYPTED_FILE_EXT;
+        let (storage_name, is_shorten) = self.shorten_if_needed(full_encrypted_name.clone());
+
+        let mut real_path = self.real_path_from_dir_id(parent_dir_id)?;
+        real_path.push(&storage_name);
+
+        self.file_system_provider.create_dir_all(&real_path)?;
+
+        if is_shorten {
+            let mut name_writer = self
+                .file_system_provider
+                .create_file(real_path.join(FULL_NAME_FILENAME))?;
+            name_writer.write_all(full_encrypted_name.as_bytes())?;
+        }
+
+        let dir_uuid_bytes = uuid::Uuid::new_v4().to_string().into_bytes();
+        let mut writer = self
+            .file_system_provider
+            .create_file(real_path.join(DIR_FILENAME))?;
+        writer.write_all(&dir_uuid_bytes)?;
+
+        let real_folder_path = self.real_path_from_dir_id(&dir_uuid_bytes)?;
+        self.file_system_provider
+            .create_dir_all(&real_folder_path)?;
+
+        {
+            let mut cache = self.dir_uuids_cache.lock()?;
+            cache.insert(real_path, dir_uuid_bytes.clone());
+        }
+
+        Ok(dir_uuid_bytes)
     }
 
     pub fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {

@@ -18,7 +18,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::error;
-use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 /// Extension of encrypted filename
@@ -742,14 +741,8 @@ pub struct CryptoFsFile {
     /// Buffer for reading chunks to avoid repeated allocations
     read_buffer: Zeroizing<Vec<u8>>,
 
-    /// Buffer for decrypting chunks to avoid repeated allocations
-    decrypted_buffer: Zeroizing<Vec<u8>>,
-
     /// Buffer for encrypting chunks to avoid repeated allocations
     write_buffer: Zeroizing<Vec<u8>>,
-
-    /// Buffer for preparing chunk data before encryption
-    write_chunk_buffer: Zeroizing<Vec<u8>>,
 }
 
 impl CryptoFsFile {
@@ -784,11 +777,7 @@ impl CryptoFsFile {
             real_len,
             chunk_cache: LruCache::new(chunk_cache_cap),
             read_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_LENGTH)),
-            decrypted_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_CONTENT_PAYLOAD_LENGTH)),
             write_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_LENGTH)),
-            write_chunk_buffer: Zeroizing::new(Vec::with_capacity(
-                FILE_CHUNK_CONTENT_PAYLOAD_LENGTH,
-            )),
         })
     }
 
@@ -819,11 +808,7 @@ impl CryptoFsFile {
             real_len,
             chunk_cache: LruCache::new(chunk_cache_cap),
             read_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_LENGTH)),
-            decrypted_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_CONTENT_PAYLOAD_LENGTH)),
             write_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_LENGTH)),
-            write_chunk_buffer: Zeroizing::new(Vec::with_capacity(
-                FILE_CHUNK_CONTENT_PAYLOAD_LENGTH,
-            )),
         })
     }
 
@@ -929,18 +914,16 @@ impl CryptoFsFile {
 
         let chunk_slice = &self.read_buffer[..read_bytes];
 
-        self.decrypted_buffer
-            .resize(FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, 0);
+        let mut decrypted_buffer = Zeroizing::new(vec![0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH]);
         let decrypted_len = match self.cryptor.decrypt_chunk(
             &self.header.nonce,
             &self.header.payload.content_key,
             chunk_index,
             chunk_slice,
-            &mut self.decrypted_buffer,
+            &mut decrypted_buffer,
         ) {
             Ok(len) => len,
             Err(err) => {
-                self.decrypted_buffer.zeroize();
                 error!(chunk_index, "Failed to decrypt chunk: {:?}", err);
                 return Err(err.into());
             }
@@ -951,17 +934,14 @@ impl CryptoFsFile {
                 chunk_index,
                 "Decrypted chunk shorter than expected: {} < {}", decrypted_len, expected_plain_len
             );
-            self.decrypted_buffer.zeroize();
             return Err(FileSystemError::IoError(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "Decrypted chunk shorter than expected",
             )));
         }
 
-        let decrypted_chunk = Zeroizing::new(self.decrypted_buffer[..decrypted_len].to_vec());
-        self.decrypted_buffer.zeroize();
-
-        self.chunk_cache.insert(chunk_index, decrypted_chunk);
+        decrypted_buffer.truncate(decrypted_len);
+        self.chunk_cache.insert(chunk_index, decrypted_buffer);
 
         Ok(())
     }
@@ -976,25 +956,25 @@ impl CryptoFsFile {
     ) -> Result<usize, FileSystemError> {
         let payload_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH;
 
-        self.write_chunk_buffer.clear();
-
         // 1. Load existing data if we are partially overwriting or extending
-        if (chunk_idx * payload_len as u64) < known_size {
+        let mut chunk_data = if (chunk_idx * payload_len as u64) < known_size {
             self.load_chunk(chunk_idx, known_size)?;
-            if let Some(existing) = self.chunk_cache.get_mut(&chunk_idx) {
-                self.write_chunk_buffer
-                    .extend_from_slice(existing.as_slice());
-            }
-        }
+            // Taking ownership from cache to avoid copy
+            self.chunk_cache
+                .remove(&chunk_idx)
+                .unwrap_or_else(|| Zeroizing::new(Vec::new()))
+        } else {
+            Zeroizing::new(Vec::new())
+        };
 
         // 2. Prepare buffer size
         let required_size = offset + data.len();
-        if self.write_chunk_buffer.len() < required_size {
-            self.write_chunk_buffer.resize(required_size, 0);
+        if chunk_data.len() < required_size {
+            chunk_data.resize(required_size, 0);
         }
 
         // 3. Overwrite with new data
-        self.write_chunk_buffer[offset..required_size].copy_from_slice(data);
+        chunk_data[offset..required_size].copy_from_slice(data);
 
         // 4. Encrypt
         self.write_buffer.resize(FILE_CHUNK_LENGTH, 0);
@@ -1002,7 +982,7 @@ impl CryptoFsFile {
             &self.header.nonce,
             &self.header.payload.content_key,
             chunk_idx,
-            &self.write_chunk_buffer,
+            &chunk_data,
             &mut self.write_buffer,
         )?;
 
@@ -1014,10 +994,7 @@ impl CryptoFsFile {
             .write_all(&self.write_buffer[..encrypted_len])?;
 
         // 6. Update Cache
-        self.chunk_cache
-            .insert(chunk_idx, Zeroizing::new(self.write_chunk_buffer.to_vec()));
-        self.write_chunk_buffer.zeroize();
-        self.write_chunk_buffer.clear();
+        self.chunk_cache.insert(chunk_idx, chunk_data);
 
         Ok(data.len())
     }

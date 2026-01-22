@@ -112,7 +112,10 @@ impl DavFile for DFile {
                 Ok(Box::new(metadata) as Box<dyn DavMetaData>)
             })
             .await
-            .map_err(|_| FsError::GeneralFailure)?
+            .map_err(|e| {
+                error!("WebDAV metadata join error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -136,7 +139,10 @@ impl DavFile for DFile {
                 Ok(())
             })
             .await
-            .map_err(|_| FsError::GeneralFailure)?
+            .map_err(|e| {
+                error!("WebDAV write_buf join error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -155,7 +161,10 @@ impl DavFile for DFile {
                 Ok(())
             })
             .await
-            .map_err(|_| FsError::GeneralFailure)?
+            .map_err(|e| {
+                error!("WebDAV write_bytes join error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -176,7 +185,10 @@ impl DavFile for DFile {
                 Ok(bytes::Bytes::from(buf))
             })
             .await
-            .map_err(|_| FsError::GeneralFailure)?
+            .map_err(|e| {
+                error!("WebDAV read_bytes join error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -194,7 +206,10 @@ impl DavFile for DFile {
                 })
             })
             .await
-            .map_err(|_| FsError::GeneralFailure)?
+            .map_err(|e| {
+                error!("WebDAV seek join error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -212,7 +227,10 @@ impl DavFile for DFile {
                 })
             })
             .await
-            .map_err(|_| FsError::GeneralFailure)?
+            .map_err(|e| {
+                error!("WebDAV flush join error: {:?}", e);
+                FsError::GeneralFailure
+            })?
         }
         .boxed()
     }
@@ -492,9 +510,7 @@ mod tests {
             FsError::Forbidden
         );
         assert_eq!(
-            FsError::from(FileSystemError::IoError(IoError::other(
-                "other"
-            ))),
+            FsError::from(FileSystemError::IoError(IoError::other("other"))),
             FsError::GeneralFailure
         );
         assert_eq!(

@@ -371,7 +371,6 @@ async fn test_webdav_read_dir_not_found() {
     assert!(result.is_err());
 }
 
-
 #[tokio::test]
 async fn test_webdav_copy_file() {
     let webdav = setup_webdav_server();
@@ -508,8 +507,14 @@ async fn test_webdav_rename_file() {
     assert!(result.is_ok(), "Rename failed: {:?}", result.err());
 
     // 3. Verify destination exists and source is gone
-    assert!(webdav.metadata(&dest_path).await.is_ok(), "Destination file should exist");
-    assert!(webdav.metadata(&source_path).await.is_err(), "Source file should no longer exist");
+    assert!(
+        webdav.metadata(&dest_path).await.is_ok(),
+        "Destination file should exist"
+    );
+    assert!(
+        webdav.metadata(&source_path).await.is_err(),
+        "Source file should no longer exist"
+    );
 
     // 4. Verify content integrity in destination
     let read_options = OpenOptions {
@@ -522,5 +527,9 @@ async fn test_webdav_rename_file() {
     };
     let mut dest_file = webdav.open(&dest_path, read_options).await.unwrap();
     let read_data = dest_file.read_bytes(test_data.len()).await.unwrap();
-    assert_eq!(read_data.as_ref(), test_data, "Data corruption after rename");
+    assert_eq!(
+        read_data.as_ref(),
+        test_data,
+        "Data corruption after rename"
+    );
 }

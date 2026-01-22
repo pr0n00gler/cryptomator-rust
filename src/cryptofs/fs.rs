@@ -18,6 +18,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::error;
+use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 /// Extension of encrypted filename
@@ -736,7 +737,7 @@ pub struct CryptoFsFile {
     real_len: u64,
 
     /// Stores the most frequently used chunks of the file to decrease read operations
-    chunk_cache: LruCache<u64, Arc<Zeroizing<Vec<u8>>>>,
+    chunk_cache: LruCache<u64, Zeroizing<Vec<u8>>>,
 
     /// Buffer for reading chunks to avoid repeated allocations
     read_buffer: Zeroizing<Vec<u8>>,
@@ -870,14 +871,14 @@ impl CryptoFsFile {
         Ok(())
     }
 
-    /// Reads and returns cleartext chunk of the data.
+    /// Ensures the cleartext chunk is present in the cache.
     ///
     /// `total_cleartext_size` must reflect the current cleartext file length.
-    fn read_chunk(
+    fn load_chunk(
         &mut self,
         chunk_index: u64,
         mut total_cleartext_size: u64,
-    ) -> Result<Arc<Zeroizing<Vec<u8>>>, FileSystemError> {
+    ) -> Result<(), FileSystemError> {
         let payload_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
         let chunk_start_clear = chunk_index * payload_len;
         if total_cleartext_size <= chunk_start_clear && self.refresh_metadata().is_ok() {
@@ -894,7 +895,7 @@ impl CryptoFsFile {
             if cached.len() < expected_plain_len {
                 self.chunk_cache.remove(&chunk_index);
             } else {
-                return Ok(Arc::clone(cached));
+                return Ok(());
             }
         }
 
@@ -908,10 +909,9 @@ impl CryptoFsFile {
         if read_bytes == 0 {
             if expected_plain_len > 0 {
                 if self.refresh_metadata().is_ok() && self.metadata.len <= chunk_start_clear {
-                    let zero_chunk = Arc::new(Zeroizing::new(Vec::new()));
                     self.chunk_cache
-                        .insert(chunk_index, Arc::clone(&zero_chunk));
-                    return Ok(zero_chunk);
+                        .insert(chunk_index, Zeroizing::new(Vec::new()));
+                    return Ok(());
                 }
                 error!(
                     chunk_index,
@@ -922,10 +922,9 @@ impl CryptoFsFile {
                     "Physical file is shorter than expected",
                 )));
             }
-            let zero_chunk = Arc::new(Zeroizing::new(Vec::new()));
             self.chunk_cache
-                .insert(chunk_index, Arc::clone(&zero_chunk));
-            return Ok(zero_chunk);
+                .insert(chunk_index, Zeroizing::new(Vec::new()));
+            return Ok(());
         }
 
         let chunk_slice = &self.read_buffer[..read_bytes];
@@ -941,6 +940,7 @@ impl CryptoFsFile {
         ) {
             Ok(len) => len,
             Err(err) => {
+                self.decrypted_buffer.zeroize();
                 error!(chunk_index, "Failed to decrypt chunk: {:?}", err);
                 return Err(err.into());
             }
@@ -951,20 +951,19 @@ impl CryptoFsFile {
                 chunk_index,
                 "Decrypted chunk shorter than expected: {} < {}", decrypted_len, expected_plain_len
             );
+            self.decrypted_buffer.zeroize();
             return Err(FileSystemError::IoError(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "Decrypted chunk shorter than expected",
             )));
         }
 
-        let decrypted_chunk = Arc::new(Zeroizing::new(
-            self.decrypted_buffer[..decrypted_len].to_vec(),
-        ));
+        let decrypted_chunk = Zeroizing::new(self.decrypted_buffer[..decrypted_len].to_vec());
+        self.decrypted_buffer.zeroize();
 
-        self.chunk_cache
-            .insert(chunk_index, Arc::clone(&decrypted_chunk));
+        self.chunk_cache.insert(chunk_index, decrypted_chunk);
 
-        Ok(decrypted_chunk)
+        Ok(())
     }
 
     /// Internal helper to handle the Read-Modify-Write cycle for a single chunk.
@@ -981,9 +980,11 @@ impl CryptoFsFile {
 
         // 1. Load existing data if we are partially overwriting or extending
         if (chunk_idx * payload_len as u64) < known_size {
-            let existing = self.read_chunk(chunk_idx, known_size)?;
-            self.write_chunk_buffer
-                .extend_from_slice(existing.as_ref().as_slice());
+            self.load_chunk(chunk_idx, known_size)?;
+            if let Some(existing) = self.chunk_cache.get_mut(&chunk_idx) {
+                self.write_chunk_buffer
+                    .extend_from_slice(existing.as_slice());
+            }
         }
 
         // 2. Prepare buffer size
@@ -1013,10 +1014,10 @@ impl CryptoFsFile {
             .write_all(&self.write_buffer[..encrypted_len])?;
 
         // 6. Update Cache
-        self.chunk_cache.insert(
-            chunk_idx,
-            Arc::new(Zeroizing::new(self.write_chunk_buffer.to_vec())),
-        );
+        self.chunk_cache
+            .insert(chunk_idx, Zeroizing::new(self.write_chunk_buffer.to_vec()));
+        self.write_chunk_buffer.zeroize();
+        self.write_chunk_buffer.clear();
 
         Ok(data.len())
     }
@@ -1090,17 +1091,20 @@ impl Read for CryptoFsFile {
 
             let chunk_index = self.current_pos / payload_len;
             let offset = (self.current_pos % payload_len) as usize;
-            let chunk = match self.read_chunk(chunk_index, total_plain_size) {
-                Ok(c) => c,
-                Err(e) => {
+            self.load_chunk(chunk_index, total_plain_size)
+                .map_err(|e| {
                     error!(chunk_index, "Failed to read chunk: {:?}", e);
-                    return Err(std::io::Error::from(e));
-                }
-            };
+                    std::io::Error::from(e)
+                })?;
             total_plain_size = self.metadata.len;
             if self.current_pos >= total_plain_size {
                 break;
             }
+            let chunk_slice = if let Some(chunk) = self.chunk_cache.get_mut(&chunk_index) {
+                chunk.as_slice()
+            } else {
+                &[]
+            };
 
             let remaining_total = (total_plain_size - self.current_pos) as usize;
             let remaining_buf = buf.len() - n;
@@ -1112,7 +1116,6 @@ impl Read for CryptoFsFile {
             let available_in_chunk = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH - offset;
             let slice_len = max_read.min(available_in_chunk);
 
-            let chunk_slice = chunk.as_ref().as_slice();
             let data_available = if offset < chunk_slice.len() {
                 chunk_slice.len() - offset
             } else {

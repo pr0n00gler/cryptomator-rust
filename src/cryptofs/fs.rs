@@ -956,13 +956,16 @@ impl Seek for CryptoFsFile {
 impl Read for CryptoFsFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let payload_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
-        let total_plain_size = match self.file_size() {
-            Ok(size) => size,
-            Err(e) => {
-                error!("Failed to determine cleartext file size: {:?}", e);
-                return Err(e.into());
+        let real_metadata = self.rfs_file.metadata().map_err(|e| {
+            error!("Failed to read file metadata: {:?}", e);
+            match e.downcast::<std::io::Error>() {
+                Ok(io_error) => *io_error,
+                Err(other) => std::io::Error::other(other.to_string()),
             }
-        };
+        })?;
+        self.metadata.len = calculate_cleartext_size(real_metadata.len);
+        self.metadata.modified = real_metadata.modified;
+        let total_plain_size = self.metadata.len;
         let mut n: usize = 0;
         while n < buf.len() {
             if self.current_pos >= total_plain_size {

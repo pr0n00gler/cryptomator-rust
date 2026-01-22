@@ -9,12 +9,14 @@ use crate::cryptofs::{
     Stats,
 };
 use lru_cache::LruCache;
+use std::collections::hash_map::DefaultHasher;
 use std::convert::TryFrom;
 use std::error::Error;
 use std::ffi::OsString;
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::error;
 use zeroize::Zeroizing;
 
@@ -31,6 +33,44 @@ const FULL_NAME_FILENAME: &str = "name.c9s";
 
 /// Name of a file that contains contents of a shorten file
 const CONTENTS_FILENAME: &str = "contents.c9r";
+
+struct CacheShard {
+    dir_uuids: LruCache<PathBuf, Vec<u8>>,
+    dir_entries: LruCache<PathBuf, DirEntry>,
+    shortened_names: LruCache<PathBuf, String>,
+}
+
+struct CryptoFsCaches {
+    shards: Vec<Mutex<CacheShard>>,
+    shard_mask: usize,
+}
+
+impl CryptoFsCaches {
+    fn new(capacity: usize, num_shards: usize) -> Self {
+        let num_shards = num_shards.max(1).next_power_of_two();
+        let shard_cap = capacity.div_ceil(num_shards);
+        let shard_cap = shard_cap.max(1);
+        let mut shards = Vec::with_capacity(num_shards);
+        for _ in 0..num_shards {
+            shards.push(Mutex::new(CacheShard {
+                dir_uuids: LruCache::new(shard_cap),
+                dir_entries: LruCache::new(shard_cap),
+                shortened_names: LruCache::new(shard_cap),
+            }));
+        }
+        Self {
+            shards,
+            shard_mask: num_shards - 1,
+        }
+    }
+
+    fn get_shard(&self, path: &Path) -> &Mutex<CacheShard> {
+        let mut s = DefaultHasher::new();
+        path.hash(&mut s);
+        let hash = s.finish() as usize;
+        &self.shards[hash & self.shard_mask]
+    }
+}
 
 // TODO: make configurable
 /// Chunk cache capacity for per files
@@ -74,9 +114,7 @@ pub struct CryptoFs<FS: FileSystem> {
     /// Instance of the FileSystem. Should provide access to a real files.
     file_system_provider: FS,
 
-    dir_uuids_cache: Arc<Mutex<LruCache<PathBuf, Vec<u8>>>>,
-    dir_entries_cache: Arc<Mutex<LruCache<PathBuf, DirEntry>>>,
-    shortened_names_cache: Arc<Mutex<LruCache<PathBuf, String>>>,
+    caches: Arc<CryptoFsCaches>,
     config: CryptoFsConfig,
 }
 
@@ -100,9 +138,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             cryptor,
             root_folder: PathBuf::from(folder),
             file_system_provider: fs_provider,
-            dir_uuids_cache: Arc::new(Mutex::new(LruCache::new(5000))),
-            dir_entries_cache: Arc::new(Mutex::new(LruCache::new(5000))),
-            shortened_names_cache: Arc::new(Mutex::new(LruCache::new(5000))),
+            caches: Arc::new(CryptoFsCaches::new(5000, 16)),
             config,
         };
         let root = crypto_fs.real_path_from_dir_id(b"")?;
@@ -114,6 +150,13 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     pub fn real_path_from_dir_id(&self, dir_id: &[u8]) -> Result<PathBuf, FileSystemError> {
         let dir_hash = self.cryptor.get_dir_id_hash(dir_id)?;
         Ok(self.root_folder.join(&dir_hash[..2]).join(&dir_hash[2..]))
+    }
+
+    fn lock_shard(&self, path: &Path) -> Result<MutexGuard<CacheShard>, FileSystemError> {
+        self.caches
+            .get_shard(path)
+            .lock()
+            .map_err(|e| FileSystemError::UnknownError(e.to_string()))
     }
 
     fn shorten_if_needed(&self, encrypted_name: String) -> (String, bool) {
@@ -161,8 +204,8 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         full_path.push(&full_encrypted_name);
 
         if let Some(cached_dir_id) = {
-            let mut cache = self.dir_uuids_cache.lock()?;
-            cache.get_mut(&full_path).cloned()
+            let mut shard = self.lock_shard(&full_path)?;
+            shard.dir_uuids.get_mut(&full_path).cloned()
         } {
             return Ok(cached_dir_id);
         }
@@ -181,8 +224,8 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
 
         {
-            let mut cache = self.dir_uuids_cache.lock()?;
-            cache.insert(full_path, dir_uuid.clone());
+            let mut shard = self.lock_shard(&full_path)?;
+            shard.dir_uuids.insert(full_path, dir_uuid.clone());
         }
 
         Ok(dir_uuid)
@@ -235,8 +278,10 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         full_path.push(&full_name);
 
         if is_shorten {
-            let mut guard = self.shortened_names_cache.lock()?;
-            guard.insert(full_path.clone(), real_filename);
+            let mut shard = self.lock_shard(&full_path)?;
+            shard
+                .shortened_names
+                .insert(full_path.clone(), real_filename);
         }
 
         Ok(CryptoPath {
@@ -252,24 +297,20 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         dir_id: &[u8],
         virtual_parent_path: &Path,
     ) -> Result<DirEntry, FileSystemError> {
-        {
-            let mut guard = self.dir_entries_cache.lock()?;
-            if let Some(virtual_dir_entry) = guard.get_mut(&de.path) {
-                return Ok(virtual_dir_entry.clone());
-            }
+        let mut shard = self.lock_shard(&de.path)?;
+        if let Some(virtual_dir_entry) = shard.dir_entries.get_mut(&de.path) {
+            return Ok(virtual_dir_entry.clone());
         }
 
         let mut metadata = de.metadata;
         let mut ciphertext_filename = de.filename_without_extension();
         if de.filename_string()?.ends_with(SHORTEN_FILENAME_EXT) {
-            let cached_name = {
-                let mut guard = self.shortened_names_cache.lock()?;
-                guard.get_mut(&de.path).cloned()
-            };
+            let cached_name = shard.shortened_names.get_mut(&de.path).cloned();
 
             ciphertext_filename = if let Some(name) = cached_name {
                 name
             } else {
+                drop(shard);
                 let mut read_name: Vec<u8> = vec![];
                 let mut fname_file = self
                     .file_system_provider
@@ -283,8 +324,8 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
                         "shorten file consists invalid ciphertext filename",
                     )));
                 };
-                let mut guard = self.shortened_names_cache.lock()?;
-                guard.insert(de.path.clone(), name.clone());
+                shard = self.lock_shard(&de.path)?;
+                shard.shortened_names.insert(de.path.clone(), name.clone());
                 name
             };
 
@@ -308,10 +349,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             file_name: OsString::from(decrypted_filename),
         };
 
-        {
-            let mut guard = self.dir_entries_cache.lock()?;
-            guard.insert(de.path, virtual_dir_entry.clone());
-        }
+        shard.dir_entries.insert(de.path, virtual_dir_entry.clone());
 
         Ok(virtual_dir_entry)
     }
@@ -438,8 +476,8 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             .create_dir_all(&real_folder_path)?;
 
         {
-            let mut cache = self.dir_uuids_cache.lock()?;
-            cache.insert(real_path, dir_uuid_bytes.clone());
+            let mut shard = self.lock_shard(&real_path)?;
+            shard.dir_uuids.insert(real_path, dir_uuid_bytes.clone());
         }
 
         Ok(dir_uuid_bytes)
@@ -660,9 +698,10 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
 
     fn invalidate_caches<P: AsRef<Path>>(&self, real_path: P) -> Result<(), FileSystemError> {
         let path = real_path.as_ref();
-        self.dir_entries_cache.lock()?.remove(path);
-        self.dir_uuids_cache.lock()?.remove(path);
-        self.shortened_names_cache.lock()?.remove(path);
+        let mut shard = self.lock_shard(path)?;
+        shard.dir_entries.remove(path);
+        shard.dir_uuids.remove(path);
+        shard.shortened_names.remove(path);
         Ok(())
     }
 }

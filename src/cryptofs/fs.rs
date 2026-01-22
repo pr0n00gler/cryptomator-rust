@@ -667,6 +667,9 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     }
 }
 
+/// Buffer for filling gaps with zeros
+static ZEROS: [u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH] = [0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH];
+
 /// 'Virtual' file implementation of the File trait
 #[derive(Debug)]
 pub struct CryptoFsFile {
@@ -1055,9 +1058,7 @@ impl Read for CryptoFsFile {
 
             if slice_len > copy_len {
                 let zero_len = slice_len - copy_len;
-                for byte in &mut buf[n..n + zero_len] {
-                    *byte = 0;
-                }
+                buf[n..n + zero_len].fill(0);
                 n += zero_len;
                 self.current_pos += zero_len as u64;
             }
@@ -1075,13 +1076,16 @@ impl Write for CryptoFsFile {
         while known_size < self.current_pos {
             let chunk_idx = known_size / payload_len;
             let offset = (known_size % payload_len) as usize;
-            let fill_len = (payload_len - offset as u64).min(self.current_pos - known_size);
 
-            let zeros = vec![0u8; fill_len as usize];
-            self.write_single_chunk(chunk_idx, offset, &zeros, known_size)
+            let available_in_chunk = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH - offset;
+            let remaining_gap = (self.current_pos - known_size) as usize;
+            let fill_len = available_in_chunk.min(remaining_gap);
+
+            debug_assert!(fill_len <= ZEROS.len());
+            self.write_single_chunk(chunk_idx, offset, &ZEROS[..fill_len], known_size)
                 .map_err(std::io::Error::from)?;
 
-            known_size += fill_len;
+            known_size += fill_len as u64;
         }
 
         let mut n: usize = 0;

@@ -167,6 +167,12 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
     }
 
+    fn os_str_to_utf8<'a>(&self, value: &'a std::ffi::OsStr) -> Result<&'a str, FileSystemError> {
+        value
+            .to_str()
+            .ok_or_else(|| FileSystemError::InvalidPathError(value.to_string_lossy().into_owned()))
+    }
+
     /// Returns a dir_id for a path
     /// There will be an PathIsNotExist error, if path does not exists and CryptoError cause of crypto errors
     pub fn dir_id_from_path<P: AsRef<Path>>(&self, path: P) -> Result<Vec<u8>, FileSystemError> {
@@ -175,9 +181,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             match component {
                 std::path::Component::RootDir => dir_id.clear(),
                 std::path::Component::Normal(path_name) => {
-                    let cleartext_name = path_name.to_str().ok_or_else(|| {
-                        FileSystemError::UnknownError("failed to convert OsStr to str".to_string())
-                    })?;
+                    let cleartext_name = self.os_str_to_utf8(path_name)?;
                     dir_id = self.resolve_component(&dir_id, cleartext_name)?;
                 }
                 other => {
@@ -260,13 +264,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             });
         }
 
-        let filename_str = if let Some(fname) = filename.to_str() {
-            fname
-        } else {
-            return Err(InvalidPathError(
-                "failed to convert PathBuf to str".to_string(),
-            ));
-        };
+        let filename_str = self.os_str_to_utf8(filename.as_os_str())?;
 
         let real_filename = self
             .cryptor
@@ -376,13 +374,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             .create_file(real_path.as_ref().join(FULL_NAME_FILENAME))?;
 
         let virtual_filename = last_path_component(&virtual_path)?;
-        let virtual_filename_str = if let Some(name) = virtual_filename.to_str() {
-            name
-        } else {
-            return Err(FileSystemError::UnknownError(
-                "failed to convert PathBuf to str".to_string(),
-            ));
-        };
+        let virtual_filename_str = self.os_str_to_utf8(virtual_filename.as_os_str())?;
 
         let full_encrypted_name = self.cryptor.encrypt_filename(
             virtual_filename_str,
@@ -418,9 +410,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             match component {
                 std::path::Component::RootDir => current_dir_id.clear(),
                 std::path::Component::Normal(path_name) => {
-                    let component_name = path_name.to_str().ok_or_else(|| {
-                        FileSystemError::InvalidPathError(path_name.to_string_lossy().into_owned())
-                    })?;
+                    let component_name = self.os_str_to_utf8(path_name)?;
 
                     match self.resolve_component(&current_dir_id, component_name) {
                         Ok(id) => current_dir_id = id,

@@ -607,12 +607,10 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             self.create_dir(dst_path)?;
         }
 
+        let src_root = _src.as_ref();
         for entry in src_dir_entries {
-            let mut dst_full_path = PathBuf::new();
-            dst_full_path = dst_full_path.join(dst_path).join(&entry.file_name);
-
-            let mut src_full_path = PathBuf::new();
-            src_full_path = src_full_path.join(&_src).join(&entry.file_name);
+            let dst_full_path = dst_path.join(&entry.file_name);
+            let src_full_path = src_root.join(&entry.file_name);
 
             if entry.metadata.is_dir {
                 self.copy_dir(src_full_path, dst_full_path)?;
@@ -660,12 +658,10 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             self.create_dir(dst_path)?;
         }
 
+        let src_root = _src.as_ref();
         for entry in src_dir_entries {
-            let dst_full_path = PathBuf::new();
-            let dst_full_path = dst_full_path.join(dst_path).join(&entry.file_name);
-
-            let src_full_path = PathBuf::new();
-            let src_full_path = src_full_path.join(&_src).join(&entry.file_name);
+            let dst_full_path = dst_path.join(&entry.file_name);
+            let src_full_path = src_root.join(&entry.file_name);
 
             if entry.metadata.is_dir {
                 self.move_dir(src_full_path, dst_full_path)?;

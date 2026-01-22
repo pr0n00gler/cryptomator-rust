@@ -295,20 +295,25 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         dir_id: &[u8],
         virtual_parent_path: &Path,
     ) -> Result<DirEntry, FileSystemError> {
-        let mut shard = self.lock_shard(&de.path)?;
-        if let Some(virtual_dir_entry) = shard.dir_entries.get_mut(&de.path) {
-            return Ok(virtual_dir_entry.clone());
+        let real_path = de.path.clone();
+        if let Some(virtual_dir_entry) = {
+            let mut shard = self.lock_shard(&real_path)?;
+            shard.dir_entries.get_mut(&real_path).cloned()
+        } {
+            return Ok(virtual_dir_entry);
         }
 
         let mut metadata = de.metadata;
         let mut ciphertext_filename = de.filename_without_extension();
         if de.filename_string()?.ends_with(SHORTEN_FILENAME_EXT) {
-            let cached_name = shard.shortened_names.get_mut(&de.path).cloned();
+            let cached_name = {
+                let mut shard = self.lock_shard(&real_path)?;
+                shard.shortened_names.get_mut(&real_path).cloned()
+            };
 
             ciphertext_filename = if let Some(name) = cached_name {
                 name
             } else {
-                drop(shard);
                 let mut read_name: Vec<u8> = vec![];
                 let mut fname_file = self
                     .file_system_provider
@@ -322,8 +327,10 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
                         "shorten file consists invalid ciphertext filename",
                     )));
                 };
-                shard = self.lock_shard(&de.path)?;
-                shard.shortened_names.insert(de.path.clone(), name.clone());
+                let mut shard = self.lock_shard(&real_path)?;
+                shard
+                    .shortened_names
+                    .insert(real_path.clone(), name.clone());
                 name
             };
 
@@ -347,7 +354,10 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             file_name: OsString::from(decrypted_filename),
         };
 
-        shard.dir_entries.insert(de.path, virtual_dir_entry.clone());
+        let mut shard = self.lock_shard(&real_path)?;
+        shard
+            .dir_entries
+            .insert(real_path, virtual_dir_entry.clone());
 
         Ok(virtual_dir_entry)
     }

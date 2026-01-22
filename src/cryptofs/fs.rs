@@ -9,6 +9,7 @@ use crate::cryptofs::{
     FileSystemError, OpenOptions, Stats,
 };
 use lru_cache::LruCache;
+use std::convert::TryFrom;
 use std::error::Error;
 use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -904,14 +905,49 @@ impl Seek for CryptoFsFile {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
         match pos {
             SeekFrom::Start(p) => self.current_pos = p,
-            SeekFrom::Current(p) => self.current_pos = (self.current_pos as i64 + p) as u64,
-            SeekFrom::End(p) => match self.file_size() {
-                Ok(s) => self.current_pos = (s as i64 + p) as u64,
-                Err(e) => {
-                    error!("Failed to determine cleartext file size: {:?}", e);
-                    return Err(e.into());
+            SeekFrom::Current(p) => {
+                let current = i64::try_from(self.current_pos).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "current position exceeds i64::MAX",
+                    )
+                })?;
+                let new_pos = current.checked_add(p).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek overflow")
+                })?;
+                if new_pos < 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "invalid seek to a negative position",
+                    ));
                 }
-            },
+                self.current_pos = new_pos as u64;
+            }
+            SeekFrom::End(p) => {
+                let size = match self.file_size() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("Failed to determine cleartext file size: {:?}", e);
+                        return Err(e.into());
+                    }
+                };
+                let size = i64::try_from(size).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "file size exceeds i64::MAX",
+                    )
+                })?;
+                let new_pos = size.checked_add(p).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek overflow")
+                })?;
+                if new_pos < 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "invalid seek to a negative position",
+                    ));
+                }
+                self.current_pos = new_pos as u64;
+            }
         }
         Ok(self.current_pos)
     }

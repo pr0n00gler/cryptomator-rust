@@ -492,8 +492,7 @@ mod tests {
             FsError::Forbidden
         );
         assert_eq!(
-            FsError::from(FileSystemError::IoError(IoError::new(
-                ErrorKind::Other,
+            FsError::from(FileSystemError::IoError(IoError::other(
                 "other"
             ))),
             FsError::GeneralFailure
@@ -530,7 +529,7 @@ mod tests {
         );
         assert_eq!(
             FsError::from(FileSystemError::CryptoError(CryptoError::IoError(
-                IoError::new(ErrorKind::Other, "other")
+                IoError::other("other")
             ))),
             FsError::GeneralFailure
         );

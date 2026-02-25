@@ -502,7 +502,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
         let crypto_file = CryptoFsFile::open(
             real_path,
-            self.cryptor,
+            self.cryptor.clone(),
             &self.file_system_provider,
             options,
             self.config.chunk_cache_cap,
@@ -523,7 +523,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
         let reader = self.file_system_provider.create_file(real_path.full_path)?;
         let crypto_file =
-            CryptoFsFile::create_file(self.cryptor, reader, self.config.chunk_cache_cap)?;
+            CryptoFsFile::create_file(self.cryptor.clone(), reader, self.config.chunk_cache_cap)?;
         Ok(crypto_file)
     }
 
@@ -917,7 +917,7 @@ impl CryptoFsFile {
         let mut decrypted_buffer = Zeroizing::new(vec![0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH]);
         let decrypted_len = match self.cryptor.decrypt_chunk(
             &self.header.nonce,
-            &self.header.payload.content_key,
+            self.header.payload.content_key.as_ref(),
             chunk_index,
             chunk_slice,
             &mut decrypted_buffer,
@@ -980,7 +980,7 @@ impl CryptoFsFile {
         self.write_buffer.resize(FILE_CHUNK_LENGTH, 0);
         let encrypted_len = self.cryptor.encrypt_chunk(
             &self.header.nonce,
-            &self.header.payload.content_key,
+            self.header.payload.content_key.as_ref(),
             chunk_idx,
             &chunk_data,
             &mut self.write_buffer,
@@ -1159,9 +1159,8 @@ impl Write for CryptoFsFile {
             known_size = known_size.max(self.current_pos);
         }
 
-        self.metadata.len = known_size;
         if let Err(e) = self.update_metadata() {
-            error!("Failed to update metadata for a file");
+            error!("Failed to update metadata after write");
             return Err(e.into());
         }
 

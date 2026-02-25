@@ -9,101 +9,129 @@ use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use tracing::{debug, error};
 
-pub struct NfsServer<FS: FileSystem> {
-    crypto_fs: CryptoFs<FS>,
-    handle_to_path: Arc<Mutex<HashMap<u64, PathBuf>>>,
-    path_to_handle: Arc<Mutex<HashMap<PathBuf, u64>>>,
-    next_handle: Arc<Mutex<u64>>,
+/// All NFS file-handle bookkeeping lives in a single struct protected by a
+/// single `Mutex`.
+struct HandleState {
+    path_to_handle: HashMap<PathBuf, u64>,
+    handle_to_path: HashMap<u64, PathBuf>,
+    /// Monotonically increasing counter; starts at 2 (1 is reserved for root).
+    next_handle: u64,
 }
 
-impl<FS: FileSystem> NfsServer<FS> {
-    pub fn new(crypto_fs: CryptoFs<FS>) -> Self {
-        let mut handle_to_path = HashMap::new();
-        let mut path_to_handle = HashMap::new();
+impl HandleState {
+    fn new() -> Self {
         let root = PathBuf::from("/");
-        handle_to_path.insert(1, root.clone());
-        path_to_handle.insert(root, 1);
-
-        NfsServer {
-            crypto_fs,
-            handle_to_path: Arc::new(Mutex::new(handle_to_path)),
-            path_to_handle: Arc::new(Mutex::new(path_to_handle)),
-            next_handle: Arc::new(Mutex::new(2)),
+        let mut path_to_handle = HashMap::new();
+        let mut handle_to_path = HashMap::new();
+        handle_to_path.insert(1u64, root.clone());
+        path_to_handle.insert(root, 1u64);
+        HandleState {
+            path_to_handle,
+            handle_to_path,
+            next_handle: 2,
         }
     }
 
-    fn get_or_create_handle(&self, path: PathBuf) -> Result<u64, nfsstat3> {
-        let mut path_to_handle = self
-            .path_to_handle
-            .lock()
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        if let Some(&handle) = path_to_handle.get(&path) {
+    /// Returns the existing handle for `path`, or allocates a new one.
+    ///
+    /// Because both the lookup and the insertion happen inside a single
+    /// `MutexGuard` scope, there is no window for a concurrent caller to
+    /// allocate a second handle for the same path.
+    fn get_or_create(&mut self, path: PathBuf) -> Result<u64, nfsstat3> {
+        if let Some(&handle) = self.path_to_handle.get(&path) {
             return Ok(handle);
         }
-
-        let mut next_handle = self.next_handle.lock().map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        let mut handle_to_path = self
-            .handle_to_path
-            .lock()
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-
-        let handle = *next_handle;
-        *next_handle += 1;
-        path_to_handle.insert(path.clone(), handle);
-        handle_to_path.insert(handle, path);
+        // Saturating-add guard: after u64::MAX allocations the counter would
+        // wrap back to 0 and then 1 (the root handle).  Return NFS3ERR_NOSPC
+        // rather than aliasing an existing handle.
+        let handle = self
+            .next_handle
+            .checked_add(1)
+            .map(|next| {
+                let h = self.next_handle;
+                self.next_handle = next;
+                h
+            })
+            .ok_or(nfsstat3::NFS3ERR_NOSPC)?;
+        self.path_to_handle.insert(path.clone(), handle);
+        self.handle_to_path.insert(handle, path);
         Ok(handle)
     }
 
-    fn get_path_from_handle(&self, handle: &u64) -> Result<PathBuf, nfsstat3> {
-        let handle_to_path = self
-            .handle_to_path
-            .lock()
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        handle_to_path
-            .get(handle)
+    fn get_path(&self, handle: u64) -> Result<PathBuf, nfsstat3> {
+        self.handle_to_path
+            .get(&handle)
             .cloned()
             .ok_or(nfsstat3::NFS3ERR_STALE)
     }
 
-    fn forget_path(&self, path: &PathBuf) -> Result<(), nfsstat3> {
-        let mut path_to_handle = self
-            .path_to_handle
-            .lock()
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        let mut handle_to_path = self
-            .handle_to_path
-            .lock()
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        if let Some(handle) = path_to_handle.remove(path) {
-            handle_to_path.remove(&handle);
+    fn forget(&mut self, path: &PathBuf) {
+        if let Some(handle) = self.path_to_handle.remove(path) {
+            self.handle_to_path.remove(&handle);
         }
+    }
+
+    /// Atomically re-keys every path that starts with `old_path` to be rooted
+    /// at `new_path` instead, updating both maps in the same lock scope.
+    fn rename_prefix(&mut self, old_path: &PathBuf, new_path: PathBuf) {
+        let updates: Vec<(PathBuf, PathBuf, u64)> = self
+            .path_to_handle
+            .iter()
+            .filter(|(path, _)| path.starts_with(old_path))
+            .map(|(path, &handle)| {
+                let suffix = path.strip_prefix(old_path).unwrap_or(path.as_path());
+                (path.clone(), new_path.join(suffix), handle)
+            })
+            .collect();
+
+        for (old, new, handle) in updates {
+            self.path_to_handle.remove(&old);
+            self.path_to_handle.insert(new.clone(), handle);
+            self.handle_to_path.insert(handle, new);
+        }
+    }
+}
+
+pub struct NfsServer<FS: FileSystem> {
+    crypto_fs: CryptoFs<FS>,
+    handles: Arc<Mutex<HandleState>>,
+}
+
+impl<FS: FileSystem> NfsServer<FS> {
+    pub fn new(crypto_fs: CryptoFs<FS>) -> Self {
+        NfsServer {
+            crypto_fs,
+            handles: Arc::new(Mutex::new(HandleState::new())),
+        }
+    }
+
+    fn get_or_create_handle(&self, path: PathBuf) -> Result<u64, nfsstat3> {
+        self.handles
+            .lock()
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?
+            .get_or_create(path)
+    }
+
+    fn get_path_from_handle(&self, handle: u64) -> Result<PathBuf, nfsstat3> {
+        self.handles
+            .lock()
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?
+            .get_path(handle)
+    }
+
+    fn forget_path(&self, path: &PathBuf) -> Result<(), nfsstat3> {
+        self.handles
+            .lock()
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?
+            .forget(path);
         Ok(())
     }
 
     fn update_path(&self, old_path: &PathBuf, new_path: PathBuf) -> Result<(), nfsstat3> {
-        let mut path_to_handle = self
-            .path_to_handle
+        self.handles
             .lock()
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        let mut handle_to_path = self
-            .handle_to_path
-            .lock()
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-
-        let mut updates = Vec::new();
-        for (path, handle) in path_to_handle.iter() {
-            if path.starts_with(old_path) {
-                let suffix = path.strip_prefix(old_path).unwrap_or(path.as_path());
-                let updated = new_path.join(suffix);
-                updates.push((path.clone(), updated, *handle));
-            }
-        }
-
-        for (old, new, handle) in updates {
-            path_to_handle.remove(&old);
-            path_to_handle.insert(new.clone(), handle);
-            handle_to_path.insert(handle, new);
-        }
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?
+            .rename_prefix(old_path, new_path);
         Ok(())
     }
 
@@ -194,7 +222,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
     async fn getattr(&self, handle: u64) -> Result<fattr3, nfsstat3> {
         debug!("NFS GETATTR: handle={}", handle);
 
-        let path = self.get_path_from_handle(&handle)?;
+        let path = self.get_path_from_handle(handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         tokio::task::spawn_blocking(move || {
@@ -214,7 +242,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
     async fn setattr(&self, handle: u64, sattr: sattr3) -> Result<fattr3, nfsstat3> {
         debug!("NFS SETATTR: handle={}, sattr={:?}", handle, sattr);
 
-        let path = self.get_path_from_handle(&handle)?;
+        let path = self.get_path_from_handle(handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         tokio::task::spawn_blocking(move || {
@@ -239,7 +267,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         let name_str = String::from_utf8_lossy(name).to_string(); // Clone to move into block
         debug!("NFS LOOKUP: dir_handle={}, name={}", dir_handle, name_str);
 
-        let dir_path = self.get_path_from_handle(&dir_handle)?;
+        let dir_path = self.get_path_from_handle(dir_handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         let file_path = dir_path.join(&name_str);
@@ -274,7 +302,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             handle, offset, count
         );
 
-        let path = self.get_path_from_handle(&handle)?;
+        let path = self.get_path_from_handle(handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         tokio::task::spawn_blocking(move || {
@@ -330,7 +358,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             data.len()
         );
 
-        let path = self.get_path_from_handle(&handle)?;
+        let path = self.get_path_from_handle(handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         let data = data.to_vec(); // Need to own data to move it
@@ -384,7 +412,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         let name_str = String::from_utf8_lossy(name).to_string();
         debug!("NFS CREATE: dir_handle={}, name={}", dir_handle, name_str);
 
-        let dir_path = self.get_path_from_handle(&dir_handle)?;
+        let dir_path = self.get_path_from_handle(dir_handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         let file_path = dir_path.join(&name_str);
@@ -429,7 +457,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             dir_handle, name_str
         );
 
-        let dir_path = self.get_path_from_handle(&dir_handle)?;
+        let dir_path = self.get_path_from_handle(dir_handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         let file_path = dir_path.join(&name_str);
@@ -460,7 +488,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         let name_str = String::from_utf8_lossy(name).to_string();
         debug!("NFS MKDIR: dir_handle={}, name={}", dir_handle, name_str);
 
-        let dir_path = self.get_path_from_handle(&dir_handle)?;
+        let dir_path = self.get_path_from_handle(dir_handle)?;
 
         let new_dir_path = dir_path.join(&name_str);
         let crypto_fs = self.crypto_fs.clone();
@@ -504,7 +532,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         let name_str = String::from_utf8_lossy(name).to_string();
         debug!("NFS REMOVE: dir_handle={}, name={}", dir_handle, name_str);
 
-        let dir_path = self.get_path_from_handle(&dir_handle)?;
+        let dir_path = self.get_path_from_handle(dir_handle)?;
 
         let file_path = dir_path.join(&name_str);
         let crypto_fs = self.crypto_fs.clone();
@@ -540,8 +568,8 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             from_dir, from_name_str, to_dir, to_name_str
         );
 
-        let from_dir_path = self.get_path_from_handle(&from_dir)?;
-        let to_dir_path = self.get_path_from_handle(&to_dir)?;
+        let from_dir_path = self.get_path_from_handle(from_dir)?;
+        let to_dir_path = self.get_path_from_handle(to_dir)?;
 
         let from_path = from_dir_path.join(&from_name_str);
         let to_path = to_dir_path.join(&to_name_str);
@@ -585,7 +613,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             handle, cookie, max_entries
         );
 
-        let path = self.get_path_from_handle(&handle)?;
+        let path = self.get_path_from_handle(handle)?;
 
         let crypto_fs = self.crypto_fs.clone();
         let path_clone = path.clone();
@@ -641,9 +669,22 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             });
         }
 
+        // Signal EOF when either:
+        //   (a) we filled max_entries and there are no more entries after them
+        //       (`has_more` is false), or
+        //   (b) the cookie fileid was not found in the current listing.
+        //
+        // Case (b) occurs when the file that the client last saw (identified
+        // by `cookie`) was deleted between two READDIR calls.  Without this
+        // guard the loop above exhausts all entries with `found_start` still
+        // false, returns an empty page with `end: false`, and the NFS client
+        // retries indefinitely — a liveness failure.  Returning `end: true`
+        // here tells the client to treat the listing as complete, which is the
+        // least-surprising recovery for a stale cursor.
+        let end = !has_more || !found_start;
         Ok(ReadDirResult {
             entries: dirlist_with_meta,
-            end: !has_more,
+            end,
         })
     }
 

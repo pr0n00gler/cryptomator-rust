@@ -5,8 +5,10 @@ use hmac::Hmac;
 use jwt::{AlgorithmType, Header, SignWithKey, Token, VerifyWithKey};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::fmt;
 use std::io::Read;
 use std::path::Path;
+use zeroize::Zeroizing;
 
 const DEFAULT_KID: &str = "masterkeyfile:masterkey.cryptomator";
 pub const DEFAULT_VAULT_FILENAME: &str = "vault.cryptomator";
@@ -39,10 +41,28 @@ impl Default for Claims {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+/// `Copy` is intentionally absent: `MasterKey` contains `Zeroizing<[u8; 32]>`
+/// fields which are non-`Copy` by design to prevent silent duplication of key
+/// material.
+///
+/// `Debug` is intentionally implemented manually (not derived) because a
+/// derived impl would transitively call `MasterKey`'s field debug formatters,
+/// which — even with `Zeroizing` wrappers — would print raw key bytes via the
+/// `[u8; 32]` `Debug` impl.
+#[derive(Clone)]
 pub struct Vault {
     pub master_key: MasterKey,
     pub claims: Claims,
+}
+
+impl fmt::Debug for Vault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Expose only the non-sensitive `claims` field; never the master key.
+        f.debug_struct("Vault")
+            .field("master_key", &"[REDACTED]")
+            .field("claims", &self.claims)
+            .finish()
+    }
 }
 
 impl Vault {
@@ -100,9 +120,11 @@ impl Vault {
             return Err(MasterKeyError::JWTError(jwt::Error::NoKeyId));
         };
 
-        let mut key: Vec<u8> = Vec::with_capacity(64);
-        key.extend_from_slice(&master_key.primary_master_key);
-        key.extend_from_slice(&master_key.hmac_master_key);
+        // Assemble the combined 64-byte key in a Zeroizing buffer so it is
+        // wiped from the heap when this scope exits.
+        let mut key: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(64));
+        key.extend_from_slice(master_key.primary_master_key.as_ref());
+        key.extend_from_slice(master_key.hmac_master_key.as_ref());
 
         let hmac_key: Hmac<Sha256> = Hmac::new_from_slice(&key)?;
         let verified_token: Token<Header, Claims, _> =

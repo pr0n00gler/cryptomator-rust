@@ -4,7 +4,7 @@ use crate::frontends::webdav::WebDav;
 use hyper::{header, Request, Response, StatusCode};
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use webdav_handler::fakels::FakeLs;
 use webdav_handler::DavHandler;
 
@@ -43,12 +43,29 @@ pub async fn mount_webdav<FS: 'static + FileSystem>(
                                 .unwrap_or(false);
 
                             if !authenticated {
-                                warn!("Unauthorized WebDAV access attempt from {:?}", req.uri());
+                                warn!("Unauthorized WebDAV access attempt detected");
+
+                                // Attempt to build a 401 response with the WWW-Authenticate
+                                // challenge header so well-behaved clients can prompt for
+                                // credentials.
                                 let resp = Response::builder()
                                     .status(StatusCode::UNAUTHORIZED)
                                     .header(header::WWW_AUTHENTICATE, "Basic realm=\"Cryptomator\"")
                                     .body(webdav_handler::body::Body::from("Unauthorized"))
-                                    .unwrap();
+                                    .unwrap_or_else(|e| {
+                                        // The primary builder can only fail if the
+                                        // WWW-Authenticate header value is somehow rejected.
+                                        error!(
+                                            "Failed to build 401 response with WWW-Authenticate \
+                                             header, falling back to header-less 401: {:?}",
+                                            e
+                                        );
+                                        Response::builder()
+                                            .status(StatusCode::UNAUTHORIZED)
+                                            .body(webdav_handler::body::Body::from("Unauthorized"))
+                                            .expect("hardcoded header-less 401 must always pass")
+                                    });
+
                                 return Ok::<_, Infallible>(resp);
                             }
                         }
@@ -60,10 +77,9 @@ pub async fn mount_webdav<FS: 'static + FileSystem>(
     });
 
     info!("WebDav server started on {:?}", addr);
-    let _ = hyper::Server::bind(&addr)
-        .serve(make_service)
-        .await
-        .map_err(|e| eprintln!("server error: {}", e));
+    if let Err(e) = hyper::Server::bind(&addr).serve(make_service).await {
+        error!("WebDAV server fatal error: {:?}", e);
+    }
 }
 
 pub async fn mount_nfs<FS: 'static + FileSystem>(listen_address: String, crypto_fs: CryptoFs<FS>) {

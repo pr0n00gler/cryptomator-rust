@@ -1,6 +1,7 @@
 use crate::crypto::error::CryptoError;
 use crate::crypto::Vault;
 
+use std::fmt;
 use std::io::{Read, Write};
 use std::iter;
 
@@ -12,6 +13,7 @@ use aes_siv::{aead::generic_array::GenericArray, KeyInit};
 use base32::Alphabet;
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
 use ctr::cipher::{KeyIvInit, StreamCipher};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 type Aes256Ctr = ctr::Ctr128BE<Aes256>;
 
@@ -78,32 +80,90 @@ pub fn shorten_name<P: AsRef<str>>(name: P) -> String {
     URL_SAFE.encode(hasher.finalize())
 }
 
-/// Contains reserved bytes and content key
-#[derive(Debug)]
+/// Contains reserved bytes and the per-file AES-CTR content key.
+///
+/// `ZeroizeOnDrop` ensures the `content_key` bytes are deterministically
+/// wiped from memory when this value is dropped — preventing the plaintext
+/// key from lingering in heap or stack memory after the struct's lifetime
+/// ends (e.g. readable via crash dump, swap partition, or memory scan).
+///
+/// `Debug` is implemented manually to avoid ever printing raw key bytes.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct FileHeaderPayload {
-    pub reserved: [u8; 8],
-    pub content_key: [u8; 32],
+    pub reserved: [u8; FILE_HEADER_PAYLOAD_RESERVED_LENGTH],
+    /// Per-file AES-CTR key.  Wrapped in `Zeroizing` so the 32 key bytes are
+    /// wiped on drop in addition to the outer `ZeroizeOnDrop` on the struct.
+    pub content_key: Zeroizing<[u8; FILE_HEADER_PAYLOAD_CONTENT_KEY_LENGTH]>,
 }
 
-/// Contains nonce, payload and mac
-#[derive(Debug)]
+impl fmt::Debug for FileHeaderPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Never expose key material in debug output.
+        f.debug_struct("FileHeaderPayload")
+            .field("reserved", &self.reserved)
+            .field("content_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Contains nonce, payload and mac.
+///
+/// `ZeroizeOnDrop` is inherited through `FileHeaderPayload` and ensures all
+/// sensitive fields are wiped when the header is dropped.
+///
+/// `Debug` is implemented manually to prevent transitive leakage of the
+/// `content_key` through `FileHeaderPayload`'s fields.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct FileHeader {
-    pub nonce: [u8; 16],
+    pub nonce: [u8; FILE_HEADER_NONCE_LENGTH],
     pub payload: FileHeaderPayload,
-    pub mac: [u8; 32],
+    pub mac: [u8; FILE_HEADER_MAC_LENGTH],
 }
 
-/// The core crypto instance to encrypt/decrypt data
-#[derive(Copy, Clone, Debug)]
+impl fmt::Debug for FileHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Expose only non-sensitive fields.
+        f.debug_struct("FileHeader")
+            .field("nonce", &self.nonce)
+            .field("payload", &self.payload)
+            .field("mac", &self.mac)
+            .finish()
+    }
+}
+
+/// The core crypto instance to encrypt/decrypt data.
+///
+/// `Copy` is intentionally absent: `Vault` embeds a `MasterKey` whose fields
+/// are `Zeroizing<[u8; 32]>`, which is non-`Copy` by design to prevent silent
+/// proliferation of key material on the stack.
+///
+/// `Debug` is intentionally implemented manually (not derived) because `Vault`
+/// embeds `MasterKey`, and a derived `Debug` would transitively print raw key
+/// bytes via `Zeroizing<[u8; 32]>`'s `Debug` impl.
+#[derive(Clone)]
 pub struct Cryptor {
     pub vault: Vault,
 }
 
+impl fmt::Debug for Cryptor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Never expose key material in debug output.
+        f.debug_struct("Cryptor").finish_non_exhaustive()
+    }
+}
+
 impl Cryptor {
+    /// Fills a caller-supplied `Zeroizing` buffer with the 64-byte AES-SIV key
+    /// (hmac_master_key ‖ primary_master_key).
+    ///
+    /// Accepting `&mut Zeroizing<[u8; AES_SIV_KEY_LENGTH]>` ensures the
+    /// assembled key is deterministically wiped when the *caller's* binding
+    /// goes out of scope, preventing the 64-byte key from persisting on the
+    /// stack after use.
     #[inline]
-    fn fill_aes_siv_key(&self, out: &mut [u8; AES_SIV_KEY_LENGTH]) {
-        let hmac_key = &self.vault.master_key.hmac_master_key;
-        let primary_key = &self.vault.master_key.primary_master_key;
+    fn fill_aes_siv_key(&self, out: &mut Zeroizing<[u8; AES_SIV_KEY_LENGTH]>) {
+        let hmac_key = self.vault.master_key.hmac_master_key.as_ref();
+        let primary_key = self.vault.master_key.primary_master_key.as_ref();
 
         debug_assert_eq!(hmac_key.len() + primary_key.len(), AES_SIV_KEY_LENGTH);
 
@@ -120,10 +180,10 @@ impl Cryptor {
     /// Returns hash of the directory by a provided unique dir_id
     /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#directory-ids
     pub fn get_dir_id_hash(&self, dir_id: &[u8]) -> Result<String, CryptoError> {
-        let mut long_key = [0u8; AES_SIV_KEY_LENGTH];
+        let mut long_key = Zeroizing::new([0u8; AES_SIV_KEY_LENGTH]);
         self.fill_aes_siv_key(&mut long_key);
 
-        let mut cipher = Aes256Siv::new(GenericArray::from_slice(&long_key));
+        let mut cipher = Aes256Siv::new(GenericArray::from_slice(long_key.as_ref()));
         let encrypted_dir_id = cipher.encrypt(iter::empty::<&[u8]>(), dir_id)?;
 
         let mut sha1_hasher = Sha1::new();
@@ -141,10 +201,10 @@ impl Cryptor {
         cleartext_name: S,
         parent_dir_id: &[u8],
     ) -> Result<String, CryptoError> {
-        let mut long_key = [0u8; AES_SIV_KEY_LENGTH];
+        let mut long_key = Zeroizing::new([0u8; AES_SIV_KEY_LENGTH]);
         self.fill_aes_siv_key(&mut long_key);
 
-        let mut cipher = Aes256Siv::new(GenericArray::from_slice(&long_key));
+        let mut cipher = Aes256Siv::new(GenericArray::from_slice(long_key.as_ref()));
         let encrypted_filename =
             cipher.encrypt([parent_dir_id], cleartext_name.as_ref().as_bytes())?;
 
@@ -161,10 +221,10 @@ impl Cryptor {
     ) -> Result<String, CryptoError> {
         let encrypted_filename_bytes = URL_SAFE.decode(encrypted_filename.as_ref())?;
 
-        let mut long_key = [0u8; AES_SIV_KEY_LENGTH];
+        let mut long_key = Zeroizing::new([0u8; AES_SIV_KEY_LENGTH]);
         self.fill_aes_siv_key(&mut long_key);
 
-        let mut cipher = Aes256Siv::new(GenericArray::from_slice(&long_key));
+        let mut cipher = Aes256Siv::new(GenericArray::from_slice(long_key.as_ref()));
 
         let decrypted_filename =
             cipher.decrypt([parent_dir_id], encrypted_filename_bytes.as_slice())?;
@@ -172,14 +232,17 @@ impl Cryptor {
         Ok(String::from_utf8(decrypted_filename)?)
     }
 
-    /// Returns a new FileHeader
+    /// Returns a new FileHeader with a freshly generated random content key.
     pub fn create_file_header(&self) -> FileHeader {
         FileHeader {
             nonce: rand::thread_rng().gen::<[u8; FILE_HEADER_NONCE_LENGTH]>(),
             payload: FileHeaderPayload {
                 reserved: [0xFu8; FILE_HEADER_PAYLOAD_RESERVED_LENGTH],
-                content_key: rand::thread_rng()
-                    .gen::<[u8; FILE_HEADER_PAYLOAD_CONTENT_KEY_LENGTH]>(),
+                // Wrap in Zeroizing so the random key bytes are wiped when
+                // FileHeaderPayload (and its enclosing FileHeader) is dropped.
+                content_key: Zeroizing::new(
+                    rand::thread_rng().gen::<[u8; FILE_HEADER_PAYLOAD_CONTENT_KEY_LENGTH]>(),
+                ),
             },
             mac: [0u8; FILE_HEADER_MAC_LENGTH],
         }
@@ -190,26 +253,30 @@ impl Cryptor {
     pub fn encrypt_file_header(&self, file_header: &FileHeader) -> Result<Vec<u8>, CryptoError> {
         let mut encrypted_header = Vec::with_capacity(FILE_HEADER_LENGTH);
 
-        let mut payload = [0u8; FILE_HEADER_PAYLOAD_LENGTH];
+        // Assemble the plaintext payload (reserved || content_key) in a
+        // Zeroizing buffer so the 40 bytes of key material are deterministically
+        // wiped from memory when this binding goes out of scope — preventing
+        // them from lingering on the stack after `encrypt_file_header` returns.
+        let mut payload = Zeroizing::new([0u8; FILE_HEADER_PAYLOAD_LENGTH]);
         payload[..FILE_HEADER_PAYLOAD_RESERVED_LENGTH]
             .copy_from_slice(&file_header.payload.reserved);
         payload[FILE_HEADER_PAYLOAD_RESERVED_LENGTH..]
-            .copy_from_slice(&file_header.payload.content_key);
+            .copy_from_slice(file_header.payload.content_key.as_ref());
 
         let mut cipher = Aes256Ctr::new(
-            GenericArray::from_slice(&self.vault.master_key.primary_master_key),
+            GenericArray::from_slice(self.vault.master_key.primary_master_key.as_ref()),
             GenericArray::from_slice(&file_header.nonce),
         );
-        cipher.apply_keystream(&mut payload);
+        cipher.apply_keystream(payload.as_mut());
 
         let mut mac: Hmac<Sha256> =
-            <Hmac<Sha256> as Mac>::new_from_slice(&self.vault.master_key.hmac_master_key)?;
+            <Hmac<Sha256> as Mac>::new_from_slice(self.vault.master_key.hmac_master_key.as_ref())?;
         mac.update(&file_header.nonce);
-        mac.update(&payload);
+        mac.update(payload.as_ref());
         let mac_bytes = mac.finalize().into_bytes();
 
         encrypted_header.extend_from_slice(&file_header.nonce);
-        encrypted_header.extend_from_slice(&payload);
+        encrypted_header.extend_from_slice(payload.as_ref());
         encrypted_header.extend_from_slice(&mac_bytes);
 
         Ok(encrypted_header)
@@ -228,7 +295,7 @@ impl Cryptor {
 
         //verify header payload
         let mut mac: Hmac<Sha256> =
-            <Hmac<Sha256> as Mac>::new_from_slice(&self.vault.master_key.hmac_master_key)?;
+            <Hmac<Sha256> as Mac>::new_from_slice(self.vault.master_key.hmac_master_key.as_ref())?;
         mac.update(&encrypted_header[..FILE_HEADER_NONCE_LENGTH]);
         mac.update(
             &encrypted_header
@@ -240,21 +307,28 @@ impl Cryptor {
 
         //decrypt header payload
         let mut cipher = Aes256Ctr::new(
-            GenericArray::from_slice(&self.vault.master_key.primary_master_key),
+            GenericArray::from_slice(self.vault.master_key.primary_master_key.as_ref()),
             GenericArray::from_slice(&encrypted_header[..FILE_HEADER_NONCE_LENGTH]),
         );
-        let mut decrypted_payload = [0u8; FILE_HEADER_PAYLOAD_LENGTH];
+        // Wrap in Zeroizing so the 40 bytes of plaintext key material
+        // (reserved || content_key) are deterministically wiped from the
+        // stack/heap when this binding goes out of scope, regardless of
+        // whether the function returns normally or via `?`.
+        let mut decrypted_payload = Zeroizing::new([0u8; FILE_HEADER_PAYLOAD_LENGTH]);
         decrypted_payload.copy_from_slice(
             &encrypted_header
                 [FILE_HEADER_NONCE_LENGTH..FILE_HEADER_NONCE_LENGTH + FILE_HEADER_PAYLOAD_LENGTH],
         );
-        cipher.apply_keystream(&mut decrypted_payload);
+        cipher.apply_keystream(decrypted_payload.as_mut());
 
         let file_header_payload = FileHeaderPayload {
             reserved: clone_into_array(&decrypted_payload[..FILE_HEADER_PAYLOAD_RESERVED_LENGTH]),
-            content_key: clone_into_array(
+            // The content_key bytes are copied out of the Zeroizing buffer and
+            // re-wrapped in their own Zeroizing so they remain protected for
+            // the full lifetime of the FileHeader.
+            content_key: Zeroizing::new(clone_into_array(
                 &decrypted_payload[FILE_HEADER_PAYLOAD_RESERVED_LENGTH..],
-            ),
+            )),
         };
         let file_header = FileHeader {
             nonce: clone_into_array(&encrypted_header[..FILE_HEADER_NONCE_LENGTH]),
@@ -285,6 +359,19 @@ impl Cryptor {
         let mut chunk_number: u64 = 0;
         loop {
             let read_bytes = input.read(&mut file_chunk)?;
+
+            // A 0-byte read signals true EOF.  We must check *before* calling
+            // encrypt_chunk: if we passed a 0-byte slice through we would write
+            // a spurious empty authenticated chunk, corrupting the ciphertext
+            // for any file whose cleartext size is an exact multiple of
+            // FILE_CHUNK_CONTENT_PAYLOAD_LENGTH (32,768 bytes).  The
+            // corresponding decrypt_content loop would then attempt to verify
+            // and decrypt that phantom chunk, producing a MAC error or
+            // returning unexpected trailing zero bytes.
+            if read_bytes == 0 {
+                break;
+            }
+
             let written = self.encrypt_chunk(
                 file_header.nonce.as_ref(),
                 file_header.payload.content_key.as_ref(),
@@ -293,10 +380,13 @@ impl Cryptor {
                 &mut output_buffer,
             )?;
             output.write_all(&output_buffer[..written])?;
+
+            // Increment chunk_number unconditionally after each successful
+            // write, then break if this was a partial (last) chunk.
+            chunk_number += 1;
             if read_bytes < FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
                 break;
             }
-            chunk_number += 1;
         }
         Ok(())
     }
@@ -319,6 +409,17 @@ impl Cryptor {
         let mut chunk_number: u64 = 0;
         loop {
             let read_bytes = input.read(&mut file_chunk)?;
+
+            // A 0-byte read signals true EOF.  We must check *before* calling
+            // decrypt_chunk: if we passed a 0-byte slice through we would
+            // return an InvalidFileChunkLength error for any file whose
+            // ciphertext size is an exact multiple of FILE_CHUNK_LENGTH
+            // (32,816 bytes).  This mirrors the identical guard in
+            // encrypt_content and is the fix for SEC-1.
+            if read_bytes == 0 {
+                break;
+            }
+
             let written = self.decrypt_chunk(
                 file_header.nonce.as_ref(),
                 file_header.payload.content_key.as_ref(),
@@ -327,7 +428,14 @@ impl Cryptor {
                 &mut output_buffer,
             )?;
             output.write_all(&output_buffer[..written])?;
-            if read_bytes < FILE_CHUNK_CONTENT_PAYLOAD_LENGTH {
+            // The loop must terminate when the read returns fewer bytes than a
+            // full *encrypted* chunk (FILE_CHUNK_LENGTH = 32,816), not fewer
+            // than a full *plaintext* chunk (FILE_CHUNK_CONTENT_PAYLOAD_LENGTH
+            // = 32,768).  Using the plaintext constant here was a bug: any
+            // short read returning between 32,768 and 32,815 bytes — a valid
+            // outcome from a buffered Read impl — would have silently truncated
+            // the decrypted output.
+            if read_bytes < FILE_CHUNK_LENGTH {
                 break;
             }
             chunk_number += 1;
@@ -380,7 +488,7 @@ impl Cryptor {
         let chunk_number_be = chunk_number.to_be_bytes();
 
         let mut mac: Hmac<Sha256> =
-            <Hmac<Sha256> as Mac>::new_from_slice(&self.vault.master_key.hmac_master_key)?;
+            <Hmac<Sha256> as Mac>::new_from_slice(self.vault.master_key.hmac_master_key.as_ref())?;
         mac.update(header_nonce);
         mac.update(&chunk_number_be);
         mac.update(&output[..payload_end]);
@@ -425,7 +533,7 @@ impl Cryptor {
 
         // check MAC
         let mut mac: Hmac<Sha256> =
-            <Hmac<Sha256> as Mac>::new_from_slice(&self.vault.master_key.hmac_master_key)?;
+            <Hmac<Sha256> as Mac>::new_from_slice(self.vault.master_key.hmac_master_key.as_ref())?;
         mac.update(header_nonce);
         mac.update(&chunk_number_be);
         mac.update(&encrypted_chunk[..begin_of_mac]);
@@ -567,5 +675,128 @@ pub mod tests {
             .unwrap();
 
         assert_eq!(raw_content_reader.get_ref(), decrypted_content.get_ref());
+    }
+
+    /// Regression test for the spurious empty terminal chunk bug.
+    ///
+    /// When the cleartext size is an exact multiple of
+    /// `FILE_CHUNK_CONTENT_PAYLOAD_LENGTH` (32,768 bytes), the old loop read
+    /// a 0-byte final chunk and encrypted it, producing a phantom MAC'd empty
+    /// chunk at the end of the ciphertext.  `decrypt_content` would then try
+    /// to authenticate and decrypt that phantom chunk, corrupting the output.
+    ///
+    /// This test pins the exact boundary condition: 2 × 32,768 = 65,536 bytes.
+    #[test]
+    fn test_encrypt_decrypt_content_exact_chunk_multiple() {
+        let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+        let cryptor = crypto::Cryptor::new(vault);
+
+        // Exactly two full chunks — the boundary that previously triggered the bug.
+        let content_data: Vec<u8> = (0..2 * super::FILE_CHUNK_CONTENT_PAYLOAD_LENGTH)
+            .map(|_| rand::random::<u8>())
+            .collect();
+        let mut raw_content_reader = Cursor::new(content_data.clone());
+
+        let mut encrypted_content = Cursor::new(Vec::new());
+        let mut decrypted_content = Cursor::new(Vec::new());
+
+        cryptor
+            .encrypt_content(&mut raw_content_reader, &mut encrypted_content)
+            .unwrap();
+
+        // The ciphertext must be exactly: header + 2 full encrypted chunks.
+        // Any extra bytes indicate a phantom trailing chunk was written.
+        let expected_ciphertext_len = super::FILE_HEADER_LENGTH + 2 * super::FILE_CHUNK_LENGTH;
+        assert_eq!(
+            encrypted_content.get_ref().len(),
+            expected_ciphertext_len,
+            "ciphertext length mismatch: spurious terminal chunk may have been written"
+        );
+
+        encrypted_content.set_position(0);
+        cryptor
+            .decrypt_content(&mut encrypted_content, &mut decrypted_content)
+            .unwrap();
+
+        assert_eq!(&content_data, decrypted_content.get_ref());
+    }
+
+    /// Regression test: a single exact full chunk (1 × FILE_CHUNK_CONTENT_PAYLOAD_LENGTH).
+    ///
+    /// Before the SEC-1 fix, `decrypt_content` would loop back after the first
+    /// full-chunk read, call `read` again (getting 0 bytes), and immediately
+    /// pass a 0-length slice to `decrypt_chunk`, which returned
+    /// `InvalidFileChunkLength`.  This test pins that exact single-chunk
+    /// boundary in addition to the two-chunk case above.
+    #[test]
+    fn test_encrypt_decrypt_content_single_exact_chunk() {
+        let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+        let cryptor = crypto::Cryptor::new(vault);
+
+        // Exactly one full chunk — the smallest exact-multiple boundary.
+        let content_data: Vec<u8> = (0..super::FILE_CHUNK_CONTENT_PAYLOAD_LENGTH)
+            .map(|_| rand::random::<u8>())
+            .collect();
+        let mut raw_content_reader = Cursor::new(content_data.clone());
+
+        let mut encrypted_content = Cursor::new(Vec::new());
+        let mut decrypted_content = Cursor::new(Vec::new());
+
+        cryptor
+            .encrypt_content(&mut raw_content_reader, &mut encrypted_content)
+            .unwrap();
+
+        // Ciphertext must be: header + exactly 1 encrypted chunk, no more.
+        let expected_ciphertext_len = super::FILE_HEADER_LENGTH + super::FILE_CHUNK_LENGTH;
+        assert_eq!(
+            encrypted_content.get_ref().len(),
+            expected_ciphertext_len,
+            "ciphertext length mismatch: spurious terminal chunk may have been written"
+        );
+
+        encrypted_content.set_position(0);
+        cryptor
+            .decrypt_content(&mut encrypted_content, &mut decrypted_content)
+            .unwrap();
+
+        assert_eq!(&content_data, decrypted_content.get_ref());
+    }
+
+    /// Regression test: empty file (0-byte cleartext).
+    ///
+    /// An empty file produces ciphertext containing only the file header and
+    /// zero chunks.  Both `encrypt_content` and `decrypt_content` must handle
+    /// this without errors or spurious output.
+    #[test]
+    fn test_encrypt_decrypt_content_empty_file() {
+        let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+        let cryptor = crypto::Cryptor::new(vault);
+
+        let content_data: Vec<u8> = vec![];
+        let mut raw_content_reader = Cursor::new(content_data.clone());
+
+        let mut encrypted_content = Cursor::new(Vec::new());
+        let mut decrypted_content = Cursor::new(Vec::new());
+
+        cryptor
+            .encrypt_content(&mut raw_content_reader, &mut encrypted_content)
+            .unwrap();
+
+        // An empty file produces only the file header, no chunk bytes at all.
+        assert_eq!(
+            encrypted_content.get_ref().len(),
+            super::FILE_HEADER_LENGTH,
+            "empty file should produce only the file header, no chunk bytes"
+        );
+
+        encrypted_content.set_position(0);
+        cryptor
+            .decrypt_content(&mut encrypted_content, &mut decrypted_content)
+            .unwrap();
+
+        assert!(
+            decrypted_content.get_ref().is_empty(),
+            "decrypting an empty file should produce zero output bytes"
+        );
     }
 }

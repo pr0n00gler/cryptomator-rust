@@ -6,6 +6,7 @@ use cryptomator::crypto::{
     Claims, Cryptor, MasterKey, Vault, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, FILE_CHUNK_LENGTH,
     FILE_HEADER_LENGTH,
 };
+use zeroize::Zeroizing;
 
 const CHUNK_SIZES: [usize; 4] = [64, 1024, 16 * 1024, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH];
 const BENCH_CHUNK_NUMBER: u64 = 7;
@@ -13,8 +14,8 @@ const CONTENT_SIZES: [usize; 3] = [1024, 64 * 1024, 256 * 1024];
 
 fn create_cryptor() -> Cryptor {
     let master_key = MasterKey {
-        primary_master_key: [0x11; 32],
-        hmac_master_key: [0x22; 32],
+        primary_master_key: Zeroizing::new([0x11; 32]),
+        hmac_master_key: Zeroizing::new([0x22; 32]),
     };
 
     let vault = Vault {
@@ -46,8 +47,11 @@ fn content_inputs() -> Vec<(usize, Vec<u8>)> {
 fn bench_encrypt_chunk(c: &mut Criterion) {
     let cryptor = create_cryptor();
     let file_header = cryptor.create_file_header();
+    // Borrow through the header so it stays alive for the duration of the
+    // benchmark.  `FileHeader` implements `Drop` (ZeroizeOnDrop), so we
+    // cannot partially move fields out of it.
     let header_nonce = file_header.nonce;
-    let file_key = file_header.payload.content_key;
+    let file_key = &file_header.payload.content_key;
 
     let inputs = chunk_inputs();
     let mut group = c.benchmark_group("encrypt_chunk");
@@ -59,7 +63,7 @@ fn bench_encrypt_chunk(c: &mut Criterion) {
                 let len = cryptor
                     .encrypt_chunk(
                         &header_nonce,
-                        &file_key,
+                        file_key.as_ref(),
                         BENCH_CHUNK_NUMBER,
                         chunk.as_slice(),
                         &mut output,
@@ -75,8 +79,9 @@ fn bench_encrypt_chunk(c: &mut Criterion) {
 fn bench_decrypt_chunk(c: &mut Criterion) {
     let cryptor = create_cryptor();
     let file_header = cryptor.create_file_header();
+    // Borrow through the header — see bench_encrypt_chunk for explanation.
     let header_nonce = file_header.nonce;
-    let file_key = file_header.payload.content_key;
+    let file_key = &file_header.payload.content_key;
 
     let encrypted_inputs: Vec<(usize, Vec<u8>)> = CHUNK_SIZES
         .iter()
@@ -86,7 +91,7 @@ fn bench_decrypt_chunk(c: &mut Criterion) {
             let len = cryptor
                 .encrypt_chunk(
                     &header_nonce,
-                    &file_key,
+                    file_key.as_ref(),
                     BENCH_CHUNK_NUMBER,
                     plain.as_slice(),
                     &mut encrypted,
@@ -106,7 +111,7 @@ fn bench_decrypt_chunk(c: &mut Criterion) {
                 let len = cryptor
                     .decrypt_chunk(
                         &header_nonce,
-                        &file_key,
+                        file_key.as_ref(),
                         BENCH_CHUNK_NUMBER,
                         chunk.as_slice(),
                         &mut output,

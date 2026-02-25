@@ -97,6 +97,18 @@ impl DFile {
     }
 }
 
+impl Drop for DFile {
+    fn drop(&mut self) {
+        // Try to flush any pending data on drop to prevent data loss.
+        // Errors during drop are logged but cannot be propagated.
+        if let Ok(mut guard) = self.crypto_fs_file.lock() {
+            if let Err(e) = guard.flush() {
+                error!("WebDAV DFile drop flush error: {:?}", e);
+            }
+        }
+    }
+}
+
 impl DavFile for DFile {
     #[instrument(skip(self))]
     fn metadata(&mut self) -> FsFuture<Box<dyn DavMetaData>> {

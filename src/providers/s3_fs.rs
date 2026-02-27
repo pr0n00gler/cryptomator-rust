@@ -499,6 +499,21 @@ impl S3Fs {
         }
         Ok(())
     }
+
+    fn to_io_error(err: S3FsError) -> io::Error {
+        match err {
+            S3FsError::NotFound => io::Error::new(io::ErrorKind::NotFound, "object not found"),
+            S3FsError::AlreadyExists => {
+                io::Error::new(io::ErrorKind::AlreadyExists, "object already exists")
+            }
+            S3FsError::InvalidPath(msg) => io::Error::new(io::ErrorKind::InvalidInput, msg),
+            other => io::Error::new(io::ErrorKind::Other, other.to_string()),
+        }
+    }
+
+    fn boxed_error(err: S3FsError) -> Box<dyn std::error::Error> {
+        Box::new(Self::to_io_error(err))
+    }
 }
 
 impl FileSystem for S3Fs {
@@ -506,9 +521,7 @@ impl FileSystem for S3Fs {
         &self,
         path: P,
     ) -> Result<Box<dyn Iterator<Item = DirEntry>>, Box<dyn std::error::Error>> {
-        let dir_prefix = self
-            .dir_to_prefix(&path)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let dir_prefix = self.dir_to_prefix(&path).map_err(Self::boxed_error)?;
         let base_path = PathBuf::from(path.as_ref());
         let mut entries = Vec::new();
 
@@ -572,9 +585,7 @@ impl FileSystem for S3Fs {
     }
 
     fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
-        let dir_prefix = self
-            .dir_to_prefix(&path)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let dir_prefix = self.dir_to_prefix(&path).map_err(Self::boxed_error)?;
         if dir_prefix.is_empty() {
             return Ok(());
         }
@@ -594,12 +605,8 @@ impl FileSystem for S3Fs {
         path: P,
         options: OpenOptions,
     ) -> Result<Box<dyn File>, Box<dyn std::error::Error>> {
-        let key = self
-            .path_to_key(path)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        let file = self
-            .open_s3_file(key, options)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let key = self.path_to_key(path).map_err(Self::boxed_error)?;
+        let file = self.open_s3_file(key, options).map_err(Self::boxed_error)?;
         Ok(Box::new(file))
     }
 
@@ -657,11 +664,9 @@ impl FileSystem for S3Fs {
     }
 
     fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
-        let key = self
-            .path_to_key(path)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let key = self.path_to_key(path).map_err(Self::boxed_error)?;
         if key.is_empty() {
-            return Err(Box::new(S3FsError::InvalidPath(
+            return Err(Self::boxed_error(S3FsError::InvalidPath(
                 "file path must not be root".to_string(),
             )));
         }
@@ -671,7 +676,7 @@ impl FileSystem for S3Fs {
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
         let status = response.status_code();
         if !(200..300).contains(&status) {
-            return Err(Box::new(S3FsError::HttpStatus {
+            return Err(Self::boxed_error(S3FsError::HttpStatus {
                 op: "delete_object",
                 status,
             }));
@@ -680,9 +685,7 @@ impl FileSystem for S3Fs {
     }
 
     fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
-        let dir_prefix = self
-            .dir_to_prefix(&path)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let dir_prefix = self.dir_to_prefix(&path).map_err(Self::boxed_error)?;
         if dir_prefix.is_empty() {
             return Ok(());
         }
@@ -699,7 +702,7 @@ impl FileSystem for S3Fs {
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
                 let status = response.status_code();
                 if !(200..300).contains(&status) {
-                    return Err(Box::new(S3FsError::HttpStatus {
+                    return Err(Self::boxed_error(S3FsError::HttpStatus {
                         op: "delete_object",
                         status,
                     }));
@@ -710,46 +713,30 @@ impl FileSystem for S3Fs {
     }
 
     fn copy_file<P: AsRef<Path>>(&self, src: P, dest: P) -> Result<(), Box<dyn std::error::Error>> {
-        let src_key = self
-            .path_to_key(src)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        let dest_key = self
-            .path_to_key(dest)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        Self::ensure_non_empty_key(&src_key)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        Self::ensure_non_empty_key(&dest_key)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let src_key = self.path_to_key(src).map_err(Self::boxed_error)?;
+        let dest_key = self.path_to_key(dest).map_err(Self::boxed_error)?;
+        Self::ensure_non_empty_key(&src_key).map_err(Self::boxed_error)?;
+        Self::ensure_non_empty_key(&dest_key).map_err(Self::boxed_error)?;
         self.copy_object(&src_key, &dest_key)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+            .map_err(Self::boxed_error)
     }
 
     fn move_file<P: AsRef<Path>>(&self, src: P, dest: P) -> Result<(), Box<dyn std::error::Error>> {
-        let src_key = self
-            .path_to_key(&src)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        let dest_key = self
-            .path_to_key(&dest)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        Self::ensure_non_empty_key(&src_key)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        Self::ensure_non_empty_key(&dest_key)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let src_key = self.path_to_key(&src).map_err(Self::boxed_error)?;
+        let dest_key = self.path_to_key(&dest).map_err(Self::boxed_error)?;
+        Self::ensure_non_empty_key(&src_key).map_err(Self::boxed_error)?;
+        Self::ensure_non_empty_key(&dest_key).map_err(Self::boxed_error)?;
         if src_key == dest_key {
             return Ok(());
         }
         self.copy_object(&src_key, &dest_key)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            .map_err(Self::boxed_error)?;
         self.remove_file(src)
     }
 
     fn move_dir<P: AsRef<Path>>(&self, src: P, dest: P) -> Result<(), Box<dyn std::error::Error>> {
-        let src_prefix = self
-            .dir_to_prefix(&src)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        let dest_prefix = self
-            .dir_to_prefix(&dest)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let src_prefix = self.dir_to_prefix(&src).map_err(Self::boxed_error)?;
+        let dest_prefix = self.dir_to_prefix(&dest).map_err(Self::boxed_error)?;
 
         if src_prefix.is_empty() {
             return Ok(());
@@ -758,7 +745,7 @@ impl FileSystem for S3Fs {
             return Ok(());
         }
         if dest_prefix.starts_with(&src_prefix) {
-            return Err(Box::new(S3FsError::InvalidPath(
+            return Err(Self::boxed_error(S3FsError::InvalidPath(
                 "destination directory must not be inside source".to_string(),
             )));
         }
@@ -791,7 +778,7 @@ impl FileSystem for S3Fs {
 
         for (src_key, dest_key) in &mappings {
             self.copy_object(src_key, dest_key)
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                .map_err(Self::boxed_error)?;
         }
 
         for (src_key, _) in &mappings {
@@ -805,7 +792,7 @@ impl FileSystem for S3Fs {
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             let status = response.status_code();
             if !(200..300).contains(&status) {
-                return Err(Box::new(S3FsError::HttpStatus {
+                return Err(Self::boxed_error(S3FsError::HttpStatus {
                     op: "delete_object",
                     status,
                 }));
@@ -815,11 +802,70 @@ impl FileSystem for S3Fs {
         Ok(())
     }
 
-    fn metadata<P: AsRef<Path>>(&self, _path: P) -> Result<Metadata, Box<dyn std::error::Error>> {
-        Err(Box::new(S3FsError::Unimplemented("metadata")))
+    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, Box<dyn std::error::Error>> {
+        let key = self.path_to_key(&path).map_err(Self::boxed_error)?;
+        if key.is_empty() {
+            let mut metadata = Metadata::default();
+            metadata.is_dir = true;
+            metadata.is_file = false;
+            metadata.len = 0;
+            return Ok(metadata);
+        }
+
+        let head_result = self.bucket.head_object(&key);
+        match head_result {
+            Ok((head, status)) if (200..300).contains(&status) => {
+                let size = head.content_length.ok_or(S3FsError::MissingContentLength)?;
+                let size = if size < 0 { 0 } else { size as u64 };
+                let mut metadata = Metadata::default();
+                metadata.is_dir = false;
+                metadata.is_file = true;
+                metadata.len = size;
+                Ok(metadata)
+            }
+            Ok((_, status)) if status == 404 => {
+                let dir_prefix = self.dir_to_prefix(&path).map_err(Self::boxed_error)?;
+                let (result, status) = self
+                    .bucket
+                    .list_page(
+                        dir_prefix.clone(),
+                        Some("/".to_string()),
+                        None,
+                        None,
+                        Some(1),
+                    )
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                if !(200..300).contains(&status) {
+                    return Err(Self::boxed_error(S3FsError::HttpStatus {
+                        op: "list_objects",
+                        status,
+                    }));
+                }
+                let has_contents = !result.contents.is_empty();
+                let has_prefixes = result
+                    .common_prefixes
+                    .as_ref()
+                    .is_some_and(|prefixes| !prefixes.is_empty());
+                if has_contents || has_prefixes {
+                    let mut metadata = Metadata::default();
+                    metadata.is_dir = true;
+                    metadata.is_file = false;
+                    metadata.len = 0;
+                    Ok(metadata)
+                } else {
+                    Err(Self::boxed_error(S3FsError::NotFound))
+                }
+            }
+            Ok((_, status)) => Err(Self::boxed_error(S3FsError::HttpStatus {
+                op: "head_object",
+                status,
+            })),
+            Err(S3Error::HttpFailWithBody(404, _)) => Err(Self::boxed_error(S3FsError::NotFound)),
+            Err(err) => Err(Self::boxed_error(S3FsError::S3(err))),
+        }
     }
 
     fn stats<P: AsRef<Path>>(&self, _path: P) -> Result<Stats, Box<dyn std::error::Error>> {
-        Err(Box::new(S3FsError::Unimplemented("stats")))
+        Ok(Stats::default())
     }
 }

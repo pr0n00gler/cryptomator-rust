@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Duration;
 
 use s3::creds::{Credentials, CredentialsError};
@@ -27,6 +28,8 @@ pub struct S3FsConfig {
 pub enum S3FsError {
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
+    #[error("invalid path: {0}")]
+    InvalidPath(String),
     #[error("failed to parse region: {0}")]
     RegionParse(#[from] RegionError),
     #[error("credentials error: {0}")]
@@ -118,16 +121,68 @@ impl S3Fs {
             bucket = bucket.with_request_timeout(timeout)?;
         }
 
-        let prefix = config
-            .prefix
-            .unwrap_or_default()
-            .trim()
-            .trim_start_matches('/')
-            .to_string();
+        let prefix = Self::normalize_prefix(config.prefix.unwrap_or_default())?;
         if config.validate_bucket {
             let _ = bucket.list_page(prefix.clone(), None, None, None, Some(1))?;
         }
 
         Ok(S3Fs { bucket, prefix })
+    }
+
+    fn normalize_prefix(prefix: String) -> Result<String, S3FsError> {
+        let parts = Self::normalized_parts(Path::new(prefix.trim()))?;
+        Ok(parts.join("/"))
+    }
+
+    fn normalized_parts(path: &Path) -> Result<Vec<String>, S3FsError> {
+        let mut parts = Vec::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::Normal(os) => {
+                    let part = os.to_str().ok_or_else(|| {
+                        S3FsError::InvalidPath("path is not valid UTF-8".to_string())
+                    })?;
+                    if !part.is_empty() {
+                        parts.push(part.to_string());
+                    }
+                }
+                std::path::Component::CurDir | std::path::Component::RootDir => {}
+                std::path::Component::ParentDir => {
+                    return Err(S3FsError::InvalidPath(
+                        "path must not contain '..'".to_string(),
+                    ));
+                }
+                std::path::Component::Prefix(_) => {
+                    return Err(S3FsError::InvalidPath(
+                        "absolute Windows paths are not supported".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(parts)
+    }
+
+    #[allow(dead_code)]
+    fn path_to_key<P: AsRef<Path>>(&self, path: P) -> Result<String, S3FsError> {
+        let normalized = Self::normalized_parts(path.as_ref())?.join("/");
+        if self.prefix.is_empty() {
+            Ok(normalized)
+        } else if normalized.is_empty() {
+            Ok(self.prefix.clone())
+        } else {
+            Ok(format!("{}/{}", self.prefix, normalized))
+        }
+    }
+
+    #[allow(dead_code)]
+    fn dir_to_prefix<P: AsRef<Path>>(&self, path: P) -> Result<String, S3FsError> {
+        let key = self.path_to_key(path)?;
+        if key.is_empty() {
+            Ok(String::new())
+        } else if key.ends_with('/') {
+            Ok(key)
+        } else {
+            Ok(format!("{key}/"))
+        }
     }
 }

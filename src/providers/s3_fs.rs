@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -591,10 +591,18 @@ impl FileSystem for S3Fs {
         if dir_prefix.is_empty() {
             return Ok(());
         }
-        let mut empty = Cursor::new(Vec::new());
-        self.bucket
-            .put_object_stream(&mut empty, dir_prefix)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let response = match self.bucket.put_object(&dir_prefix, &[]) {
+            Ok(response) => response,
+            Err(S3Error::HttpFailWithBody(400, _)) => return Ok(()),
+            Err(err) => return Err(Box::new(err) as Box<dyn std::error::Error>),
+        };
+        let status = response.status_code();
+        if !(200..300).contains(&status) {
+            return Err(Self::boxed_error(S3FsError::HttpStatus {
+                op: "put_object",
+                status,
+            }));
+        }
         Ok(())
     }
 
@@ -704,6 +712,9 @@ impl FileSystem for S3Fs {
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
                 let status = response.status_code();
                 if !(200..300).contains(&status) {
+                    if status == 400 && object.key.ends_with('/') {
+                        continue;
+                    }
                     return Err(Self::boxed_error(S3FsError::HttpStatus {
                         op: "delete_object",
                         status,

@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::io::Cursor;
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -7,7 +7,9 @@ use s3::creds::{Credentials, CredentialsError};
 use s3::error::S3Error;
 use s3::region::{Region, RegionError};
 use s3::Bucket;
+use tempfile::NamedTempFile;
 use thiserror::Error;
+use tracing::warn;
 use zeroize::Zeroizing;
 
 use crate::cryptofs::{DirEntry, File, FileSystem, Metadata, OpenOptions, Stats};
@@ -36,12 +38,22 @@ pub enum S3FsError {
     InvalidPath(String),
     #[error("unimplemented: {0}")]
     Unimplemented(&'static str),
+    #[error("file already exists")]
+    AlreadyExists,
+    #[error("file does not exist")]
+    NotFound,
+    #[error("content length missing")]
+    MissingContentLength,
     #[error("failed to parse region: {0}")]
     RegionParse(#[from] RegionError),
     #[error("credentials error: {0}")]
     Credentials(#[from] CredentialsError),
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
     #[error("s3 error: {0}")]
     S3(#[from] S3Error),
+    #[error("{op} failed with status {status}")]
+    HttpStatus { op: &'static str, status: u16 },
 }
 
 /// S3-backed filesystem provider.
@@ -49,6 +61,193 @@ pub enum S3FsError {
 pub struct S3Fs {
     bucket: Box<Bucket>,
     prefix: String,
+}
+
+struct S3File {
+    bucket: Bucket,
+    key: String,
+    inner: S3FileInner,
+}
+
+enum S3FileInner {
+    ReadOnly {
+        size: u64,
+        cursor: u64,
+    },
+    Staged {
+        file: NamedTempFile,
+        size: u64,
+        dirty: bool,
+    },
+}
+
+impl std::fmt::Debug for S3File {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3File").field("key", &self.key).finish()
+    }
+}
+
+impl S3File {
+    fn new_read_only(bucket: Bucket, key: String, size: u64) -> Self {
+        S3File {
+            bucket,
+            key,
+            inner: S3FileInner::ReadOnly { size, cursor: 0 },
+        }
+    }
+
+    fn new_staged(
+        bucket: Bucket,
+        key: String,
+        file: NamedTempFile,
+        size: u64,
+        dirty: bool,
+    ) -> Self {
+        S3File {
+            bucket,
+            key,
+            inner: S3FileInner::Staged { file, size, dirty },
+        }
+    }
+
+    fn upload_if_dirty(&mut self) -> io::Result<()> {
+        match &mut self.inner {
+            S3FileInner::Staged { file, dirty, .. } => {
+                if !*dirty {
+                    return Ok(());
+                }
+                let handle = file.as_file_mut();
+                let current_pos = handle.stream_position()?;
+                handle.seek(SeekFrom::Start(0))?;
+                let status = self
+                    .bucket
+                    .put_object_stream(handle, &self.key)
+                    .map_err(io::Error::other)?;
+                if !(200..300).contains(&status) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("upload failed with status {status}"),
+                    ));
+                }
+                handle.seek(SeekFrom::Start(current_pos))?;
+                *dirty = false;
+                Ok(())
+            }
+            S3FileInner::ReadOnly { .. } => Ok(()),
+        }
+    }
+
+    fn read_only_seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        match &mut self.inner {
+            S3FileInner::ReadOnly { size, cursor } => {
+                let new_pos = match pos {
+                    SeekFrom::Start(offset) => offset as i64,
+                    SeekFrom::Current(offset) => *cursor as i64 + offset,
+                    SeekFrom::End(offset) => *size as i64 + offset,
+                };
+                if new_pos < 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid seek to a negative position",
+                    ));
+                }
+                *cursor = new_pos as u64;
+                Ok(*cursor)
+            }
+            S3FileInner::Staged { .. } => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "read_only_seek called on staged file",
+            )),
+        }
+    }
+}
+
+impl Drop for S3File {
+    fn drop(&mut self) {
+        if let Err(err) = self.upload_if_dirty() {
+            warn!(key = %self.key, error = %err, "failed to upload staged S3 object on drop");
+        }
+    }
+}
+
+impl Read for S3File {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match &mut self.inner {
+            S3FileInner::ReadOnly { size, cursor } => {
+                if buf.is_empty() || *cursor >= *size {
+                    return Ok(0);
+                }
+                let end = cursor
+                    .checked_add(buf.len() as u64)
+                    .and_then(|v| v.checked_sub(1))
+                    .map(|v| v.min(*size - 1))
+                    .unwrap_or(*size - 1);
+                let response = self
+                    .bucket
+                    .get_object_range(&self.key, *cursor, Some(end))
+                    .map_err(io::Error::other)?;
+                let data = response.as_slice();
+                let to_copy = data.len().min(buf.len());
+                buf[..to_copy].copy_from_slice(&data[..to_copy]);
+                *cursor += to_copy as u64;
+                Ok(to_copy)
+            }
+            S3FileInner::Staged { file, .. } => file.as_file_mut().read(buf),
+        }
+    }
+}
+
+impl Write for S3File {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match &mut self.inner {
+            S3FileInner::ReadOnly { .. } => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "file not opened for writing",
+            )),
+            S3FileInner::Staged { file, size, dirty } => {
+                let written = file.as_file_mut().write(buf)?;
+                let pos = file.as_file_mut().stream_position()?;
+                if pos > *size {
+                    *size = pos;
+                }
+                *dirty = true;
+                Ok(written)
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.inner {
+            S3FileInner::ReadOnly { .. } => Ok(()),
+            S3FileInner::Staged { file, .. } => {
+                file.as_file_mut().flush()?;
+                self.upload_if_dirty()
+            }
+        }
+    }
+}
+
+impl Seek for S3File {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        match &mut self.inner {
+            S3FileInner::ReadOnly { .. } => self.read_only_seek(pos),
+            S3FileInner::Staged { file, .. } => file.as_file_mut().seek(pos),
+        }
+    }
+}
+
+impl File for S3File {
+    fn metadata(&self) -> Result<Metadata, Box<dyn std::error::Error>> {
+        let size = match &self.inner {
+            S3FileInner::ReadOnly { size, .. } => *size,
+            S3FileInner::Staged { size, .. } => *size,
+        };
+        let mut metadata = Metadata::default();
+        metadata.is_file = true;
+        metadata.is_dir = false;
+        metadata.len = size;
+        Ok(metadata)
+    }
 }
 
 impl S3Fs {
@@ -189,6 +388,99 @@ impl S3Fs {
             Ok(format!("{key}/"))
         }
     }
+
+    fn open_s3_file(&self, key: String, options: OpenOptions) -> Result<S3File, S3FsError> {
+        let head_result = self.bucket.head_object(&key);
+        let (head, exists) = match head_result {
+            Ok((head, status)) => {
+                if (200..300).contains(&status) {
+                    (Some(head), true)
+                } else if status == 404 {
+                    (None, false)
+                } else {
+                    return Err(S3FsError::HttpStatus {
+                        op: "head_object",
+                        status,
+                    });
+                }
+            }
+            Err(S3Error::HttpFailWithBody(404, _)) => (None, false),
+            Err(err) => return Err(S3FsError::S3(err)),
+        };
+
+        if options.create_new && exists {
+            return Err(S3FsError::AlreadyExists);
+        }
+
+        let wants_write = options.write
+            || options.append
+            || options.truncate
+            || options.create
+            || options.create_new;
+        if (options.create || options.create_new || options.truncate || options.append)
+            && !options.write
+        {
+            return Err(S3FsError::InvalidConfig(
+                "write required for create/append/truncate".to_string(),
+            ));
+        }
+        if options.append && options.truncate {
+            return Err(S3FsError::InvalidConfig(
+                "append and truncate are mutually exclusive".to_string(),
+            ));
+        }
+        if !options.read && !wants_write {
+            return Err(S3FsError::InvalidConfig(
+                "open options must include read or write".to_string(),
+            ));
+        }
+
+        if !wants_write {
+            if !exists {
+                return Err(S3FsError::NotFound);
+            }
+            let head = head.ok_or(S3FsError::MissingContentLength)?;
+            let size = head.content_length.ok_or(S3FsError::MissingContentLength)?;
+            let size = if size < 0 { 0 } else { size as u64 };
+            return Ok(S3File::new_read_only(
+                self.bucket.as_ref().clone(),
+                key,
+                size,
+            ));
+        }
+
+        if !exists && !(options.create || options.create_new) {
+            return Err(S3FsError::NotFound);
+        }
+
+        let mut temp = NamedTempFile::new()?;
+        let mut dirty = false;
+        let mut size = 0u64;
+
+        if exists && !options.truncate {
+            let status = self.bucket.get_object_to_writer(&key, temp.as_file_mut())?;
+            if !(200..300).contains(&status) {
+                return Err(S3FsError::HttpStatus {
+                    op: "get_object",
+                    status,
+                });
+            }
+            size = temp.as_file().metadata()?.len();
+        } else {
+            temp.as_file_mut().set_len(0)?;
+            dirty = true;
+        }
+
+        let mut s3_file = S3File::new_staged(self.bucket.as_ref().clone(), key, temp, size, dirty);
+
+        if options.append {
+            s3_file.seek(SeekFrom::End(0))?;
+        } else {
+            s3_file.seek(SeekFrom::Start(0))?;
+        }
+
+        Ok(s3_file)
+    }
 }
 
 impl FileSystem for S3Fs {
@@ -281,17 +573,31 @@ impl FileSystem for S3Fs {
 
     fn open_file<P: AsRef<Path>>(
         &self,
-        _path: P,
-        _options: OpenOptions,
+        path: P,
+        options: OpenOptions,
     ) -> Result<Box<dyn File>, Box<dyn std::error::Error>> {
-        Err(Box::new(S3FsError::Unimplemented("open_file")))
+        let key = self
+            .path_to_key(path)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let file = self
+            .open_s3_file(key, options)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        Ok(Box::new(file))
     }
 
     fn create_file<P: AsRef<Path>>(
         &self,
-        _path: P,
+        path: P,
     ) -> Result<Box<dyn File>, Box<dyn std::error::Error>> {
-        Err(Box::new(S3FsError::Unimplemented("create_file")))
+        let options = OpenOptions {
+            read: true,
+            write: true,
+            append: false,
+            truncate: true,
+            create: true,
+            create_new: true,
+        };
+        self.open_file(path, options)
     }
 
     fn exists<P: AsRef<Path>>(&self, path: P) -> bool {

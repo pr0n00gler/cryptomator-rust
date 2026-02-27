@@ -481,6 +481,24 @@ impl S3Fs {
 
         Ok(s3_file)
     }
+
+    fn copy_object(&self, from_key: &str, to_key: &str) -> Result<(), S3FsError> {
+        let status = self.bucket.copy_object_internal(from_key, to_key)?;
+        if !(200..300).contains(&status) {
+            return Err(S3FsError::HttpStatus {
+                op: "copy_object",
+                status,
+            });
+        }
+        Ok(())
+    }
+
+    fn ensure_non_empty_key(key: &str) -> Result<(), S3FsError> {
+        if key.is_empty() {
+            return Err(S3FsError::InvalidPath("path must not be root".to_string()));
+        }
+        Ok(())
+    }
 }
 
 impl FileSystem for S3Fs {
@@ -638,8 +656,27 @@ impl FileSystem for S3Fs {
         false
     }
 
-    fn remove_file<P: AsRef<Path>>(&self, _path: P) -> Result<(), Box<dyn std::error::Error>> {
-        Err(Box::new(S3FsError::Unimplemented("remove_file")))
+    fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let key = self
+            .path_to_key(path)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        if key.is_empty() {
+            return Err(Box::new(S3FsError::InvalidPath(
+                "file path must not be root".to_string(),
+            )));
+        }
+        let response = self
+            .bucket
+            .delete_object(&key)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let status = response.status_code();
+        if !(200..300).contains(&status) {
+            return Err(Box::new(S3FsError::HttpStatus {
+                op: "delete_object",
+                status,
+            }));
+        }
+        Ok(())
     }
 
     fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
@@ -656,36 +693,126 @@ impl FileSystem for S3Fs {
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
         for result in results {
             for object in result.contents {
-                self.bucket
+                let response = self
+                    .bucket
                     .delete_object(&object.key)
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                let status = response.status_code();
+                if !(200..300).contains(&status) {
+                    return Err(Box::new(S3FsError::HttpStatus {
+                        op: "delete_object",
+                        status,
+                    }));
+                }
             }
         }
         Ok(())
     }
 
-    fn copy_file<P: AsRef<Path>>(
-        &self,
-        _src: P,
-        _dest: P,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        Err(Box::new(S3FsError::Unimplemented("copy_file")))
+    fn copy_file<P: AsRef<Path>>(&self, src: P, dest: P) -> Result<(), Box<dyn std::error::Error>> {
+        let src_key = self
+            .path_to_key(src)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let dest_key = self
+            .path_to_key(dest)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        Self::ensure_non_empty_key(&src_key)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        Self::ensure_non_empty_key(&dest_key)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        self.copy_object(&src_key, &dest_key)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
 
-    fn move_file<P: AsRef<Path>>(
-        &self,
-        _src: P,
-        _dest: P,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        Err(Box::new(S3FsError::Unimplemented("move_file")))
+    fn move_file<P: AsRef<Path>>(&self, src: P, dest: P) -> Result<(), Box<dyn std::error::Error>> {
+        let src_key = self
+            .path_to_key(&src)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let dest_key = self
+            .path_to_key(&dest)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        Self::ensure_non_empty_key(&src_key)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        Self::ensure_non_empty_key(&dest_key)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        if src_key == dest_key {
+            return Ok(());
+        }
+        self.copy_object(&src_key, &dest_key)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        self.remove_file(src)
     }
 
-    fn move_dir<P: AsRef<Path>>(
-        &self,
-        _src: P,
-        _dest: P,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        Err(Box::new(S3FsError::Unimplemented("move_dir")))
+    fn move_dir<P: AsRef<Path>>(&self, src: P, dest: P) -> Result<(), Box<dyn std::error::Error>> {
+        let src_prefix = self
+            .dir_to_prefix(&src)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let dest_prefix = self
+            .dir_to_prefix(&dest)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+        if src_prefix.is_empty() {
+            return Ok(());
+        }
+        if src_prefix == dest_prefix {
+            return Ok(());
+        }
+        if dest_prefix.starts_with(&src_prefix) {
+            return Err(Box::new(S3FsError::InvalidPath(
+                "destination directory must not be inside source".to_string(),
+            )));
+        }
+
+        let results = self
+            .bucket
+            .list(src_prefix.clone(), None)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+        let mut mappings = Vec::new();
+        let mut delete_keys = Vec::new();
+        for result in results {
+            for object in result.contents {
+                let src_key = object.key;
+                let relative = src_key.strip_prefix(&src_prefix).unwrap_or(&src_key);
+                let dest_key = if relative.is_empty() {
+                    if dest_prefix.is_empty() {
+                        delete_keys.push(src_key);
+                        continue;
+                    }
+                    dest_prefix.clone()
+                } else if dest_prefix.is_empty() {
+                    relative.to_string()
+                } else {
+                    format!("{dest_prefix}{relative}")
+                };
+                mappings.push((src_key, dest_key));
+            }
+        }
+
+        for (src_key, dest_key) in &mappings {
+            self.copy_object(src_key, dest_key)
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        }
+
+        for (src_key, _) in &mappings {
+            delete_keys.push(src_key.clone());
+        }
+
+        for src_key in delete_keys {
+            let response = self
+                .bucket
+                .delete_object(&src_key)
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            let status = response.status_code();
+            if !(200..300).contains(&status) {
+                return Err(Box::new(S3FsError::HttpStatus {
+                    op: "delete_object",
+                    status,
+                }));
+            }
+        }
+
+        Ok(())
     }
 
     fn metadata<P: AsRef<Path>>(&self, _path: P) -> Result<Metadata, Box<dyn std::error::Error>> {

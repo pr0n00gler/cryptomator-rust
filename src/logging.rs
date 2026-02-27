@@ -1,4 +1,4 @@
-use tracing_subscriber::{prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, prelude::*};
 
 pub fn init_logger() -> tracing_appender::non_blocking::WorkerGuard {
     let registry = tracing_subscriber::registry();

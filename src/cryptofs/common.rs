@@ -1,5 +1,5 @@
-use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist, UnknownError};
 use crate::cryptofs::FileSystemError;
+use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist, UnknownError};
 use std::path::{Component, Path, PathBuf};
 
 /// Returns a String implementation of a Component
@@ -35,7 +35,7 @@ pub fn last_path_component<S: AsRef<Path>>(path: S) -> Result<PathBuf, FileSyste
             return Err(PathDoesNotExist(format!(
                 "invalid path: {}",
                 path.as_ref().display()
-            )))
+            )));
         }
     })
 }

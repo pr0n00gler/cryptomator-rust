@@ -3,9 +3,10 @@ use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use s3::creds::{Credentials, CredentialsError};
+use s3::creds::error::CredentialsError;
+use s3::creds::Credentials;
 use s3::error::S3Error;
-use s3::region::{Region, RegionError};
+use s3::region::Region;
 use s3::Bucket;
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -45,7 +46,7 @@ pub enum S3FsError {
     #[error("content length missing")]
     MissingContentLength,
     #[error("failed to parse region: {0}")]
-    RegionParse(#[from] RegionError),
+    RegionParse(#[from] std::str::Utf8Error),
     #[error("credentials error: {0}")]
     Credentials(#[from] CredentialsError),
     #[error("io error: {0}")]
@@ -124,10 +125,9 @@ impl S3File {
                     .put_object_stream(handle, &self.key)
                     .map_err(io::Error::other)?;
                 if !(200..300).contains(&status) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("upload failed with status {status}"),
-                    ));
+                    return Err(io::Error::other(format!(
+                        "upload failed with status {status}"
+                    )));
                 }
                 handle.seek(SeekFrom::Start(current_pos))?;
                 *dirty = false;
@@ -154,10 +154,9 @@ impl S3File {
                 *cursor = new_pos as u64;
                 Ok(*cursor)
             }
-            S3FileInner::Staged { .. } => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "read_only_seek called on staged file",
-            )),
+            S3FileInner::Staged { .. } => {
+                Err(io::Error::other("read_only_seek called on staged file"))
+            }
         }
     }
 }
@@ -242,11 +241,12 @@ impl File for S3File {
             S3FileInner::ReadOnly { size, .. } => *size,
             S3FileInner::Staged { size, .. } => *size,
         };
-        let mut metadata = Metadata::default();
-        metadata.is_file = true;
-        metadata.is_dir = false;
-        metadata.len = size;
-        Ok(metadata)
+        Ok(Metadata {
+            is_file: true,
+            is_dir: false,
+            len: size,
+            ..Default::default()
+        })
     }
 }
 
@@ -449,7 +449,7 @@ impl S3Fs {
             ));
         }
 
-        if !exists && !(options.create || options.create_new) {
+        if !(exists || options.create || options.create_new) {
             return Err(S3FsError::NotFound);
         }
 
@@ -507,7 +507,7 @@ impl S3Fs {
                 io::Error::new(io::ErrorKind::AlreadyExists, "object already exists")
             }
             S3FsError::InvalidPath(msg) => io::Error::new(io::ErrorKind::InvalidInput, msg),
-            other => io::Error::new(io::ErrorKind::Other, other.to_string()),
+            other => io::Error::other(other.to_string()),
         }
     }
 
@@ -545,13 +545,14 @@ impl FileSystem for S3Fs {
                         .file_name()
                         .map(OsString::from)
                         .unwrap_or_else(|| OsString::from(relative));
-                    let mut metadata = Metadata::default();
-                    metadata.is_dir = true;
-                    metadata.is_file = false;
-                    metadata.len = 0;
                     entries.push(DirEntry {
                         path: base_path.join(Path::new(&name)),
-                        metadata,
+                        metadata: Metadata {
+                            is_dir: true,
+                            is_file: false,
+                            len: 0,
+                            ..Default::default()
+                        },
                         file_name: name,
                     });
                 }
@@ -569,13 +570,14 @@ impl FileSystem for S3Fs {
                     .file_name()
                     .map(OsString::from)
                     .unwrap_or_else(|| OsString::from(relative));
-                let mut metadata = Metadata::default();
-                metadata.is_dir = false;
-                metadata.is_file = true;
-                metadata.len = object.size;
                 entries.push(DirEntry {
                     path: base_path.join(Path::new(&name)),
-                    metadata,
+                    metadata: Metadata {
+                        is_dir: false,
+                        is_file: true,
+                        len: object.size,
+                        ..Default::default()
+                    },
                     file_name: name,
                 });
             }
@@ -805,11 +807,12 @@ impl FileSystem for S3Fs {
     fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, Box<dyn std::error::Error>> {
         let key = self.path_to_key(&path).map_err(Self::boxed_error)?;
         if key.is_empty() {
-            let mut metadata = Metadata::default();
-            metadata.is_dir = true;
-            metadata.is_file = false;
-            metadata.len = 0;
-            return Ok(metadata);
+            return Ok(Metadata {
+                is_dir: true,
+                is_file: false,
+                len: 0,
+                ..Default::default()
+            });
         }
 
         let head_result = self.bucket.head_object(&key);
@@ -817,13 +820,14 @@ impl FileSystem for S3Fs {
             Ok((head, status)) if (200..300).contains(&status) => {
                 let size = head.content_length.ok_or(S3FsError::MissingContentLength)?;
                 let size = if size < 0 { 0 } else { size as u64 };
-                let mut metadata = Metadata::default();
-                metadata.is_dir = false;
-                metadata.is_file = true;
-                metadata.len = size;
-                Ok(metadata)
+                Ok(Metadata {
+                    is_dir: false,
+                    is_file: true,
+                    len: size,
+                    ..Default::default()
+                })
             }
-            Ok((_, status)) if status == 404 => {
+            Ok((_, 404)) => {
                 let dir_prefix = self.dir_to_prefix(&path).map_err(Self::boxed_error)?;
                 let (result, status) = self
                     .bucket
@@ -847,11 +851,12 @@ impl FileSystem for S3Fs {
                     .as_ref()
                     .is_some_and(|prefixes| !prefixes.is_empty());
                 if has_contents || has_prefixes {
-                    let mut metadata = Metadata::default();
-                    metadata.is_dir = true;
-                    metadata.is_file = false;
-                    metadata.len = 0;
-                    Ok(metadata)
+                    Ok(Metadata {
+                        is_dir: true,
+                        is_file: false,
+                        len: 0,
+                        ..Default::default()
+                    })
                 } else {
                     Err(Self::boxed_error(S3FsError::NotFound))
                 }
@@ -883,7 +888,7 @@ mod tests {
             Credentials::new(Some("ak"), Some("sk"), None, None, None).expect("credentials");
         let bucket = Bucket::new("bucket", region, credentials).expect("bucket");
         S3Fs {
-            bucket: Box::new(bucket),
+            bucket,
             prefix: prefix.to_string(),
         }
     }

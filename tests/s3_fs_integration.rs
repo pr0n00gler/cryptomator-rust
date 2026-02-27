@@ -1,5 +1,4 @@
 use std::env;
-use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::time::Duration;
 
@@ -67,9 +66,7 @@ fn s3_fs_integration_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(contents, "hello");
 
     let entries: Vec<_> = fs.read_dir("dir")?.collect();
-    assert!(entries
-        .iter()
-        .any(|entry| entry.file_name == OsString::from("file.txt")));
+    assert!(entries.iter().any(|entry| entry.file_name == "file.txt"));
 
     fs.copy_file("dir/file.txt", "dir/file-copy.txt")?;
     fs.move_file("dir/file-copy.txt", "dir/file-moved.txt")?;

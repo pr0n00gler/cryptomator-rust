@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::ffi::OsString;
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use s3::creds::{Credentials, CredentialsError};
@@ -7,6 +9,8 @@ use s3::region::{Region, RegionError};
 use s3::Bucket;
 use thiserror::Error;
 use zeroize::Zeroizing;
+
+use crate::cryptofs::{DirEntry, File, FileSystem, Metadata, OpenOptions, Stats};
 
 /// Configuration for connecting to S3-compatible storage.
 #[derive(Clone, Debug)]
@@ -30,6 +34,8 @@ pub enum S3FsError {
     InvalidConfig(String),
     #[error("invalid path: {0}")]
     InvalidPath(String),
+    #[error("unimplemented: {0}")]
+    Unimplemented(&'static str),
     #[error("failed to parse region: {0}")]
     RegionParse(#[from] RegionError),
     #[error("credentials error: {0}")]
@@ -162,7 +168,6 @@ impl S3Fs {
         Ok(parts)
     }
 
-    #[allow(dead_code)]
     fn path_to_key<P: AsRef<Path>>(&self, path: P) -> Result<String, S3FsError> {
         let normalized = Self::normalized_parts(path.as_ref())?.join("/");
         if self.prefix.is_empty() {
@@ -174,7 +179,6 @@ impl S3Fs {
         }
     }
 
-    #[allow(dead_code)]
     fn dir_to_prefix<P: AsRef<Path>>(&self, path: P) -> Result<String, S3FsError> {
         let key = self.path_to_key(path)?;
         if key.is_empty() {
@@ -184,5 +188,205 @@ impl S3Fs {
         } else {
             Ok(format!("{key}/"))
         }
+    }
+}
+
+impl FileSystem for S3Fs {
+    fn read_dir<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Result<Box<dyn Iterator<Item = DirEntry>>, Box<dyn std::error::Error>> {
+        let dir_prefix = self
+            .dir_to_prefix(&path)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        let base_path = PathBuf::from(path.as_ref());
+        let mut entries = Vec::new();
+
+        let results = self
+            .bucket
+            .list(dir_prefix.clone(), Some("/".to_string()))
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+        for result in results {
+            if let Some(prefixes) = result.common_prefixes {
+                for common in prefixes {
+                    let relative = common
+                        .prefix
+                        .strip_prefix(&dir_prefix)
+                        .unwrap_or(&common.prefix)
+                        .trim_end_matches('/');
+                    if relative.is_empty() {
+                        continue;
+                    }
+                    let name = Path::new(relative)
+                        .file_name()
+                        .map(OsString::from)
+                        .unwrap_or_else(|| OsString::from(relative));
+                    let mut metadata = Metadata::default();
+                    metadata.is_dir = true;
+                    metadata.is_file = false;
+                    metadata.len = 0;
+                    entries.push(DirEntry {
+                        path: base_path.join(Path::new(&name)),
+                        metadata,
+                        file_name: name,
+                    });
+                }
+            }
+
+            for object in result.contents {
+                if object.key == dir_prefix {
+                    continue;
+                }
+                let relative = object.key.strip_prefix(&dir_prefix).unwrap_or(&object.key);
+                if relative.is_empty() {
+                    continue;
+                }
+                let name = Path::new(relative)
+                    .file_name()
+                    .map(OsString::from)
+                    .unwrap_or_else(|| OsString::from(relative));
+                let mut metadata = Metadata::default();
+                metadata.is_dir = false;
+                metadata.is_file = true;
+                metadata.len = object.size;
+                entries.push(DirEntry {
+                    path: base_path.join(Path::new(&name)),
+                    metadata,
+                    file_name: name,
+                });
+            }
+        }
+
+        Ok(Box::new(entries.into_iter()))
+    }
+
+    fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let dir_prefix = self
+            .dir_to_prefix(&path)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        if dir_prefix.is_empty() {
+            return Ok(());
+        }
+        let mut empty = Cursor::new(Vec::new());
+        self.bucket
+            .put_object_stream(&mut empty, dir_prefix)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        Ok(())
+    }
+
+    fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
+        self.create_dir(path)
+    }
+
+    fn open_file<P: AsRef<Path>>(
+        &self,
+        _path: P,
+        _options: OpenOptions,
+    ) -> Result<Box<dyn File>, Box<dyn std::error::Error>> {
+        Err(Box::new(S3FsError::Unimplemented("open_file")))
+    }
+
+    fn create_file<P: AsRef<Path>>(
+        &self,
+        _path: P,
+    ) -> Result<Box<dyn File>, Box<dyn std::error::Error>> {
+        Err(Box::new(S3FsError::Unimplemented("create_file")))
+    }
+
+    fn exists<P: AsRef<Path>>(&self, path: P) -> bool {
+        let key = match self.path_to_key(&path) {
+            Ok(key) => key,
+            Err(_) => return false,
+        };
+        if key.is_empty() {
+            return true;
+        }
+
+        if let Ok((result, _)) = self
+            .bucket
+            .list_page(key.clone(), None, None, None, Some(1))
+        {
+            if result.contents.iter().any(|object| object.key == key) {
+                return true;
+            }
+        }
+
+        let dir_prefix = if key.ends_with('/') {
+            key
+        } else {
+            format!("{key}/")
+        };
+        if let Ok((result, _)) =
+            self.bucket
+                .list_page(dir_prefix, Some("/".to_string()), None, None, Some(1))
+        {
+            let has_contents = !result.contents.is_empty();
+            let has_prefixes = result
+                .common_prefixes
+                .as_ref()
+                .is_some_and(|prefixes| !prefixes.is_empty());
+            return has_contents || has_prefixes;
+        }
+
+        false
+    }
+
+    fn remove_file<P: AsRef<Path>>(&self, _path: P) -> Result<(), Box<dyn std::error::Error>> {
+        Err(Box::new(S3FsError::Unimplemented("remove_file")))
+    }
+
+    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let dir_prefix = self
+            .dir_to_prefix(&path)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        if dir_prefix.is_empty() {
+            return Ok(());
+        }
+
+        let results = self
+            .bucket
+            .list(dir_prefix.clone(), None)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        for result in results {
+            for object in result.contents {
+                self.bucket
+                    .delete_object(&object.key)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_file<P: AsRef<Path>>(
+        &self,
+        _src: P,
+        _dest: P,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Err(Box::new(S3FsError::Unimplemented("copy_file")))
+    }
+
+    fn move_file<P: AsRef<Path>>(
+        &self,
+        _src: P,
+        _dest: P,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Err(Box::new(S3FsError::Unimplemented("move_file")))
+    }
+
+    fn move_dir<P: AsRef<Path>>(
+        &self,
+        _src: P,
+        _dest: P,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Err(Box::new(S3FsError::Unimplemented("move_dir")))
+    }
+
+    fn metadata<P: AsRef<Path>>(&self, _path: P) -> Result<Metadata, Box<dyn std::error::Error>> {
+        Err(Box::new(S3FsError::Unimplemented("metadata")))
+    }
+
+    fn stats<P: AsRef<Path>>(&self, _path: P) -> Result<Stats, Box<dyn std::error::Error>> {
+        Err(Box::new(S3FsError::Unimplemented("stats")))
     }
 }

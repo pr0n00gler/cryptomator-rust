@@ -1,4 +1,4 @@
-use cryptomator::crypto::{Cryptor, Vault, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH};
+use cryptomator::crypto::{Cryptor, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, Vault};
 use cryptomator::cryptofs::CryptoFs;
 use cryptomator::frontends::nfs::NfsServer;
 use cryptomator::providers::{LocalFs, MemoryFs};
@@ -41,7 +41,7 @@ async fn test_nfs_create_and_getattr() {
     let sattr = sattr3::default();
 
     let result = nfs.create(root_handle, &filename, sattr).await;
-    assert!(result.is_ok(), "Failed to create file: {:?}", result);
+    assert!(result.is_ok(), "Failed to create file: {result:?}");
 
     let (file_handle, attr) = result.unwrap();
     assert!(matches!(attr.ftype, ftype3::NF3REG));
@@ -391,7 +391,7 @@ async fn test_nfs_readdir() {
 
     // Create multiple files
     for i in 0..5 {
-        let filename: nfsstring = format!("file{}.txt", i).into_bytes().into();
+        let filename: nfsstring = format!("file{i}.txt").into_bytes().into();
         let sattr = sattr3::default();
         nfs.create(root_handle, &filename, sattr).await.unwrap();
     }
@@ -519,7 +519,7 @@ async fn test_nfs_readdir_pagination() {
 
     // Create 5 files
     for i in 0..5 {
-        let filename: nfsstring = format!("file{}.txt", i).into_bytes().into();
+        let filename: nfsstring = format!("file{i}.txt").into_bytes().into();
         nfs.create(root_handle, &filename, sattr3::default())
             .await
             .unwrap();
@@ -558,7 +558,7 @@ async fn test_nfs_readdir_pagination() {
 
     assert_eq!(names.len(), 5);
     for i in 0..5 {
-        assert!(names.contains(&format!("file{}.txt", i)));
+        assert!(names.contains(&format!("file{i}.txt")));
     }
 }
 
@@ -568,7 +568,7 @@ async fn test_nfs_readdir_start_after_uses_fileid() {
     let root_handle = nfs.root_dir();
 
     for i in 0..3 {
-        let filename: nfsstring = format!("cookie_file{}.txt", i).into_bytes().into();
+        let filename: nfsstring = format!("cookie_file{i}.txt").into_bytes().into();
         nfs.create(root_handle, &filename, sattr3::default())
             .await
             .unwrap();

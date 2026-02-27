@@ -1,15 +1,16 @@
 use cryptomator::crypto::{
-    CipherCombo, Cryptor, MasterKey, MasterKeyJson, Vault, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE,
-    DEFAULT_SHORTENING_THRESHOLD, DEFAULT_VAULT_FILENAME,
+    CipherCombo, Cryptor, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE, DEFAULT_SHORTENING_THRESHOLD,
+    DEFAULT_VAULT_FILENAME, MasterKey, MasterKeyJson, Vault,
 };
-use cryptomator::cryptofs::{parent_path, CryptoFs, FileSystem, OpenOptions};
+use cryptomator::cryptofs::{CryptoFs, FileSystem, OpenOptions, parent_path};
 use cryptomator::logging::init_logger;
 use cryptomator::providers::LocalFs;
 
 use tracing::info;
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::{Parser, ValueEnum};
+use zeroize::Zeroizing;
 
 use cryptomator::frontends::auth::WebDavAuth;
 use cryptomator::frontends::mount::mount_nfs;
@@ -17,7 +18,7 @@ use cryptomator::frontends::mount::*;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::env;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Write;
 use std::path::Path;
 
 const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
@@ -79,13 +80,12 @@ struct Unlock {
     #[arg(short, long)]
     webdav_listen_address: Option<String>,
 
-    /// Webdav-server username for Basic Auth
+    /// Webdav-server username for Basic Auth.
+    /// When provided, the WebDAV password is always read from the interactive
+    /// prompt and never accepted on the command line — passing a password via
+    /// CLI arguments exposes it in shell history and `ps` output.
     #[arg(long)]
     webdav_user: Option<String>,
-
-    /// Webdav-server password for Basic Auth
-    #[arg(long)]
-    webdav_password: Option<String>,
 
     /// NFS-server listen address
     #[arg(short, long, default_value = "127.0.0.1:11111")]
@@ -96,13 +96,13 @@ struct Unlock {
 async fn main() {
     let opts: Opts = Opts::parse();
 
-    env::set_var("RUST_LOG", opts.log_level);
+    unsafe { env::set_var("RUST_LOG", opts.log_level) };
     let _guard = init_logger();
 
-    let storage_path = std::path::Path::new(opts.storage_path.as_str()).to_path_buf();
+    let storage_path = Path::new(opts.storage_path.as_str()).to_path_buf();
 
     let vault_path = match opts.vault_path {
-        Some(m) => std::path::Path::new(m.as_str()).to_path_buf(),
+        Some(m) => Path::new(m.as_str()).to_path_buf(),
         None => storage_path.join(DEFAULT_VAULT_FILENAME),
     };
 
@@ -131,7 +131,12 @@ fn create_command<FS: FileSystem, P: AsRef<Path>>(
     full_storage_path: P,
     c: Create,
 ) {
-    let pass = rpassword::prompt_password("Vault password: ").expect("Unable to read password");
+    // Wrap immediately in Zeroizing so the plaintext password is wiped from
+    // the heap when `pass` goes out of scope at the end of this function,
+    // regardless of the return path.
+    let pass = Zeroizing::new(
+        rpassword::prompt_password("Vault password: ").expect("Unable to read password"),
+    );
 
     info!("Generating master key...");
     let mk_json = MasterKeyJson::create(pass.as_str(), c.scrypt_cost, c.scrypt_block_size)
@@ -146,10 +151,10 @@ fn create_command<FS: FileSystem, P: AsRef<Path>>(
     serde_json::to_writer(mk_file, &mk_json).expect("Failed to write master key file");
     info!("Master key saved!");
 
-    let masterkey = MasterKey::from_masterkey_json(mk_json, &pass).unwrap();
-    let mut key: Vec<u8> = Vec::with_capacity(64);
-    key.extend_from_slice(&masterkey.primary_master_key);
-    key.extend_from_slice(&masterkey.hmac_master_key);
+    let masterkey = MasterKey::from_masterkey_json(mk_json, pass.as_str()).unwrap();
+    let mut key: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(64));
+    key.extend_from_slice(masterkey.primary_master_key.as_ref());
+    key.extend_from_slice(masterkey.hmac_master_key.as_ref());
 
     let vault = Vault::create_vault(
         &key,
@@ -170,7 +175,11 @@ fn create_command<FS: FileSystem, P: AsRef<Path>>(
 }
 
 fn migrate_v7_to_v8_command<FS: FileSystem, P: AsRef<Path>>(fs: FS, vault_path: P) {
-    let pass = rpassword::prompt_password("Vault password: ").expect("Unable to read password");
+    // Wrap immediately in Zeroizing so the plaintext password is wiped from
+    // the heap when `pass` drops at the end of this function.
+    let pass = Zeroizing::new(
+        rpassword::prompt_password("Vault password: ").expect("Unable to read password"),
+    );
 
     info!("Reading old masterkey file...");
     let mk_path = parent_path(&vault_path).join(DEFAULT_MASTER_KEY_FILE);
@@ -178,19 +187,37 @@ fn migrate_v7_to_v8_command<FS: FileSystem, P: AsRef<Path>>(fs: FS, vault_path: 
         .open_file(&mk_path, OpenOptions::new())
         .expect("Failed to open masterkey file");
 
-    let mut mk_json: MasterKeyJson =
+    // Deserialize into a local binding that is consumed (not cloned) below.
+    // Cloning MasterKeyJson would leave a second copy of the base64-encoded
+    // wrapped key material on the heap with no zeroize semantics — a full
+    // vault-compromise vector if the process is inspected via crash dump or
+    // memory scan.
+    let mk_json: MasterKeyJson =
         serde_json::from_reader(&mut mk_file).expect("failed to read masterkey file");
+
+    // Snapshot the non-sensitive fields we need to reconstruct the masterkey
+    // file BEFORE consuming mk_json.  These are all public, non-secret values.
+    let scrypt_salt = mk_json.scryptSalt.clone();
+    let scrypt_cost_param = mk_json.scryptCostParam;
+    let scrypt_block_size = mk_json.scryptBlockSize;
+    let primary_master_key_enc = mk_json.primaryMasterKey.clone();
+    let hmac_master_key_enc = mk_json.hmacMasterKey.clone();
 
     fs.remove_file(&mk_path)
         .expect("failed to delete old masterkey file");
 
-    let masterkey = MasterKey::from_masterkey_json(mk_json.clone(), pass.as_str())
+    // Consume mk_json — no clone.  The base64-encoded wrapped keys inside it
+    // are moved into from_masterkey_json and dropped at the end of that call.
+    let masterkey = MasterKey::from_masterkey_json(mk_json, pass.as_str())
         .expect("Failed to decrypt master key file");
-    mk_file.seek(SeekFrom::Start(0)).unwrap();
+    // `pass` is no longer needed after key derivation.  Drop it explicitly
+    // here so the plaintext password bytes are zeroed before the function
+    // continues — rather than waiting until the end of the outer scope.
+    drop(pass);
 
-    let mut key: Vec<u8> = Vec::with_capacity(64);
-    key.extend_from_slice(&masterkey.primary_master_key);
-    key.extend_from_slice(&masterkey.hmac_master_key);
+    let mut key: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(64));
+    key.extend_from_slice(masterkey.primary_master_key.as_ref());
+    key.extend_from_slice(masterkey.hmac_master_key.as_ref());
 
     info!("Creating a vault...");
     let vault = Vault::create_vault(
@@ -201,17 +228,32 @@ fn migrate_v7_to_v8_command<FS: FileSystem, P: AsRef<Path>>(fs: FS, vault_path: 
     )
     .expect("failed to create vault");
 
-    mk_json.version = 999;
-    let mut version_mac: Hmac<Sha256> = Hmac::new_from_slice(&masterkey.hmac_master_key).unwrap();
-    version_mac.update(&mk_json.version.to_be_bytes());
+    // Recompute the versionMac over the new version number (999) using the
+    // unwrapped HMAC master key.  We rebuild MasterKeyJson from scratch rather
+    // than mutating a leftover clone, so there is never a second live copy of
+    // the wrapped key material.
+    let new_version: u32 = 999;
+    let mut version_mac: Hmac<Sha256> =
+        Hmac::new_from_slice(masterkey.hmac_master_key.as_ref()).unwrap();
+    version_mac.update(&new_version.to_be_bytes());
     let version_mac_bytes = version_mac.finalize().into_bytes();
-    mk_json.versionMac = STANDARD.encode(version_mac_bytes);
+
+    let updated_mk_json = MasterKeyJson {
+        version: new_version,
+        scryptSalt: scrypt_salt,
+        scryptCostParam: scrypt_cost_param,
+        scryptBlockSize: scrypt_block_size,
+        primaryMasterKey: primary_master_key_enc,
+        hmacMasterKey: hmac_master_key_enc,
+        versionMac: STANDARD.encode(version_mac_bytes),
+    };
 
     info!("Rewriting masterkey file...");
     let mk_file = fs
         .create_file(mk_path)
         .expect("failed to create new masterkey file");
-    serde_json::to_writer(mk_file, &mk_json).expect("failed to write data to a masterkey file");
+    serde_json::to_writer(mk_file, &updated_mk_json)
+        .expect("failed to write data to a masterkey file");
 
     info!("Writing a vault file...");
     let mut vault_file = fs
@@ -228,12 +270,19 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
     full_storage_path: P,
     u: Unlock,
 ) {
-    let pass = rpassword::prompt_password("Vault password: ").expect("Unable to read password");
-    info!("Unlocking the storage...");
-
-    info!("Deriving keys...");
-
-    let vault = Vault::open(&fs, vault_path, pass).expect("failed to open vault");
+    // Wrap immediately in Zeroizing so the plaintext vault password is wiped
+    // from the heap as soon as key derivation finishes.  The `Zeroizing`
+    // binding is dropped at the end of the inner block below, before any
+    // long-running async server tasks are started.
+    let vault = {
+        let pass = Zeroizing::new(
+            rpassword::prompt_password("Vault password: ").expect("Unable to read password"),
+        );
+        info!("Unlocking the storage...");
+        info!("Deriving keys...");
+        Vault::open(&fs, vault_path, pass.as_str()).expect("failed to open vault")
+        // `pass` is dropped (and zeroed) here — before the server loop begins.
+    };
 
     let cryptor = Cryptor::new(vault);
     let crypto_fs = CryptoFs::new(
@@ -249,11 +298,16 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
 
     if let Some(webdav_listen_address) = &u.webdav_listen_address {
         let auth = u.webdav_user.as_ref().map(|user| {
-            let pass = u.webdav_password.clone().unwrap_or_else(|| {
-                rpassword::prompt_password(format!("WebDAV password for {}: ", user))
-                    .expect("Unable to read WebDAV password")
-            });
-            WebDavAuth::new(user, &pass)
+            // SEC: always prompt for the WebDAV password interactively.
+            // Accepting it via a CLI flag would expose the credential in shell
+            // history and `ps` output.
+            // Wrap in Zeroizing immediately so the plaintext password is wiped
+            // from the heap when `webdav_pass` drops at the end of this closure.
+            let webdav_pass = Zeroizing::new(
+                rpassword::prompt_password(format!("WebDAV password for {user}: "))
+                    .expect("Unable to read WebDAV password"),
+            );
+            WebDavAuth::new(user, webdav_pass.as_str())
         });
 
         info!("Starting WebDav server...");

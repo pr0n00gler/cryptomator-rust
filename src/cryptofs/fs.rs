@@ -1,12 +1,12 @@
 use crate::crypto::{
-    calculate_cleartext_size, shorten_name, Cryptor, FileHeader, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH,
-    FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH,
+    Cryptor, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH, FileHeader,
+    calculate_cleartext_size, shorten_name,
 };
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist};
 use crate::cryptofs::filesystem::Metadata;
 use crate::cryptofs::{
-    last_path_component, parent_path, DirEntry, File, FileSystem, FileSystemError, OpenOptions,
-    Stats,
+    DirEntry, File, FileSystem, FileSystemError, OpenOptions, Stats, last_path_component,
+    parent_path,
 };
 use lru_cache::LruCache;
 use std::collections::hash_map::DefaultHasher;
@@ -240,7 +240,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         &self,
         path: P,
     ) -> Result<CryptoPath, FileSystemError> {
-        // webdav-handler::parent() method returns an empty path for root paths, like "/file.txt",
+        // dav-server::parent() method returns an empty path for root paths, like "/file.txt",
         // "/some_folder", so that's a little hack to handle this bug (is it a bug btw?)
         if path.as_ref().eq(Path::new("")) {
             let real_dir_path = self.real_path_from_dir_id(&[])?;
@@ -502,7 +502,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
         let crypto_file = CryptoFsFile::open(
             real_path,
-            self.cryptor,
+            self.cryptor.clone(),
             &self.file_system_provider,
             options,
             self.config.chunk_cache_cap,
@@ -523,7 +523,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
         let reader = self.file_system_provider.create_file(real_path.full_path)?;
         let crypto_file =
-            CryptoFsFile::create_file(self.cryptor, reader, self.config.chunk_cache_cap)?;
+            CryptoFsFile::create_file(self.cryptor.clone(), reader, self.config.chunk_cache_cap)?;
         Ok(crypto_file)
     }
 
@@ -917,7 +917,7 @@ impl CryptoFsFile {
         let mut decrypted_buffer = Zeroizing::new(vec![0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH]);
         let decrypted_len = match self.cryptor.decrypt_chunk(
             &self.header.nonce,
-            &self.header.payload.content_key,
+            self.header.payload.content_key.as_ref(),
             chunk_index,
             chunk_slice,
             &mut decrypted_buffer,
@@ -980,7 +980,7 @@ impl CryptoFsFile {
         self.write_buffer.resize(FILE_CHUNK_LENGTH, 0);
         let encrypted_len = self.cryptor.encrypt_chunk(
             &self.header.nonce,
-            &self.header.payload.content_key,
+            self.header.payload.content_key.as_ref(),
             chunk_idx,
             &chunk_data,
             &mut self.write_buffer,
@@ -1159,9 +1159,8 @@ impl Write for CryptoFsFile {
             known_size = known_size.max(self.current_pos);
         }
 
-        self.metadata.len = known_size;
         if let Err(e) = self.update_metadata() {
-            error!("Failed to update metadata for a file");
+            error!("Failed to update metadata after write");
             return Err(e.into());
         }
 

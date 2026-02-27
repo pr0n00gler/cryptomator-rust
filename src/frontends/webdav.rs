@@ -4,17 +4,17 @@ use crate::cryptofs::{
     OpenOptions as cryptoOpenOptions,
 };
 use bytes::{Buf, Bytes};
-use futures::{future, future::FutureExt};
+use dav_server::davpath::DavPath;
+use dav_server::fs::{
+    DavDirEntry, DavFile, DavFileSystem, DavMetaData, FsError, FsFuture, FsResult, FsStream,
+    OpenOptions, ReadDirMeta,
+};
+use futures::{StreamExt, future, future::FutureExt};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tracing::{debug, error, info, instrument, warn};
-use webdav_handler::davpath::DavPath;
-use webdav_handler::fs::{
-    DavDirEntry, DavFile, DavFileSystem, DavMetaData, FsError, FsFuture, FsResult, FsStream,
-    OpenOptions, ReadDirMeta,
-};
 
 fn map_io_error(e: &std::io::Error) -> FsError {
     match e.kind() {
@@ -268,7 +268,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
     ) -> FsFuture<'a, Box<dyn DavFile>> {
         let crypto_fs = self.crypto_fs.clone();
         let path_buf = path.as_pathbuf();
-        // Since OpenOptions is not Clone (it's from webdav-handler), we need to reconstruct or manually pass values.
+        // Since OpenOptions is not Clone (it's from dav-server), we need to reconstruct or manually pass values.
         // Or we can just extract what we need.
         // Wait, options.create_new etc are bool fields.
         let create_new = options.create_new;
@@ -344,7 +344,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
                 FsError::GeneralFailure
             })?
             .map(|collected_entries| {
-                let strm = futures::stream::iter(collected_entries);
+                let strm = futures::stream::iter(collected_entries).map(Ok::<_, FsError>);
                 Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>
             })
         }

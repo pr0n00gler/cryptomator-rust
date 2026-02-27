@@ -1,9 +1,9 @@
 use cryptomator::crypto;
-use cryptomator::crypto::{Vault, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH};
+use cryptomator::crypto::{FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, Vault};
 use cryptomator::cryptofs::{CryptoFs, FileSystem, OpenOptions};
 use cryptomator::providers::{LocalFs, MemoryFs};
 use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
+use rand::{Rng, thread_rng};
 use std::io::{Read, Seek, Write};
 use std::path::Path;
 

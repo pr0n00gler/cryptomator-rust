@@ -6,8 +6,8 @@ use crate::crypto::error::MasterKeyError;
 
 use rand::Rng;
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use hmac::digest::generic_array::GenericArray;
+use base64::{Engine as _, engine::r#general_purpose::STANDARD};
+use hmac::digest::r#generic_array::GenericArray;
 use hmac::{Hmac, Mac};
 use scrypt::Params;
 use sha2::Sha256;
@@ -43,9 +43,9 @@ impl MasterKeyJson {
     ) -> Result<MasterKeyJson, MasterKeyError> {
         // All intermediate key buffers are wrapped in Zeroizing so they are
         // wiped from memory when this function returns (or on any error path).
-        let encryption_master_key = Zeroizing::new(rand::thread_rng().gen::<[u8; 32]>());
-        let hmac_master_key = Zeroizing::new(rand::thread_rng().gen::<[u8; 32]>());
-        let scrypt_salt = rand::thread_rng().gen::<[u8; 32]>();
+        let encryption_master_key = Zeroizing::new(rand::thread_rng().r#gen::<[u8; 32]>());
+        let hmac_master_key = Zeroizing::new(rand::thread_rng().r#gen::<[u8; 32]>());
+        let scrypt_salt = rand::thread_rng().r#gen::<[u8; 32]>();
 
         let mut kek = Zeroizing::new([0u8; 32]);
         let scrypt_params = Params::new(
@@ -196,8 +196,8 @@ impl MasterKey {
 
 #[cfg(test)]
 pub mod tests {
-    use crate::crypto::masterkey::MasterKeyJson;
     use crate::crypto::MasterKey;
+    use crate::crypto::masterkey::MasterKeyJson;
     use crate::cryptofs::{FileSystem, OpenOptions};
     use crate::providers::MemoryFs;
 

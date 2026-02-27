@@ -1,14 +1,14 @@
 use cryptomator::crypto::{
-    CipherCombo, Cryptor, MasterKey, MasterKeyJson, Vault, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE,
-    DEFAULT_SHORTENING_THRESHOLD, DEFAULT_VAULT_FILENAME,
+    CipherCombo, Cryptor, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE, DEFAULT_SHORTENING_THRESHOLD,
+    DEFAULT_VAULT_FILENAME, MasterKey, MasterKeyJson, Vault,
 };
-use cryptomator::cryptofs::{parent_path, CryptoFs, FileSystem, OpenOptions};
+use cryptomator::cryptofs::{CryptoFs, FileSystem, OpenOptions, parent_path};
 use cryptomator::logging::init_logger;
 use cryptomator::providers::LocalFs;
 
 use tracing::info;
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::{Parser, ValueEnum};
 use zeroize::Zeroizing;
 
@@ -96,13 +96,13 @@ struct Unlock {
 async fn main() {
     let opts: Opts = Opts::parse();
 
-    env::set_var("RUST_LOG", opts.log_level);
+    unsafe { env::set_var("RUST_LOG", opts.log_level) };
     let _guard = init_logger();
 
-    let storage_path = std::path::Path::new(opts.storage_path.as_str()).to_path_buf();
+    let storage_path = Path::new(opts.storage_path.as_str()).to_path_buf();
 
     let vault_path = match opts.vault_path {
-        Some(m) => std::path::Path::new(m.as_str()).to_path_buf(),
+        Some(m) => Path::new(m.as_str()).to_path_buf(),
         None => storage_path.join(DEFAULT_VAULT_FILENAME),
     };
 
@@ -304,7 +304,7 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
             // Wrap in Zeroizing immediately so the plaintext password is wiped
             // from the heap when `webdav_pass` drops at the end of this closure.
             let webdav_pass = Zeroizing::new(
-                rpassword::prompt_password(format!("WebDAV password for {}: ", user))
+                rpassword::prompt_password(format!("WebDAV password for {user}: "))
                     .expect("Unable to read WebDAV password"),
             );
             WebDavAuth::new(user, webdav_pass.as_str())

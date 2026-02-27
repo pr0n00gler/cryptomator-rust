@@ -1,5 +1,5 @@
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use std::fmt;
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -25,7 +25,7 @@ impl WebDavAuth {
         // the heap until the allocator happened to overwrite them — potentially
         // never within the process lifetime — creating a key-in-memory exposure
         // window for any process-memory scanner or crash dump.
-        let credentials = Zeroizing::new(format!("{}:{}", user, pass));
+        let credentials = Zeroizing::new(format!("{user}:{pass}"));
         let b64 = Zeroizing::new(STANDARD.encode(credentials.as_bytes()));
         let header_value = Zeroizing::new(format!("Basic {}", b64.as_str()));
         Self {
@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn test_auth_display_does_not_expose_credential() {
         let auth = WebDavAuth::new("secret_user", "secret_pass");
-        let display_str = format!("{}", auth);
+        let display_str = format!("{auth}");
         assert!(!display_str.contains("secret_user"));
         assert!(!display_str.contains("secret_pass"));
     }
@@ -119,7 +119,7 @@ mod tests {
         let auth = WebDavAuth::new("user@domain.com", "p@$$w0rd!");
         let credentials = base64::engine::general_purpose::STANDARD
             .encode("user@domain.com:p@$$w0rd!".as_bytes());
-        let header = format!("Basic {}", credentials);
+        let header = format!("Basic {credentials}");
         assert!(auth.check(&header));
     }
 }

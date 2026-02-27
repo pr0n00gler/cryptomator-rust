@@ -1,5 +1,5 @@
-use crate::crypto::error::CryptoError;
 use crate::crypto::Vault;
+use crate::crypto::error::CryptoError;
 
 use std::fmt;
 use std::io::{Read, Write};
@@ -9,9 +9,9 @@ use rand::Rng;
 
 use aes::Aes256;
 use aes_siv::siv::Aes256Siv;
-use aes_siv::{aead::generic_array::GenericArray, KeyInit};
+use aes_siv::{KeyInit, aead::generic_array::GenericArray};
 use base32::Alphabet;
-use base64::{engine::general_purpose::URL_SAFE, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE};
 use ctr::cipher::{KeyIvInit, StreamCipher};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -235,13 +235,13 @@ impl Cryptor {
     /// Returns a new FileHeader with a freshly generated random content key.
     pub fn create_file_header(&self) -> FileHeader {
         FileHeader {
-            nonce: rand::thread_rng().gen::<[u8; FILE_HEADER_NONCE_LENGTH]>(),
+            nonce: rand::thread_rng().r#gen::<[u8; FILE_HEADER_NONCE_LENGTH]>(),
             payload: FileHeaderPayload {
                 reserved: [0xFu8; FILE_HEADER_PAYLOAD_RESERVED_LENGTH],
                 // Wrap in Zeroizing so the random key bytes are wiped when
                 // FileHeaderPayload (and its enclosing FileHeader) is dropped.
                 content_key: Zeroizing::new(
-                    rand::thread_rng().gen::<[u8; FILE_HEADER_PAYLOAD_CONTENT_KEY_LENGTH]>(),
+                    rand::thread_rng().r#gen::<[u8; FILE_HEADER_PAYLOAD_CONTENT_KEY_LENGTH]>(),
                 ),
             },
             mac: [0u8; FILE_HEADER_MAC_LENGTH],
@@ -471,7 +471,7 @@ impl Cryptor {
             )));
         }
 
-        let chunk_nonce = rand::thread_rng().gen::<[u8; FILE_CHUNK_CONTENT_NONCE_LENGTH]>();
+        let chunk_nonce = rand::thread_rng().r#gen::<[u8; FILE_CHUNK_CONTENT_NONCE_LENGTH]>();
 
         output[..FILE_CHUNK_CONTENT_NONCE_LENGTH].copy_from_slice(&chunk_nonce);
 

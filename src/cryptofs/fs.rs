@@ -1,12 +1,12 @@
 use crate::crypto::{
-    calculate_cleartext_size, shorten_name, Cryptor, FileHeader, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH,
-    FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH,
+    Cryptor, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH, FileHeader,
+    calculate_cleartext_size, shorten_name,
 };
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist};
 use crate::cryptofs::filesystem::Metadata;
 use crate::cryptofs::{
-    last_path_component, parent_path, DirEntry, File, FileSystem, FileSystemError, OpenOptions,
-    Stats,
+    DirEntry, File, FileSystem, FileSystemError, OpenOptions, Stats, last_path_component,
+    parent_path,
 };
 use lru_cache::LruCache;
 use std::collections::hash_map::DefaultHasher;
@@ -240,7 +240,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         &self,
         path: P,
     ) -> Result<CryptoPath, FileSystemError> {
-        // webdav-handler::parent() method returns an empty path for root paths, like "/file.txt",
+        // dav-server::parent() method returns an empty path for root paths, like "/file.txt",
         // "/some_folder", so that's a little hack to handle this bug (is it a bug btw?)
         if path.as_ref().eq(Path::new("")) {
             let real_dir_path = self.real_path_from_dir_id(&[])?;

@@ -1,10 +1,10 @@
 use std::hint::black_box;
 use std::io::Cursor;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use cryptomator::crypto::{
-    Claims, Cryptor, MasterKey, Vault, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, FILE_CHUNK_LENGTH,
-    FILE_HEADER_LENGTH,
+    Claims, Cryptor, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH,
+    MasterKey, Vault,
 };
 use zeroize::Zeroizing;
 

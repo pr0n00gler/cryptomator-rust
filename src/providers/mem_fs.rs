@@ -1,6 +1,6 @@
 use crate::cryptofs::{
-    last_path_component, parent_path, DirEntry, File, FileSystem, Metadata,
-    OpenOptions as cryptoOpenOptions, Stats,
+    DirEntry, File, FileSystem, Metadata, OpenOptions as cryptoOpenOptions, Stats,
+    last_path_component, parent_path,
 };
 use rsfs::mem::FS;
 use rsfs::{DirEntry as DE, GenFS, OpenOptions};

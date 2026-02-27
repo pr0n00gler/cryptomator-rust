@@ -1,5 +1,5 @@
 use cryptomator::crypto;
-use cryptomator::crypto::{Vault, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH};
+use cryptomator::crypto::{FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, Vault};
 use cryptomator::cryptofs::{CryptoFs, FileSystem, FileSystemError, OpenOptions};
 use cryptomator::providers::{LocalFs, MemoryFs};
 use rand::distributions::Alphanumeric;

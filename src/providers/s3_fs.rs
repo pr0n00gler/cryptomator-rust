@@ -869,3 +869,49 @@ impl FileSystem for S3Fs {
         Ok(Stats::default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_fs(prefix: &str) -> S3Fs {
+        let region = Region::Custom {
+            region: "test".to_string(),
+            endpoint: "http://localhost".to_string(),
+        };
+        let credentials =
+            Credentials::new(Some("ak"), Some("sk"), None, None, None).expect("credentials");
+        let bucket = Bucket::new("bucket", region, credentials).expect("bucket");
+        S3Fs {
+            bucket: Box::new(bucket),
+            prefix: prefix.to_string(),
+        }
+    }
+
+    #[test]
+    fn normalize_prefix_trims_slashes() {
+        let normalized = S3Fs::normalize_prefix("/vault/root/".to_string()).expect("prefix");
+        assert_eq!(normalized, "vault/root");
+    }
+
+    #[test]
+    fn path_to_key_joins_prefix() {
+        let fs = test_fs("vault");
+        let key = fs.path_to_key("/dir/file.txt").expect("key");
+        assert_eq!(key, "vault/dir/file.txt");
+    }
+
+    #[test]
+    fn dir_to_prefix_adds_trailing_slash() {
+        let fs = test_fs("vault");
+        let prefix = fs.dir_to_prefix("dir").expect("prefix");
+        assert_eq!(prefix, "vault/dir/");
+    }
+
+    #[test]
+    fn path_to_key_rejects_parent_dir() {
+        let fs = test_fs("vault");
+        let result = fs.path_to_key("../evil");
+        assert!(matches!(result, Err(S3FsError::InvalidPath(_))));
+    }
+}

@@ -18,6 +18,7 @@ evaluation purposes.
 * Works with local vaults
 * Unlocked content can be accessed via an embedded WebDav or NFS server;
 * Windows/Unix support
+* Experimental S3-compatible storage provider (library use)
 
 ## Work in progress
 
@@ -79,3 +80,19 @@ cryptomator --help
 ```shell
 make test
 ```
+
+### S3 Integration Tests
+
+S3 filesystem integration tests are gated by environment variables. Set these to enable the
+roundtrip test against your S3-compatible endpoint:
+
+> ⚠️ Do not commit these environment variables to source control, as they may contain secrets.
+
+* `S3_TEST_ENDPOINT`
+* `S3_TEST_BUCKET`
+* `S3_TEST_ACCESS_KEY`
+* `S3_TEST_SECRET_KEY`
+* `S3_TEST_REGION` (optional, defaults to `us-east-1`)
+* `S3_TEST_PREFIX` (optional)
+* `S3_TEST_PATH_STYLE` (optional: `true`/`1`)
+* `S3_TEST_SESSION_TOKEN` (optional)

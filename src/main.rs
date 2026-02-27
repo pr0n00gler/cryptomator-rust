@@ -1,37 +1,42 @@
+use std::env;
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
+use std::process::exit;
+use std::time::Duration;
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use clap::{Parser, ValueEnum};
+use hmac::{Hmac, Mac};
+use serde::Deserialize;
+use sha2::Sha256;
+use thiserror::Error;
+use tracing::info;
+use zeroize::Zeroizing;
+
 use cryptomator::crypto::{
     CipherCombo, Cryptor, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE, DEFAULT_SHORTENING_THRESHOLD,
     DEFAULT_VAULT_FILENAME, MasterKey, MasterKeyJson, Vault,
 };
-use cryptomator::cryptofs::{CryptoFs, FileSystem, OpenOptions, parent_path};
-use cryptomator::logging::init_logger;
-use cryptomator::providers::LocalFs;
-
-use tracing::info;
-
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use clap::{Parser, ValueEnum};
-use zeroize::Zeroizing;
-
+use cryptomator::cryptofs::{parent_path, CryptoFs, FileSystem, OpenOptions};
 use cryptomator::frontends::auth::WebDavAuth;
 use cryptomator::frontends::mount::mount_nfs;
 use cryptomator::frontends::mount::*;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use std::env;
-use std::io::Write;
-use std::path::Path;
+use cryptomator::logging::init_logger;
+use cryptomator::providers::{LocalFs, S3Fs, S3FsConfig};
 
 const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum FilesystemProvider {
     Local,
+    S3,
 }
 
 #[derive(Parser)]
 #[command(version = "0.1.0", author = "pr0n00gler <pr0n00gler@yandex.ru>")]
 struct Opts {
-    /// Path to a storage
+    /// Path to a storage (local path or S3 prefix)
     #[arg(short, long)]
     storage_path: String,
 
@@ -39,9 +44,13 @@ struct Opts {
     #[arg(short, long)]
     vault_path: Option<String>,
 
-    /// Filesystem provider. Supported values: only "local" for now
+    /// Filesystem provider. Supported values: "local" and "s3"
     #[arg(value_enum, default_value_t = FilesystemProvider::Local)]
     filesystem_provider: FilesystemProvider,
+
+    /// Path to S3 configuration JSON file (required for the s3 provider)
+    #[arg(long, value_name = "PATH", required_if_eq("filesystem_provider", "s3"))]
+    s3_config_path: Option<String>,
 
     /// Log level
     #[arg(short, long, default_value = "info")]
@@ -96,33 +105,145 @@ struct Unlock {
 async fn main() {
     let opts: Opts = Opts::parse();
 
-    unsafe { env::set_var("RUST_LOG", opts.log_level) };
+    unsafe { env::set_var("RUST_LOG", &opts.log_level) };
     let _guard = init_logger();
 
     let storage_path = Path::new(opts.storage_path.as_str()).to_path_buf();
 
-    let vault_path = match opts.vault_path {
-        Some(m) => Path::new(m.as_str()).to_path_buf(),
+    let vault_path = match opts.vault_path.as_deref() {
+        Some(m) => Path::new(m).to_path_buf(),
         None => storage_path.join(DEFAULT_VAULT_FILENAME),
     };
 
     let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
+
+    let s3_config_path = opts.s3_config_path.as_deref();
 
     match opts.subcmd {
         Command::Create(c) => match opts.filesystem_provider {
             FilesystemProvider::Local => {
                 create_command(LocalFs::new(), &vault_path, &full_storage_path, c)
             }
+            FilesystemProvider::S3 => {
+                let s3_fs = match load_s3_fs(s3_config_path) {
+                    Ok(fs) => fs,
+                    Err(err) => {
+                        eprintln!("failed to initialize S3 filesystem: {err}");
+                        exit(2);
+                    }
+                };
+                create_command(s3_fs, &vault_path, &full_storage_path, c)
+            }
         },
         Command::MigrateV7ToV8 => match opts.filesystem_provider {
             FilesystemProvider::Local => migrate_v7_to_v8_command(LocalFs::new(), &vault_path),
+            FilesystemProvider::S3 => {
+                let s3_fs = match load_s3_fs(s3_config_path) {
+                    Ok(fs) => fs,
+                    Err(err) => {
+                        eprintln!("failed to initialize S3 filesystem: {err}");
+                        exit(2);
+                    }
+                };
+                migrate_v7_to_v8_command(s3_fs, &vault_path)
+            }
         },
         Command::Unlock(u) => match opts.filesystem_provider {
             FilesystemProvider::Local => {
                 unlock_command(LocalFs::new(), &vault_path, &full_storage_path, u).await
             }
+            FilesystemProvider::S3 => {
+                let s3_fs = match load_s3_fs(s3_config_path) {
+                    Ok(fs) => fs,
+                    Err(err) => {
+                        eprintln!("failed to initialize S3 filesystem: {err}");
+                        exit(2);
+                    }
+                };
+                unlock_command(s3_fs, &vault_path, &full_storage_path, u).await
+            }
         },
     }
+}
+
+#[derive(Debug, Error)]
+enum S3ConfigError {
+    #[error("failed to read S3 config file: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("failed to parse S3 config file: {0}")]
+    Parse(#[from] serde_json::Error),
+    #[error("invalid S3 config: {0}")]
+    InvalidConfig(String),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct S3FsFileConfig {
+    bucket: String,
+    #[serde(default)]
+    prefix: Option<String>,
+    region: String,
+    #[serde(default)]
+    endpoint: Option<String>,
+    #[serde(default)]
+    force_path_style: bool,
+    #[serde(default)]
+    validate_bucket: bool,
+    #[serde(default)]
+    access_key: Option<String>,
+    #[serde(default)]
+    secret_key: Option<String>,
+    #[serde(default)]
+    session_token: Option<String>,
+    #[serde(default)]
+    request_timeout_seconds: Option<u64>,
+}
+
+impl S3FsFileConfig {
+    fn into_s3_fs_config(self) -> Result<S3FsConfig, S3ConfigError> {
+        let request_timeout = match self.request_timeout_seconds {
+            Some(0) => {
+                return Err(S3ConfigError::InvalidConfig(
+                    "request_timeout_seconds must be greater than zero".to_string(),
+                ));
+            }
+            Some(seconds) => Some(Duration::from_secs(seconds)),
+            None => None,
+        };
+
+        Ok(S3FsConfig {
+            bucket: self.bucket,
+            prefix: self.prefix,
+            region: self.region,
+            endpoint: self.endpoint,
+            force_path_style: self.force_path_style,
+            validate_bucket: self.validate_bucket,
+            access_key: self.access_key.map(Zeroizing::new),
+            secret_key: self.secret_key.map(Zeroizing::new),
+            session_token: self.session_token.map(Zeroizing::new),
+            request_timeout,
+        })
+    }
+}
+
+fn load_s3_fs(config_path: Option<&str>) -> Result<S3Fs, S3ConfigError> {
+    let config_path = match config_path {
+        Some(path) => path,
+        None => {
+            return Err(S3ConfigError::InvalidConfig(
+                "--s3-config must be provided when using the s3 provider".to_string(),
+            ));
+        }
+    };
+
+    let config = load_s3_config(config_path)?;
+    S3Fs::new(config).map_err(|err| S3ConfigError::InvalidConfig(err.to_string()))
+}
+
+fn load_s3_config<P: AsRef<Path>>(path: P) -> Result<S3FsConfig, S3ConfigError> {
+    let config_file = File::open(path.as_ref())?;
+    let config: S3FsFileConfig = serde_json::from_reader(config_file)?;
+    config.into_s3_fs_config()
 }
 
 fn create_command<FS: FileSystem, P: AsRef<Path>>(

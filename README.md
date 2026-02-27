@@ -69,6 +69,59 @@ Now you can mount it:
   mount_nfs -o nolocks,vers=3,tcp,rsize=131072,actimeo=120,port=11111,mountport=11111 tmp
 ```
 
+### Using S3 storage
+
+The CLI can use an S3-compatible backend when you pass `--filesystem-provider s3` and a
+JSON config file via `--s3-config`. The `--storage-path` value becomes the S3 prefix
+inside the bucket (the provider will still use the `d/` subfolder under that prefix).
+
+Example config (`s3_config.json`):
+
+```json
+{
+  "bucket": "my-cryptomator-bucket",
+  "prefix": "vaults/demo",
+  "region": "us-east-1",
+  "endpoint": "https://s3.amazonaws.com",
+  "force_path_style": false,
+  "validate_bucket": true,
+  "access_key": "AKIA...",
+  "secret_key": "...",
+  "session_token": null,
+  "request_timeout_seconds": 30
+}
+```
+
+Command examples:
+
+```shell
+cryptomator \
+  --filesystem-provider s3 \
+  --s3-config /path/to/s3_config.json \
+  --storage-path vaults/demo \
+  create
+```
+
+```shell
+cryptomator \
+  --filesystem-provider s3 \
+  --s3-config /path/to/s3_config.json \
+  --storage-path vaults/demo \
+  unlock
+```
+
+Config fields:
+
+* `bucket` (string, required)
+* `prefix` (string, optional)
+* `region` (string, required)
+* `endpoint` (string, optional, for S3-compatible targets)
+* `force_path_style` (bool, optional)
+* `validate_bucket` (bool, optional; performs a lightweight list request on startup)
+* `access_key` / `secret_key` (string, optional; must be provided together)
+* `session_token` (string, optional)
+* `request_timeout_seconds` (integer, optional; must be > 0)
+
 For more advanced usage:
 
 ```shell

@@ -1,6 +1,6 @@
 use cryptomator::crypto;
 use cryptomator::crypto::{Vault, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH};
-use cryptomator::cryptofs::{CryptoFs, FileSystem, OpenOptions};
+use cryptomator::cryptofs::{CryptoFs, FileSystem, FileSystemError, OpenOptions};
 use cryptomator::providers::{LocalFs, MemoryFs};
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
@@ -429,4 +429,133 @@ fn crypto_fs_move_dir<P: AsRef<Path>>(dir1: P, child_dir: P, file: P, dst_dir: P
     let mut data_check: Vec<u8> = vec![];
     check_file.read_to_end(&mut data_check).unwrap();
     assert_eq!(data, data_check);
+}
+
+// ============================================================================
+// Read-Only Mode Tests
+// ============================================================================
+
+#[test]
+fn test_read_only_mode_blocks_create_file() {
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new_read_only(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    assert!(crypto_fs.is_read_only());
+
+    let result = crypto_fs.create_file("/test.txt");
+    assert!(matches!(result, Err(FileSystemError::ReadOnly)));
+}
+
+#[test]
+fn test_read_only_mode_blocks_create_dir() {
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new_read_only(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    let result = crypto_fs.create_dir("/test_dir");
+    assert!(matches!(result, Err(FileSystemError::ReadOnly)));
+
+    let result = crypto_fs.create_dir_all("/test_dir/subdir");
+    assert!(matches!(result, Err(FileSystemError::ReadOnly)));
+}
+
+#[test]
+fn test_read_only_mode_blocks_remove_file() {
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new_read_only(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    let result = crypto_fs.remove_file("/test.txt");
+    assert!(matches!(result, Err(FileSystemError::ReadOnly)));
+}
+
+#[test]
+fn test_read_only_mode_blocks_remove_dir() {
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new_read_only(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    let result = crypto_fs.remove_dir("/test_dir");
+    assert!(matches!(result, Err(FileSystemError::ReadOnly)));
+}
+
+#[test]
+fn test_read_only_mode_blocks_copy_file() {
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new_read_only(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    let result = crypto_fs.copy_file("/src.txt", "/dst.txt");
+    assert!(matches!(result, Err(FileSystemError::ReadOnly)));
+}
+
+#[test]
+fn test_read_only_mode_blocks_copy_dir() {
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new_read_only(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    let result = crypto_fs.copy_dir("/src_dir", "/dst_dir");
+    assert!(matches!(result, Err(FileSystemError::ReadOnly)));
+}
+
+#[test]
+fn test_read_only_mode_blocks_copy_path() {
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new_read_only(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    let result = crypto_fs.copy_path("/src.txt", "/dst.txt");
+    assert!(matches!(result, Err(FileSystemError::ReadOnly)));
+}
+
+#[test]
+fn test_read_only_mode_blocks_move_file() {
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new_read_only(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    let result = crypto_fs.move_file("/src.txt", "/dst.txt");
+    assert!(matches!(result, Err(FileSystemError::ReadOnly)));
+}
+
+#[test]
+fn test_read_only_mode_blocks_move_dir() {
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new_read_only(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    let result = crypto_fs.move_dir("/src_dir", "/dst_dir");
+    assert!(matches!(result, Err(FileSystemError::ReadOnly)));
+}
+
+#[test]
+fn test_read_only_mode_blocks_move_path() {
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+
+    let local_fs = MemoryFs::new();
+    let crypto_fs = CryptoFs::new_read_only(VFS_STORAGE_PATH, cryptor, local_fs).unwrap();
+
+    let result = crypto_fs.move_path("/src.txt", "/dst.txt");
+    assert!(matches!(result, Err(FileSystemError::ReadOnly)));
 }

@@ -32,6 +32,9 @@ pub enum FileSystemError {
 
     #[error("UUID parse error")]
     UuidParseError(uuid::Error),
+
+    #[error("Filesystem is read-only")]
+    ReadOnly,
 }
 
 impl From<std::io::Error> for FileSystemError {
@@ -104,6 +107,10 @@ impl From<FileSystemError> for std::io::Error {
     fn from(err: FileSystemError) -> std::io::Error {
         match err {
             FileSystemError::IoError(e) => e,
+            FileSystemError::ReadOnly => std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "filesystem is read-only",
+            ),
             FileSystemError::PathDoesNotExist(path) => {
                 std::io::Error::new(std::io::ErrorKind::NotFound, path)
             }

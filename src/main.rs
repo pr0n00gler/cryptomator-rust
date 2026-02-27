@@ -90,6 +90,10 @@ struct Unlock {
     /// NFS-server listen address
     #[arg(short, long, default_value = "127.0.0.1:11111")]
     nfs_listen_address: String,
+
+    /// Start in read-only mode (block write operations)
+    #[arg(long)]
+    read_only: bool,
 }
 
 #[tokio::main]
@@ -236,15 +240,28 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
     let vault = Vault::open(&fs, vault_path, pass).expect("failed to open vault");
 
     let cryptor = Cryptor::new(vault);
-    let crypto_fs = CryptoFs::new(
-        full_storage_path
-            .as_ref()
-            .to_str()
-            .expect("Failed to convert Path to &str"),
-        cryptor,
-        fs,
-    )
-    .expect("Failed to unblock storage");
+    let crypto_fs = if u.read_only {
+        info!("Starting in read-only mode...");
+        CryptoFs::new_read_only(
+            full_storage_path
+                .as_ref()
+                .to_str()
+                .expect("Failed to convert Path to &str"),
+            cryptor,
+            fs,
+        )
+        .expect("Failed to initialize read-only storage")
+    } else {
+        CryptoFs::new(
+            full_storage_path
+                .as_ref()
+                .to_str()
+                .expect("Failed to convert Path to &str"),
+            cryptor,
+            fs,
+        )
+        .expect("Failed to initialize storage")
+    };
     info!("Storage unlocked!");
 
     if let Some(webdav_listen_address) = &u.webdav_listen_address {

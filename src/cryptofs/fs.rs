@@ -79,12 +79,14 @@ const CHUNK_CACHE_CAP: usize = 500;
 #[derive(Clone, Debug, Copy)]
 pub struct CryptoFsConfig {
     pub chunk_cache_cap: usize,
+    pub read_only: bool,
 }
 
 impl Default for CryptoFsConfig {
     fn default() -> Self {
         CryptoFsConfig {
             chunk_cache_cap: CHUNK_CACHE_CAP,
+            read_only: false,
         }
     }
 }
@@ -116,9 +118,6 @@ pub struct CryptoFs<FS: FileSystem> {
 
     caches: Arc<CryptoFsCaches>,
     config: CryptoFsConfig,
-
-    /// If true, write operations are blocked
-    read_only: bool,
 }
 
 impl<FS: 'static + FileSystem> CryptoFs<FS> {
@@ -128,13 +127,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         cryptor: Cryptor,
         fs_provider: FS,
     ) -> Result<CryptoFs<FS>, FileSystemError> {
-        Self::with_config_and_read_only(
-            folder,
-            cryptor,
-            fs_provider,
-            CryptoFsConfig::default(),
-            false,
-        )
+        Self::with_config(folder, cryptor, fs_provider, CryptoFsConfig::default())
     }
 
     /// Returns a new instance of CryptoFS with read-only mode
@@ -143,13 +136,11 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         cryptor: Cryptor,
         fs_provider: FS,
     ) -> Result<CryptoFs<FS>, FileSystemError> {
-        Self::with_config_and_read_only(
-            folder,
-            cryptor,
-            fs_provider,
-            CryptoFsConfig::default(),
-            true,
-        )
+        let config = CryptoFsConfig {
+            read_only: true,
+            ..Default::default()
+        };
+        Self::with_config(folder, cryptor, fs_provider, config)
     }
 
     pub fn with_config(
@@ -158,26 +149,15 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         fs_provider: FS,
         config: CryptoFsConfig,
     ) -> Result<CryptoFs<FS>, FileSystemError> {
-        Self::with_config_and_read_only(folder, cryptor, fs_provider, config, false)
-    }
-
-    pub fn with_config_and_read_only(
-        folder: &str,
-        cryptor: Cryptor,
-        fs_provider: FS,
-        config: CryptoFsConfig,
-        read_only: bool,
-    ) -> Result<CryptoFs<FS>, FileSystemError> {
         let crypto_fs = CryptoFs {
             cryptor,
             root_folder: PathBuf::from(folder),
             file_system_provider: fs_provider,
             caches: Arc::new(CryptoFsCaches::new(5000, 16)),
             config,
-            read_only,
         };
         let root = crypto_fs.real_path_from_dir_id(b"")?;
-        if !read_only {
+        if !crypto_fs.config.read_only {
             crypto_fs.file_system_provider.create_dir_all(root)?;
         }
         Ok(crypto_fs)
@@ -185,7 +165,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
 
     /// Returns true if the filesystem is in read-only mode
     pub fn is_read_only(&self) -> bool {
-        self.read_only
+        self.config.read_only
     }
 
     /// Returns a real path to a dir by dir_id
@@ -460,7 +440,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     /// Creates the directory at this path
     /// Similar to create_dir_all()
     pub fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
-        if self.read_only {
+        if self.config.read_only {
             return Err(FileSystemError::ReadOnly);
         }
         let mut current_dir_id: Vec<u8> = vec![];
@@ -551,13 +531,13 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             &self.file_system_provider,
             options,
             self.config.chunk_cache_cap,
-            self.read_only,
+            self.config.read_only,
         )?;
         Ok(crypto_file)
     }
 
     pub fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<CryptoFsFile, FileSystemError> {
-        if self.read_only {
+        if self.config.read_only {
             return Err(FileSystemError::ReadOnly);
         }
         let mut real_path = self.filepath_to_real_path(&path)?;
@@ -585,7 +565,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     }
 
     pub fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
-        if self.read_only {
+        if self.config.read_only {
             return Err(FileSystemError::ReadOnly);
         }
         let real_path = self.filepath_to_real_path(&path)?;
@@ -608,7 +588,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     }
 
     pub fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), FileSystemError> {
-        if self.read_only {
+        if self.config.read_only {
             return Err(FileSystemError::ReadOnly);
         }
         let real_dir_path = self.filepath_to_real_path(&path)?;
@@ -631,7 +611,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     }
 
     pub fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
-        if self.read_only {
+        if self.config.read_only {
             return Err(FileSystemError::ReadOnly);
         }
         let mut src_real_path = self.filepath_to_real_path(_src)?;
@@ -656,7 +636,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     }
 
     pub fn copy_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
-        if self.read_only {
+        if self.config.read_only {
             return Err(FileSystemError::ReadOnly);
         }
         let src_dir_entries = self.read_dir(&_src)?;
@@ -687,7 +667,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     }
 
     pub fn copy_path<P: AsRef<Path>>(&self, src: P, dest: P) -> Result<(), FileSystemError> {
-        if self.read_only {
+        if self.config.read_only {
             return Err(FileSystemError::ReadOnly);
         }
         let metadata = self.metadata(&src)?;
@@ -699,7 +679,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     }
 
     pub fn move_path<P: AsRef<Path>>(&self, src: P, dest: P) -> Result<(), FileSystemError> {
-        if self.read_only {
+        if self.config.read_only {
             return Err(FileSystemError::ReadOnly);
         }
         let metadata = self.metadata(&src)?;
@@ -716,7 +696,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     }
 
     pub fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
-        if self.read_only {
+        if self.config.read_only {
             return Err(FileSystemError::ReadOnly);
         }
         let src_dir_entries = self.read_dir(&_src)?;

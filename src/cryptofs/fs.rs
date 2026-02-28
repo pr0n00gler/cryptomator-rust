@@ -136,7 +136,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             config,
         };
         let root = crypto_fs.real_path_from_dir_id(b"")?;
-        if !crypto_fs.config.read_only {
+        if !crypto_fs.is_read_only() {
             crypto_fs.file_system_provider.create_dir_all(root)?;
         }
         Ok(crypto_fs)

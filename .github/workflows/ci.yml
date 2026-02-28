@@ -54,3 +54,41 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: test
+
+  s3-integration-tests:
+    name: S3 Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start RustFS
+        run: |
+          docker run -d \
+            --name rustfs \
+            -p 9000:9000 \
+            -p 9001:9001 \
+            -e RUSTFS_ACCESS_KEY=rustfsadmin \
+            -e RUSTFS_SECRET_KEY=rustfsadmin \
+            rustfs/rustfs:latest
+
+      - name: Wait for RustFS to be ready
+        run: |
+          for i in {1..30}; do
+            curl -sf http://localhost:9000/health && break
+            sleep 2
+          done
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run S3 integration tests
+        run: cargo test --test s3_fs_integration
+        env:
+          S3_TEST_ENDPOINT: localhost:9000
+          S3_TEST_BUCKET: cryptomator-test
+          S3_TEST_ACCESS_KEY: rustfsadmin
+          S3_TEST_SECRET_KEY: rustfsadmin
+          S3_TEST_PATH_STYLE: "true"
+
+      - name: Stop and remove RustFS
+        if: always()
+        run: docker stop rustfs && docker rm rustfs || true

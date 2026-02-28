@@ -363,9 +363,11 @@ fn s3_fs_integration_path_edge_cases() -> Result<(), Box<dyn std::error::Error>>
     file.flush()?;
 
     let entries: Vec<_> = fs.read_dir("edge/unicode")?.collect();
-    assert!(entries
-        .iter()
-        .any(|entry| entry.file_name == OsStr::new(filename)));
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.file_name == OsStr::new(filename))
+    );
 
     Ok(())
 }

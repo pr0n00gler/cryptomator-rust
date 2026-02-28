@@ -18,11 +18,12 @@ use cryptomator::crypto::{
     CipherCombo, Cryptor, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE, DEFAULT_SHORTENING_THRESHOLD,
     DEFAULT_VAULT_FILENAME, MasterKey, MasterKeyJson, Vault,
 };
-use cryptomator::cryptofs::{parent_path, CryptoFs, FileSystem, OpenOptions};
+use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem, OpenOptions, parent_path};
+use cryptomator::logging::init_logger;
+
 use cryptomator::frontends::auth::WebDavAuth;
 use cryptomator::frontends::mount::mount_nfs;
 use cryptomator::frontends::mount::*;
-use cryptomator::logging::init_logger;
 use cryptomator::providers::{LocalFs, S3Fs, S3FsConfig};
 
 const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
@@ -99,6 +100,10 @@ struct Unlock {
     /// NFS-server listen address
     #[arg(short, long, default_value = "127.0.0.1:11111")]
     nfs_listen_address: String,
+
+    /// Start in read-only mode (block write operations)
+    #[arg(long)]
+    read_only: bool,
 }
 
 #[tokio::main]
@@ -406,6 +411,13 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
     };
 
     let cryptor = Cryptor::new(vault);
+    let config = CryptoFsConfig {
+        read_only: u.read_only,
+        ..Default::default()
+    };
+    if u.read_only {
+        info!("Starting in read-only mode...");
+    }
     let crypto_fs = CryptoFs::new(
         full_storage_path
             .as_ref()
@@ -413,8 +425,9 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
             .expect("Failed to convert Path to &str"),
         cryptor,
         fs,
+        config,
     )
-    .expect("Failed to unblock storage");
+    .expect("Failed to initialize storage");
     info!("Storage unlocked!");
 
     if let Some(webdav_listen_address) = &u.webdav_listen_address {

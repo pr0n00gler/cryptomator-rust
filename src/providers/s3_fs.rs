@@ -3,11 +3,11 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use s3::creds::error::CredentialsError;
+use s3::Bucket;
 use s3::creds::Credentials;
+use s3::creds::error::CredentialsError;
 use s3::error::S3Error;
 use s3::region::Region;
-use s3::Bucket;
 use tempfile::NamedTempFile;
 use thiserror::Error;
 use tracing::warn;

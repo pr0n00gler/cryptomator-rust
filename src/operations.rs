@@ -1,10 +1,10 @@
 use crate::crypto::{
-    CipherCombo, Cryptor, MasterKey, MasterKeyJson, Vault, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE,
-    DEFAULT_SHORTENING_THRESHOLD,
+    CipherCombo, Cryptor, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE, DEFAULT_SHORTENING_THRESHOLD,
+    MasterKey, MasterKeyJson, Vault,
 };
-use crate::cryptofs::{parent_path, CryptoFs, CryptoFsConfig, FileSystem, OpenOptions};
-use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use crate::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem, OpenOptions, parent_path};
+use anyhow::{Context, Result, anyhow};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::io::Write;

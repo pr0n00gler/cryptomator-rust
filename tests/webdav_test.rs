@@ -14,7 +14,8 @@ fn setup_webdav_server() -> WebDav<MemoryFs> {
     let mem_fs = MemoryFs::new();
     let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
     let cryptor = Cryptor::new(vault);
-    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, mem_fs, CryptoFsConfig::default()).unwrap();
+    let crypto_fs =
+        CryptoFs::new(VFS_STORAGE_PATH, cryptor, mem_fs, CryptoFsConfig::default()).unwrap();
     WebDav::new(crypto_fs)
 }
 

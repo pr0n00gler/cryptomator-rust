@@ -18,6 +18,7 @@ evaluation purposes.
 * Works with local vaults
 * Unlocked content can be accessed via an embedded WebDav or NFS server;
 * Windows/Unix support
+* Read-only mode for safe vault access
 
 ## Work in progress
 
@@ -67,6 +68,16 @@ Now you can mount it:
   mkdir tmp
   mount_nfs -o nolocks,vers=3,tcp,rsize=131072,actimeo=120,port=11111,mountport=11111 tmp
 ```
+
+### Unlock a vault in read-only mode
+
+To unlock a vault in read-only mode (preventing any modifications):
+
+```shell
+cryptomator --storage-path /path/to/your/storage unlock --read-only
+```
+
+When a vault is opened in read-only mode, write operations such as creating files, creating directories, removing files, copying, or moving will be blocked and return a `FileSystemError::ReadOnly`. This provides an additional layer of protection against accidental modifications when you only need to read from the vault.
 
 For more advanced usage:
 

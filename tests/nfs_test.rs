@@ -1,5 +1,5 @@
 use cryptomator::crypto::{Cryptor, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, Vault};
-use cryptomator::cryptofs::CryptoFs;
+use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig};
 use cryptomator::frontends::nfs::NfsServer;
 use cryptomator::providers::{LocalFs, MemoryFs};
 use nfsserve::nfs::{
@@ -16,7 +16,7 @@ fn setup_nfs_server() -> NfsServer<MemoryFs> {
     let mem_fs = MemoryFs::new();
     let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
     let cryptor = Cryptor::new(vault);
-    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, mem_fs).unwrap();
+    let crypto_fs = CryptoFs::new(VFS_STORAGE_PATH, cryptor, mem_fs, CryptoFsConfig::default()).unwrap();
     NfsServer::new(crypto_fs)
 }
 

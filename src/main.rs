@@ -2,7 +2,7 @@ use cryptomator::crypto::{
     CipherCombo, Cryptor, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE, DEFAULT_SHORTENING_THRESHOLD,
     DEFAULT_VAULT_FILENAME, MasterKey, MasterKeyJson, Vault,
 };
-use cryptomator::cryptofs::{CryptoFs, FileSystem, OpenOptions, parent_path};
+use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem, OpenOptions, parent_path};
 use cryptomator::logging::init_logger;
 use cryptomator::providers::LocalFs;
 
@@ -289,28 +289,23 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
     };
 
     let cryptor = Cryptor::new(vault);
-    let crypto_fs = if u.read_only {
-        info!("Starting in read-only mode...");
-        CryptoFs::new_read_only(
-            full_storage_path
-                .as_ref()
-                .to_str()
-                .expect("Failed to convert Path to &str"),
-            cryptor,
-            fs,
-        )
-        .expect("Failed to initialize read-only storage")
-    } else {
-        CryptoFs::new(
-            full_storage_path
-                .as_ref()
-                .to_str()
-                .expect("Failed to convert Path to &str"),
-            cryptor,
-            fs,
-        )
-        .expect("Failed to initialize storage")
+    let config = CryptoFsConfig {
+        read_only: u.read_only,
+        ..Default::default()
     };
+    if u.read_only {
+        info!("Starting in read-only mode...");
+    }
+    let crypto_fs = CryptoFs::new(
+        full_storage_path
+            .as_ref()
+            .to_str()
+            .expect("Failed to convert Path to &str"),
+        cryptor,
+        fs,
+        config,
+    )
+    .expect("Failed to initialize storage");
     info!("Storage unlocked!");
 
     if let Some(webdav_listen_address) = &u.webdav_listen_address {

@@ -1,12 +1,12 @@
 use crate::crypto::{
-    Cryptor, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH, FileHeader,
-    calculate_cleartext_size, shorten_name,
+    calculate_cleartext_size, shorten_name, Cryptor, FileHeader, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH,
+    FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH,
 };
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist};
 use crate::cryptofs::filesystem::Metadata;
 use crate::cryptofs::{
-    DirEntry, File, FileSystem, FileSystemError, OpenOptions, Stats, last_path_component,
-    parent_path,
+    last_path_component, parent_path, DirEntry, File, FileSystem, FileSystemError, OpenOptions,
+    Stats,
 };
 use lru_cache::LruCache;
 use std::collections::hash_map::DefaultHasher;
@@ -121,29 +121,8 @@ pub struct CryptoFs<FS: FileSystem> {
 }
 
 impl<FS: 'static + FileSystem> CryptoFs<FS> {
-    /// Returns a new instance of CryptoFS
+    /// Returns a new instance of CryptoFS with the given configuration
     pub fn new(
-        folder: &str,
-        cryptor: Cryptor,
-        fs_provider: FS,
-    ) -> Result<CryptoFs<FS>, FileSystemError> {
-        Self::with_config(folder, cryptor, fs_provider, CryptoFsConfig::default())
-    }
-
-    /// Returns a new instance of CryptoFS with read-only mode
-    pub fn new_read_only(
-        folder: &str,
-        cryptor: Cryptor,
-        fs_provider: FS,
-    ) -> Result<CryptoFs<FS>, FileSystemError> {
-        let config = CryptoFsConfig {
-            read_only: true,
-            ..Default::default()
-        };
-        Self::with_config(folder, cryptor, fs_provider, config)
-    }
-
-    pub fn with_config(
         folder: &str,
         cryptor: Cryptor,
         fs_provider: FS,

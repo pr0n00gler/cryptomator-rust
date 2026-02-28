@@ -1,12 +1,12 @@
 use crate::crypto::{
-    Cryptor, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH, FileHeader,
-    calculate_cleartext_size, shorten_name,
+    calculate_cleartext_size, shorten_name, Cryptor, FileHeader, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH,
+    FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH,
 };
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist};
 use crate::cryptofs::filesystem::Metadata;
 use crate::cryptofs::{
-    DirEntry, File, FileSystem, FileSystemError, OpenOptions, Stats, last_path_component,
-    parent_path,
+    last_path_component, parent_path, DirEntry, File, FileSystem, FileSystemError, OpenOptions,
+    Stats,
 };
 use lru_cache::LruCache;
 use std::collections::hash_map::DefaultHasher;
@@ -257,8 +257,11 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         let dir_id = self.dir_id_from_path(&parent)?;
         let real_dir_path = self.real_path_from_dir_id(dir_id.as_slice())?;
 
-        // return only dir path cause the path is not a path to a file
-        if filename == parent {
+        // When parent is empty the input was a single-component path (e.g. a
+        // bare directory name with no leading slash).  In that case there is no
+        // filename to encrypt — the path itself IS a directory, so return the
+        // real directory path directly.
+        if parent.as_os_str().is_empty() {
             return Ok(CryptoPath {
                 full_path: real_dir_path,
                 is_shorten: false,

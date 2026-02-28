@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use s3::Bucket;
-use s3::creds::Credentials;
 use s3::creds::error::CredentialsError;
+use s3::creds::Credentials;
 use s3::error::S3Error;
 use s3::region::Region;
+use s3::Bucket;
 use tempfile::NamedTempFile;
 use thiserror::Error;
 use tracing::warn;
@@ -374,7 +374,20 @@ impl S3Fs {
 
         let prefix = Self::normalize_prefix(config.prefix.unwrap_or_default())?;
         if config.validate_bucket {
-            let _ = bucket.list_page(prefix.clone(), None, None, None, Some(1))?;
+            // A failed list_page can produce an opaque XML deserialisation error
+            // (e.g. "missing field `Name`") when the server returns an error envelope
+            // rather than a valid ListObjectsV2 response.  The most common cause is
+            // using virtual-hosted-style addressing against a self-hosted endpoint
+            // (MinIO, LocalStack) that only supports path-style URLs — set
+            // `force_path_style: true` in the config to fix this.
+            bucket
+                .list_page(prefix.clone(), None, None, None, Some(1))
+                .map_err(|e| {
+                    S3FsError::InvalidConfig(format!(
+                        "bucket validation failed — check that the bucket exists, credentials are \
+                     correct, and (for self-hosted endpoints) `force_path_style` is true: {e}"
+                    ))
+                })?;
         }
 
         Ok(S3Fs { bucket, prefix })
@@ -436,22 +449,53 @@ impl S3Fs {
     }
 
     fn open_s3_file(&self, key: String, options: OpenOptions) -> Result<S3File, S3FsError> {
-        let head_result = self.bucket.head_object(&key);
-        let (head, exists) = match head_result {
-            Ok((head, status)) => {
-                if (200..300).contains(&status) {
-                    (Some(head), true)
-                } else if status == 404 {
-                    (None, false)
-                } else {
-                    return Err(S3FsError::HttpStatus {
-                        op: "head_object",
-                        status,
-                    });
-                }
+        // Determine whether the object already exists via HEAD.
+        //
+        // Some S3-compatible backends (e.g. MinIO, LocalStack) return HTTP 500
+        // instead of 404 when performing a HEAD on a key that does not exist.
+        // To handle this gracefully we distinguish three outcomes:
+        //
+        //   - `Some(true)`  – object definitely exists (2xx)
+        //   - `Some(false)` – object definitely does not exist (404)
+        //   - `None`        – ambiguous: the backend returned an unexpected
+        //                     error (e.g. 500).  When the caller intends to
+        //                     create a new object we treat this as "not found"
+        //                     and proceed with creation; for read-only opens we
+        //                     surface the original error.
+        let head_outcome: Option<bool>;
+        let mut head_meta = None;
+        let mut head_error: Option<S3FsError> = None;
+
+        match self.bucket.head_object(&key) {
+            Ok((head, status)) if (200..300).contains(&status) => {
+                head_meta = Some(head);
+                head_outcome = Some(true);
             }
-            Err(S3Error::HttpFailWithBody(404, _)) => (None, false),
-            Err(err) => return Err(S3FsError::S3(err)),
+            Ok((_, 404)) | Err(S3Error::HttpFailWithBody(404, _)) => {
+                head_outcome = Some(false);
+            }
+            Ok((_, status)) => {
+                head_error = Some(S3FsError::HttpStatus {
+                    op: "head_object",
+                    status,
+                });
+                head_outcome = None;
+            }
+            Err(err) => {
+                head_error = Some(S3FsError::S3(err));
+                head_outcome = None;
+            }
+        }
+
+        let wants_create = options.create || options.create_new;
+
+        // For ambiguous HEAD results: propagate the error only when the caller
+        // is not trying to create the object (i.e. a read or an unconditional
+        // write-without-create where existence is required).
+        let exists = match head_outcome {
+            Some(v) => v,
+            None if wants_create => false, // treat ambiguous as "not found" and let create proceed
+            None => return Err(head_error.expect("head_error is set when head_outcome is None")),
         };
 
         if options.create_new && exists {
@@ -485,7 +529,7 @@ impl S3Fs {
             if !exists {
                 return Err(S3FsError::NotFound);
             }
-            let head = head.ok_or(S3FsError::MissingContentLength)?;
+            let head = head_meta.ok_or(S3FsError::MissingContentLength)?;
             let size = head.content_length.ok_or(S3FsError::MissingContentLength)?;
             let size = if size < 0 { 0 } else { size as u64 };
             return Ok(S3File::new_read_only(Arc::clone(&self.bucket), key, size));

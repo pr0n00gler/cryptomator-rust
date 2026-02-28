@@ -70,7 +70,6 @@ Now you can mount it:
   mount_nfs -o nolocks,vers=3,tcp,rsize=131072,actimeo=120,port=11111,mountport=11111 tmp
 ```
 
-<<<<<<< HEAD
 ### Using S3 storage
 
 The CLI can use an S3-compatible backend when you pass `--filesystem-provider s3` and a
@@ -123,7 +122,7 @@ Config fields:
 * `access_key` / `secret_key` (string, optional; must be provided together)
 * `session_token` (string, optional)
 * `request_timeout_seconds` (integer, optional; must be > 0)
-=======
+
 ### Unlock a vault in read-only mode
 
 To unlock a vault in read-only mode (preventing any modifications):
@@ -133,7 +132,6 @@ cryptomator --storage-path /path/to/your/storage unlock --read-only
 ```
 
 When a vault is opened in read-only mode, write operations such as creating files, creating directories, removing files, copying, or moving will be blocked and return a `FileSystemError::ReadOnly`. This provides an additional layer of protection against accidental modifications when you only need to read from the vault.
->>>>>>> master
 
 For more advanced usage:
 

@@ -1,4 +1,3 @@
-use std::env;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
@@ -110,8 +109,7 @@ struct Unlock {
 async fn main() {
     let opts: Opts = Opts::parse();
 
-    unsafe { env::set_var("RUST_LOG", &opts.log_level) };
-    let _guard = init_logger();
+    let _guard = init_logger(&opts.log_level);
 
     let storage_path = Path::new(opts.storage_path.as_str()).to_path_buf();
 
@@ -129,28 +127,17 @@ async fn main() {
             FilesystemProvider::Local => {
                 create_command(LocalFs::new(), &vault_path, &full_storage_path, c)
             }
-            FilesystemProvider::S3 => {
-                let s3_fs = match load_s3_fs(s3_config_path) {
-                    Ok(fs) => fs,
-                    Err(err) => {
-                        eprintln!("failed to initialize S3 filesystem: {err}");
-                        exit(2);
-                    }
-                };
-                create_command(s3_fs, &vault_path, &full_storage_path, c)
-            }
+            FilesystemProvider::S3 => create_command(
+                require_s3_fs(s3_config_path),
+                &vault_path,
+                &full_storage_path,
+                c,
+            ),
         },
         Command::MigrateV7ToV8 => match opts.filesystem_provider {
             FilesystemProvider::Local => migrate_v7_to_v8_command(LocalFs::new(), &vault_path),
             FilesystemProvider::S3 => {
-                let s3_fs = match load_s3_fs(s3_config_path) {
-                    Ok(fs) => fs,
-                    Err(err) => {
-                        eprintln!("failed to initialize S3 filesystem: {err}");
-                        exit(2);
-                    }
-                };
-                migrate_v7_to_v8_command(s3_fs, &vault_path)
+                migrate_v7_to_v8_command(require_s3_fs(s3_config_path), &vault_path)
             }
         },
         Command::Unlock(u) => match opts.filesystem_provider {
@@ -158,14 +145,13 @@ async fn main() {
                 unlock_command(LocalFs::new(), &vault_path, &full_storage_path, u).await
             }
             FilesystemProvider::S3 => {
-                let s3_fs = match load_s3_fs(s3_config_path) {
-                    Ok(fs) => fs,
-                    Err(err) => {
-                        eprintln!("failed to initialize S3 filesystem: {err}");
-                        exit(2);
-                    }
-                };
-                unlock_command(s3_fs, &vault_path, &full_storage_path, u).await
+                unlock_command(
+                    require_s3_fs(s3_config_path),
+                    &vault_path,
+                    &full_storage_path,
+                    u,
+                )
+                .await
             }
         },
     }
@@ -228,6 +214,18 @@ impl S3FsFileConfig {
             session_token: self.session_token.map(Zeroizing::new),
             request_timeout,
         })
+    }
+}
+
+/// Loads the S3 filesystem from the given config path, or exits the process
+/// with a user-facing error message if initialisation fails.
+fn require_s3_fs(config_path: Option<&str>) -> S3Fs {
+    match load_s3_fs(config_path) {
+        Ok(fs) => fs,
+        Err(err) => {
+            eprintln!("failed to initialize S3 filesystem: {err}");
+            exit(2);
+        }
     }
 }
 

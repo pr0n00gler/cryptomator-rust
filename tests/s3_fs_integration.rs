@@ -523,6 +523,36 @@ fn s3_fs_integration_move_dir_roundtrip() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
+/// `create_file` uses `create_new: true` internally, so it must fail with
+/// `AlreadyExists` when the target object already exists in S3.
+#[test]
+fn s3_fs_integration_create_file_existing_path() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(fs) = s3_fs_from_env()? else {
+        return Ok(());
+    };
+    let _cleanup = Cleanup::new(&fs);
+
+    fs.create_dir("create_new")?;
+
+    // First creation must succeed.
+    let mut file = fs.create_file("create_new/data.txt")?;
+    file.write_all(b"original")?;
+    file.flush()?;
+    drop(file);
+
+    // Second creation on the same path must fail with AlreadyExists.
+    let err = fs.create_file("create_new/data.txt").unwrap_err();
+    assert_io_error_kind(err.as_ref(), std::io::ErrorKind::AlreadyExists);
+
+    // The original content must be untouched.
+    let mut file = fs.open_file("create_new/data.txt", OpenOptions::new())?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    assert_eq!(contents, "original");
+
+    Ok(())
+}
+
 #[test]
 fn s3_fs_integration_invalid_open_options() -> Result<(), Box<dyn std::error::Error>> {
     let Some(fs) = s3_fs_from_env()? else {

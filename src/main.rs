@@ -137,7 +137,12 @@ async fn main() {
                     None => Path::new(DEFAULT_VAULT_FILENAME).to_path_buf(),
                 };
                 let full_storage_path = Path::new(DEFAULT_STORAGE_SUB_FOLDER).to_path_buf();
-                create_command(require_s3_fs(s3_config_path), &vault_path, &full_storage_path, c)
+                create_command(
+                    require_s3_fs(s3_config_path),
+                    &vault_path,
+                    &full_storage_path,
+                    c,
+                )
             }
         },
         Command::MigrateV7ToV8 => match opts.filesystem_provider {

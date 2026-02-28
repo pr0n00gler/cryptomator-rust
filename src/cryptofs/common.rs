@@ -1,5 +1,5 @@
-use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist, UnknownError};
 use crate::cryptofs::FileSystemError;
+use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist, UnknownError};
 use std::path::{Component, Path, PathBuf};
 
 /// Returns a String implementation of a Component

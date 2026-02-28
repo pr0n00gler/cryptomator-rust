@@ -1,8 +1,8 @@
 use crate::crypto::{
-    CipherCombo, Cryptor, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE, DEFAULT_SHORTENING_THRESHOLD,
-    MasterKey, MasterKeyJson, Vault,
+    CipherCombo, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE, DEFAULT_SHORTENING_THRESHOLD, MasterKey,
+    MasterKeyJson, Vault,
 };
-use crate::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem, OpenOptions, parent_path};
+use crate::cryptofs::{FileSystem, OpenOptions, parent_path};
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hmac::{Hmac, Mac};
@@ -158,30 +158,4 @@ where
     info!("Vault migrated!");
 
     Ok(())
-}
-
-pub fn prepare_crypto_fs<FS, P>(
-    fs: FS,
-    vault_path: P,
-    full_storage_path: P,
-    password: &str,
-) -> Result<CryptoFs<FS>>
-where
-    FS: FileSystem + 'static,
-    P: AsRef<Path>,
-{
-    info!("Unlocking the storage...");
-    info!("Deriving keys...");
-    let vault = Vault::open(&fs, &vault_path, password).context("failed to open vault")?;
-    let cryptor = Cryptor::new(vault);
-
-    let storage_path = full_storage_path
-        .as_ref()
-        .to_str()
-        .ok_or_else(|| anyhow!("failed to convert Path to &str"))?;
-
-    let crypto_fs = CryptoFs::new(storage_path, cryptor, fs, CryptoFsConfig::default())
-        .map_err(|e| anyhow!("failed to unlock storage: {e}"))?;
-    info!("Storage unlocked!");
-    Ok(crypto_fs)
 }

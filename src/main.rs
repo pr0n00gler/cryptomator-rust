@@ -1,37 +1,50 @@
+use std::env;
+use std::io::Write;
+use std::path::Path;
+use std::time::Duration;
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use clap::{Parser, ValueEnum};
+use dotenv::dotenv;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use thiserror::Error;
+use tracing::info;
+use zeroize::Zeroizing;
+
 use cryptomator::crypto::{
     CipherCombo, Cryptor, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE, DEFAULT_SHORTENING_THRESHOLD,
     DEFAULT_VAULT_FILENAME, MasterKey, MasterKeyJson, Vault,
 };
 use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem, OpenOptions, parent_path};
 use cryptomator::logging::init_logger;
-use cryptomator::providers::LocalFs;
-
-use tracing::info;
-
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use clap::{Parser, ValueEnum};
-use zeroize::Zeroizing;
 
 use cryptomator::frontends::auth::WebDavAuth;
 use cryptomator::frontends::mount::mount_nfs;
 use cryptomator::frontends::mount::*;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use std::env;
-use std::io::Write;
-use std::path::Path;
+use cryptomator::providers::{LocalFs, S3Fs, S3FsConfig};
 
 const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
+
+/// Errors that can occur when loading or parsing S3 configuration.
+#[derive(Debug, Error)]
+pub enum S3ConfigError {
+    #[error("invalid S3 config: {0}")]
+    InvalidConfig(String),
+    #[error("missing required S3 configuration: {0}")]
+    MissingConfig(String),
+}
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum FilesystemProvider {
     Local,
+    S3,
 }
 
 #[derive(Parser)]
 #[command(version = "0.1.0", author = "pr0n00gler <pr0n00gler@yandex.ru>")]
 struct Opts {
-    /// Path to a storage
+    /// Path to a storage (local path or S3 prefix)
     #[arg(short, long)]
     storage_path: String,
 
@@ -39,7 +52,7 @@ struct Opts {
     #[arg(short, long)]
     vault_path: Option<String>,
 
-    /// Filesystem provider. Supported values: only "local" for now
+    /// Filesystem provider. Supported values: "local" and "s3"
     #[arg(value_enum, default_value_t = FilesystemProvider::Local)]
     filesystem_provider: FilesystemProvider,
 
@@ -100,30 +113,67 @@ struct Unlock {
 async fn main() {
     let opts: Opts = Opts::parse();
 
-    unsafe { env::set_var("RUST_LOG", opts.log_level) };
-    let _guard = init_logger();
+    let _guard = init_logger(&opts.log_level);
 
     let storage_path = Path::new(opts.storage_path.as_str()).to_path_buf();
-
-    let vault_path = match opts.vault_path {
-        Some(m) => Path::new(m.as_str()).to_path_buf(),
-        None => storage_path.join(DEFAULT_VAULT_FILENAME),
-    };
-
-    let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
 
     match opts.subcmd {
         Command::Create(c) => match opts.filesystem_provider {
             FilesystemProvider::Local => {
+                // For the local provider the storage_path IS the on-disk directory
+                // that contains vault.cryptomator, so we join it as a prefix here.
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
+                };
+                let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
                 create_command(LocalFs::new(), &vault_path, &full_storage_path, c)
+            }
+            FilesystemProvider::S3 => {
+                // For the S3 provider the prefix is already encoded in S3FsConfig.
+                // Paths passed to FileSystem are resolved relative to that prefix,
+                // so vault.cryptomator lives at the prefix root — never prepend
+                // storage_path again or it would be doubled in every S3 key.
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => Path::new(DEFAULT_VAULT_FILENAME).to_path_buf(),
+                };
+                let full_storage_path = Path::new(DEFAULT_STORAGE_SUB_FOLDER).to_path_buf();
+                create_command(require_s3_fs(), &vault_path, &full_storage_path, c)
             }
         },
         Command::MigrateV7ToV8 => match opts.filesystem_provider {
-            FilesystemProvider::Local => migrate_v7_to_v8_command(LocalFs::new(), &vault_path),
+            FilesystemProvider::Local => {
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
+                };
+                migrate_v7_to_v8_command(LocalFs::new(), &vault_path)
+            }
+            FilesystemProvider::S3 => {
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => Path::new(DEFAULT_VAULT_FILENAME).to_path_buf(),
+                };
+                migrate_v7_to_v8_command(require_s3_fs(), &vault_path)
+            }
         },
         Command::Unlock(u) => match opts.filesystem_provider {
             FilesystemProvider::Local => {
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
+                };
+                let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
                 unlock_command(LocalFs::new(), &vault_path, &full_storage_path, u).await
+            }
+            FilesystemProvider::S3 => {
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => Path::new(DEFAULT_VAULT_FILENAME).to_path_buf(),
+                };
+                let full_storage_path = Path::new(DEFAULT_STORAGE_SUB_FOLDER).to_path_buf();
+                unlock_command(require_s3_fs(), &vault_path, &full_storage_path, u).await
             }
         },
     }
@@ -329,4 +379,100 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
 
     info!("Starting NFS server...");
     mount_nfs(u.nfs_listen_address, crypto_fs).await;
+}
+
+/// Loads S3 configuration from environment variables.
+///
+/// Environment variables:
+/// - `S3_BUCKET` (required): Name of the S3 bucket
+/// - `S3_PREFIX` (optional): Key prefix within the bucket
+/// - `S3_REGION` (required): AWS region name
+/// - `S3_ENDPOINT` (optional): Custom endpoint URL for S3-compatible services
+/// - `S3_FORCE_PATH_STYLE` (optional): Use path-style bucket addressing
+/// - `S3_VALIDATE_BUCKET` (optional): Validate bucket accessibility on startup
+/// - `S3_ACCESS_KEY` (optional): AWS access key ID
+/// - `S3_SECRET_KEY` (optional): AWS secret access key
+/// - `S3_SESSION_TOKEN` (optional): Session token for temporary credentials
+/// - `S3_REQUEST_TIMEOUT_SECONDS` (optional): Per-request timeout in seconds
+fn load_s3_from_env() -> Result<S3FsConfig, S3ConfigError> {
+    let bucket = env::var("S3_BUCKET")
+        .map_err(|_| S3ConfigError::MissingConfig("S3_BUCKET is required".to_string()))?;
+
+    let region = env::var("S3_REGION")
+        .map_err(|_| S3ConfigError::MissingConfig("S3_REGION is required".to_string()))?;
+
+    let prefix = env::var("S3_PREFIX").ok();
+    let endpoint = env::var("S3_ENDPOINT").ok();
+
+    let force_path_style = env::var("S3_FORCE_PATH_STYLE")
+        .ok()
+        .map(|v| v.parse::<bool>())
+        .transpose()
+        .map_err(|e| {
+            S3ConfigError::InvalidConfig(format!("S3_FORCE_PATH_STYLE must be a boolean: {e}"))
+        })?
+        .unwrap_or(false);
+
+    let validate_bucket = env::var("S3_VALIDATE_BUCKET")
+        .ok()
+        .map(|v| v.parse::<bool>())
+        .transpose()
+        .map_err(|e| {
+            S3ConfigError::InvalidConfig(format!("S3_VALIDATE_BUCKET must be a boolean: {e}"))
+        })?
+        .unwrap_or(false);
+
+    let access_key = env::var("S3_ACCESS_KEY").ok();
+    let secret_key = env::var("S3_SECRET_KEY").ok();
+    let session_token = env::var("S3_SESSION_TOKEN").ok();
+
+    let request_timeout_seconds = env::var("S3_REQUEST_TIMEOUT_SECONDS")
+        .ok()
+        .map(|v| v.parse::<u64>())
+        .transpose()
+        .map_err(|e| {
+            S3ConfigError::InvalidConfig(format!(
+                "S3_REQUEST_TIMEOUT_SECONDS must be a positive integer: {e}"
+            ))
+        })?;
+
+    let request_timeout = match request_timeout_seconds {
+        Some(0) => {
+            return Err(S3ConfigError::InvalidConfig(
+                "S3_REQUEST_TIMEOUT_SECONDS must be greater than zero".to_string(),
+            ));
+        }
+        Some(seconds) => Some(Duration::from_secs(seconds)),
+        None => None,
+    };
+
+    Ok(S3FsConfig {
+        bucket,
+        prefix,
+        region,
+        endpoint,
+        force_path_style,
+        validate_bucket,
+        access_key: access_key.map(Zeroizing::new),
+        secret_key: secret_key.map(Zeroizing::new),
+        session_token: session_token.map(Zeroizing::new),
+        request_timeout,
+    })
+}
+
+/// Loads the S3 filesystem from environment variables, or exits the process
+/// with a user-facing error message if initialization fails.
+fn require_s3_fs() -> S3Fs {
+    // Try to load .env file if it exists (does not fail if not present)
+    let _ = dotenv();
+
+    let config = match load_s3_from_env() {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            eprintln!("failed to initialize S3 filesystem: {err}");
+            std::process::exit(2);
+        }
+    };
+
+    S3Fs::new(config).expect("failed to create S3 filesystem")
 }

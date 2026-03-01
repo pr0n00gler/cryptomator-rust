@@ -18,6 +18,7 @@ evaluation purposes.
 * Works with local vaults
 * Unlocked content can be accessed via an embedded WebDav or NFS server;
 * Windows/Unix support
+* Experimental S3-compatible storage provider (library use)
 * Read-only mode for safe vault access
 
 ## Work in progress
@@ -69,6 +70,59 @@ Now you can mount it:
   mount_nfs -o nolocks,vers=3,tcp,rsize=131072,actimeo=120,port=11111,mountport=11111 tmp
 ```
 
+### Using S3 storage
+
+The CLI can use an S3-compatible backend when you pass `--filesystem-provider s3` and a
+JSON config file via `--s3-config`. The `--storage-path` value becomes the S3 prefix
+inside the bucket (the provider will still use the `d/` subfolder under that prefix).
+
+Example config (`s3_config.json`):
+
+```json
+{
+  "bucket": "my-cryptomator-bucket",
+  "prefix": "vaults/demo",
+  "region": "us-east-1",
+  "endpoint": "https://s3.amazonaws.com",
+  "force_path_style": false,
+  "validate_bucket": true,
+  "access_key": "AKIA...",
+  "secret_key": "...",
+  "session_token": null,
+  "request_timeout_seconds": 30
+}
+```
+
+Command examples:
+
+```shell
+cryptomator \
+  --filesystem-provider s3 \
+  --s3-config /path/to/s3_config.json \
+  --storage-path vaults/demo \
+  create
+```
+
+```shell
+cryptomator \
+  --filesystem-provider s3 \
+  --s3-config /path/to/s3_config.json \
+  --storage-path vaults/demo \
+  unlock
+```
+
+Config fields:
+
+* `bucket` (string, required)
+* `prefix` (string, optional)
+* `region` (string, required)
+* `endpoint` (string, optional, for S3-compatible targets)
+* `force_path_style` (bool, optional)
+* `validate_bucket` (bool, optional; performs a lightweight list request on startup)
+* `access_key` / `secret_key` (string, optional; must be provided together)
+* `session_token` (string, optional)
+* `request_timeout_seconds` (integer, optional; must be > 0)
+
 ### Unlock a vault in read-only mode
 
 To unlock a vault in read-only mode (preventing any modifications):
@@ -90,3 +144,19 @@ cryptomator --help
 ```shell
 make test
 ```
+
+### S3 Integration Tests
+
+S3 filesystem integration tests are gated by environment variables. Set these to enable the
+roundtrip test against your S3-compatible endpoint:
+
+> ⚠️ Do not commit these environment variables to source control, as they may contain secrets.
+
+* `S3_TEST_ENDPOINT`
+* `S3_TEST_BUCKET`
+* `S3_TEST_ACCESS_KEY`
+* `S3_TEST_SECRET_KEY`
+* `S3_TEST_REGION` (optional, defaults to `us-east-1`)
+* `S3_TEST_PREFIX` (optional)
+* `S3_TEST_PATH_STYLE` (optional: `true`/`1`)
+* `S3_TEST_SESSION_TOKEN` (optional)

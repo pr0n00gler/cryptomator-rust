@@ -44,6 +44,8 @@ async-trait = "0.1.89"
 nfsserve = "0.10.2"
 subtle = "2.6.1"
 zeroize = { version = "1.8", features = ["derive"] }
+rust-s3 = { version = "0.37.1", default-features = false, features = ["sync-native-tls"] }
+tempfile = "3.23.0"
 
 [profile.release]
 rpath = false

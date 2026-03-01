@@ -1,37 +1,37 @@
+use std::io::Write;
+use std::path::Path;
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use clap::{Parser, ValueEnum};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use tracing::info;
+use zeroize::Zeroizing;
+
 use cryptomator::crypto::{
     CipherCombo, Cryptor, DEFAULT_FORMAT, DEFAULT_MASTER_KEY_FILE, DEFAULT_SHORTENING_THRESHOLD,
     DEFAULT_VAULT_FILENAME, MasterKey, MasterKeyJson, Vault,
 };
 use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem, OpenOptions, parent_path};
 use cryptomator::logging::init_logger;
-use cryptomator::providers::LocalFs;
-
-use tracing::info;
-
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use clap::{Parser, ValueEnum};
-use zeroize::Zeroizing;
 
 use cryptomator::frontends::auth::WebDavAuth;
 use cryptomator::frontends::mount::mount_nfs;
 use cryptomator::frontends::mount::*;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use std::env;
-use std::io::Write;
-use std::path::Path;
+use cryptomator::providers::{LocalFs, require_s3_fs};
 
 const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum FilesystemProvider {
     Local,
+    S3,
 }
 
 #[derive(Parser)]
 #[command(version = "0.1.0", author = "pr0n00gler <pr0n00gler@yandex.ru>")]
 struct Opts {
-    /// Path to a storage
+    /// Path to a storage (local path or S3 prefix)
     #[arg(short, long)]
     storage_path: String,
 
@@ -39,9 +39,13 @@ struct Opts {
     #[arg(short, long)]
     vault_path: Option<String>,
 
-    /// Filesystem provider. Supported values: only "local" for now
+    /// Filesystem provider. Supported values: "local" and "s3"
     #[arg(value_enum, default_value_t = FilesystemProvider::Local)]
     filesystem_provider: FilesystemProvider,
+
+    /// Path to S3 configuration JSON file (required for the s3 provider)
+    #[arg(long, value_name = "PATH", required_if_eq("filesystem_provider", "s3"))]
+    s3_config_path: Option<String>,
 
     /// Log level
     #[arg(short, long, default_value = "info")]
@@ -100,30 +104,80 @@ struct Unlock {
 async fn main() {
     let opts: Opts = Opts::parse();
 
-    unsafe { env::set_var("RUST_LOG", opts.log_level) };
-    let _guard = init_logger();
+    let _guard = init_logger(&opts.log_level);
 
     let storage_path = Path::new(opts.storage_path.as_str()).to_path_buf();
 
-    let vault_path = match opts.vault_path {
-        Some(m) => Path::new(m.as_str()).to_path_buf(),
-        None => storage_path.join(DEFAULT_VAULT_FILENAME),
-    };
-
-    let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
+    let s3_config_path = opts.s3_config_path.as_deref();
 
     match opts.subcmd {
         Command::Create(c) => match opts.filesystem_provider {
             FilesystemProvider::Local => {
+                // For the local provider the storage_path IS the on-disk directory
+                // that contains vault.cryptomator, so we join it as a prefix here.
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
+                };
+                let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
                 create_command(LocalFs::new(), &vault_path, &full_storage_path, c)
+            }
+            FilesystemProvider::S3 => {
+                // For the S3 provider the prefix is already encoded in S3FsConfig.
+                // Paths passed to FileSystem are resolved relative to that prefix,
+                // so vault.cryptomator lives at the prefix root — never prepend
+                // storage_path again or it would be doubled in every S3 key.
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => Path::new(DEFAULT_VAULT_FILENAME).to_path_buf(),
+                };
+                let full_storage_path = Path::new(DEFAULT_STORAGE_SUB_FOLDER).to_path_buf();
+                create_command(
+                    require_s3_fs(s3_config_path),
+                    &vault_path,
+                    &full_storage_path,
+                    c,
+                )
             }
         },
         Command::MigrateV7ToV8 => match opts.filesystem_provider {
-            FilesystemProvider::Local => migrate_v7_to_v8_command(LocalFs::new(), &vault_path),
+            FilesystemProvider::Local => {
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
+                };
+                migrate_v7_to_v8_command(LocalFs::new(), &vault_path)
+            }
+            FilesystemProvider::S3 => {
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => Path::new(DEFAULT_VAULT_FILENAME).to_path_buf(),
+                };
+                migrate_v7_to_v8_command(require_s3_fs(s3_config_path), &vault_path)
+            }
         },
         Command::Unlock(u) => match opts.filesystem_provider {
             FilesystemProvider::Local => {
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
+                };
+                let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
                 unlock_command(LocalFs::new(), &vault_path, &full_storage_path, u).await
+            }
+            FilesystemProvider::S3 => {
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => Path::new(DEFAULT_VAULT_FILENAME).to_path_buf(),
+                };
+                let full_storage_path = Path::new(DEFAULT_STORAGE_SUB_FOLDER).to_path_buf();
+                unlock_command(
+                    require_s3_fs(s3_config_path),
+                    &vault_path,
+                    &full_storage_path,
+                    u,
+                )
+                .await
             }
         },
     }

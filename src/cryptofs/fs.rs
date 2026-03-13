@@ -1,12 +1,12 @@
 use crate::crypto::{
-    Cryptor, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH, FileHeader,
-    calculate_cleartext_size, shorten_name,
+    calculate_cleartext_size, shorten_name, Cryptor, FileHeader, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH,
+    FILE_CHUNK_LENGTH, FILE_HEADER_LENGTH,
 };
 use crate::cryptofs::error::FileSystemError::{InvalidPathError, PathDoesNotExist};
 use crate::cryptofs::filesystem::Metadata;
 use crate::cryptofs::{
-    DirEntry, File, FileSystem, FileSystemError, OpenOptions, Stats, last_path_component,
-    parent_path,
+    last_path_component, parent_path, DirEntry, File, FileSystem, FileSystemError, OpenOptions,
+    Stats,
 };
 use lru_cache::LruCache;
 use std::collections::hash_map::DefaultHasher;
@@ -16,8 +16,9 @@ use std::ffi::OsString;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use tracing::error;
+use tracing::{error, warn};
 use zeroize::Zeroizing;
 
 /// Extension of encrypted filename
@@ -76,10 +77,22 @@ impl CryptoFsCaches {
 /// Chunk cache capacity for per files
 const CHUNK_CACHE_CAP: usize = 500;
 
+/// Default maximum number of simultaneously open file handles.
+/// This is deliberately conservative to stay well below the typical OS
+/// per-process limit of 1024 file descriptors, leaving headroom for
+/// directory traversal, internal metadata reads, and other OS-level FDs.
+const DEFAULT_MAX_OPEN_FILES: usize = 512;
+
 #[derive(Clone, Debug, Copy)]
 pub struct CryptoFsConfig {
     pub chunk_cache_cap: usize,
     pub read_only: bool,
+    /// Maximum number of `CryptoFsFile` handles that may be open at the same
+    /// time.  Attempts to open more files while the limit is reached will
+    /// return `FileSystemError::TooManyOpenFiles` instead of forwarding the
+    /// call to the underlying provider (which would eventually panic with an
+    /// OS-level "too many open files" error).
+    pub max_open_files: usize,
 }
 
 impl Default for CryptoFsConfig {
@@ -87,6 +100,7 @@ impl Default for CryptoFsConfig {
         CryptoFsConfig {
             chunk_cache_cap: CHUNK_CACHE_CAP,
             read_only: false,
+            max_open_files: DEFAULT_MAX_OPEN_FILES,
         }
     }
 }
@@ -99,6 +113,25 @@ pub struct CryptoPath {
 impl AsRef<Path> for CryptoPath {
     fn as_ref(&self) -> &Path {
         self.full_path.as_ref()
+    }
+}
+
+/// RAII guard that decrements the open-file counter when dropped.
+///
+/// This ensures that every successful `open_file` / `create_file` call is
+/// paired with a matching decrement when the `CryptoFsFile` is closed,
+/// regardless of the code path that drops it (normal close, panic unwind,
+/// early `return`, etc.).
+#[derive(Debug)]
+struct OpenFileGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for OpenFileGuard {
+    fn drop(&mut self) {
+        // Saturating sub prevents wrapping on logic bugs; the counter should
+        // never be zero here in correct usage, but we defend anyway.
+        self.counter.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -118,6 +151,13 @@ pub struct CryptoFs<FS: FileSystem> {
 
     caches: Arc<CryptoFsCaches>,
     config: CryptoFsConfig,
+
+    /// Counts the number of currently open `CryptoFsFile` handles.
+    ///
+    /// Bounded by `config.max_open_files`.  Using an `Arc<AtomicUsize>` lets
+    /// us share the counter with the `OpenFileGuard` RAII wrapper without
+    /// paying for a `Mutex`.
+    open_file_count: Arc<AtomicUsize>,
 }
 
 impl<FS: 'static + FileSystem> CryptoFs<FS> {
@@ -128,11 +168,17 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         fs_provider: FS,
         config: CryptoFsConfig,
     ) -> Result<CryptoFs<FS>, FileSystemError> {
+        if config.max_open_files == 0 {
+            return Err(FileSystemError::InvalidPathError(
+                "max_open_files must be greater than zero".to_string(),
+            ));
+        }
         let crypto_fs = CryptoFs {
             cryptor,
             root_folder: PathBuf::from(folder),
             file_system_provider: fs_provider,
             caches: Arc::new(CryptoFsCaches::new(5000, 16)),
+            open_file_count: Arc::new(AtomicUsize::new(0)),
             config,
         };
         let root = crypto_fs.real_path_from_dir_id(b"")?;
@@ -140,6 +186,44 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             crypto_fs.file_system_provider.create_dir_all(root)?;
         }
         Ok(crypto_fs)
+    }
+
+    /// Returns the number of currently open `CryptoFsFile` handles.
+    pub fn open_file_count(&self) -> usize {
+        self.open_file_count.load(Ordering::Relaxed)
+    }
+
+    /// Attempts to acquire a slot in the open-file limit.
+    ///
+    /// On success, returns an `OpenFileGuard` that will release the slot when
+    /// dropped.  On failure (limit already reached), returns
+    /// `FileSystemError::TooManyOpenFiles`.
+    fn acquire_open_file_slot(&self) -> Result<OpenFileGuard, FileSystemError> {
+        // Compare-and-swap loop: increment only if we're below the limit.
+        let mut current = self.open_file_count.load(Ordering::Relaxed);
+        loop {
+            if current >= self.config.max_open_files {
+                warn!(
+                    open = current,
+                    limit = self.config.max_open_files,
+                    "Open file limit reached; rejecting open request"
+                );
+                return Err(FileSystemError::TooManyOpenFiles);
+            }
+            match self.open_file_count.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Ok(OpenFileGuard {
+                        counter: Arc::clone(&self.open_file_count),
+                    });
+                }
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Returns true if the filesystem is in read-only mode
@@ -500,6 +584,9 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         path: P,
         options: OpenOptions,
     ) -> Result<CryptoFsFile, FileSystemError> {
+        // Acquire an open-file slot *before* touching the underlying provider
+        // so that the slot is released even if CryptoFsFile::open fails.
+        let guard = self.acquire_open_file_slot()?;
         let mut real_path = self.filepath_to_real_path(path)?;
         if real_path.is_shorten {
             real_path.full_path = real_path.full_path.join(CONTENTS_FILENAME);
@@ -511,6 +598,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             options,
             self.config.chunk_cache_cap,
             self.is_read_only(),
+            guard,
         )?;
         Ok(crypto_file)
     }
@@ -519,6 +607,8 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         if self.is_read_only() {
             return Err(FileSystemError::ReadOnly);
         }
+        // Acquire an open-file slot *before* touching the underlying provider.
+        let guard = self.acquire_open_file_slot()?;
         let mut real_path = self.filepath_to_real_path(&path)?;
         if real_path.is_shorten {
             #[allow(clippy::unnecessary_to_owned)]
@@ -530,8 +620,12 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             real_path.full_path = real_path.full_path.join(CONTENTS_FILENAME);
         }
         let reader = self.file_system_provider.create_file(real_path.full_path)?;
-        let crypto_file =
-            CryptoFsFile::create_file(self.cryptor.clone(), reader, self.config.chunk_cache_cap)?;
+        let crypto_file = CryptoFsFile::create_file(
+            self.cryptor.clone(),
+            reader,
+            self.config.chunk_cache_cap,
+            guard,
+        )?;
         Ok(crypto_file)
     }
 
@@ -775,6 +869,11 @@ pub struct CryptoFsFile {
 
     /// If true, write operations are blocked
     read_only: bool,
+
+    /// RAII guard that decrements the open-file counter in the parent
+    /// `CryptoFs` when this file handle is dropped.  Held last so that the
+    /// underlying file is closed before the slot is returned to the pool.
+    _open_guard: OpenFileGuard,
 }
 
 impl CryptoFsFile {
@@ -782,13 +881,14 @@ impl CryptoFsFile {
     /// function call) for reading/writing.
     /// Read/Write implementations for the traits works with a cleartext data, so CryptoFSFile instance
     /// must contain the Cryptor
-    pub fn open<P: AsRef<Path>, FS: FileSystem>(
+    fn open<P: AsRef<Path>, FS: FileSystem>(
         real_path: P,
         cryptor: Cryptor,
         real_file_system_provider: &FS,
         options: OpenOptions,
         chunk_cache_cap: usize,
         read_only: bool,
+        open_guard: OpenFileGuard,
     ) -> Result<CryptoFsFile, FileSystemError> {
         let mut reader = real_file_system_provider.open_file(real_path, options)?;
         let mut encrypted_header: [u8; FILE_HEADER_LENGTH] = [0; FILE_HEADER_LENGTH];
@@ -812,6 +912,7 @@ impl CryptoFsFile {
             read_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_LENGTH)),
             write_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_LENGTH)),
             read_only,
+            _open_guard: open_guard,
         })
     }
 
@@ -819,10 +920,11 @@ impl CryptoFsFile {
     /// function call).
     /// Read/Write implementations for the traits works with a cleartext data, so CryptoFSFile instance
     /// must contain the Cryptor
-    pub fn create_file(
+    fn create_file(
         cryptor: Cryptor,
         mut rfs_file: Box<dyn File>,
         chunk_cache_cap: usize,
+        open_guard: OpenFileGuard,
     ) -> Result<CryptoFsFile, FileSystemError> {
         let header = cryptor.create_file_header();
         let encrypted_header = cryptor.encrypt_file_header(&header)?;
@@ -844,6 +946,7 @@ impl CryptoFsFile {
             read_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_LENGTH)),
             write_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_LENGTH)),
             read_only: false,
+            _open_guard: open_guard,
         })
     }
 

@@ -44,6 +44,12 @@ impl From<FileSystemError> for FsError {
                 res
             }
             FileSystemError::InvalidPathError(_) => FsError::Forbidden,
+            // Surface the open-file limit as a retriable server error rather
+            // than letting the OS panic the whole process with EMFILE.
+            FileSystemError::TooManyOpenFiles => {
+                warn!("WebDAV open file limit reached; rejecting with GeneralFailure");
+                FsError::GeneralFailure
+            }
             e => {
                 error!("WebDAV filesystem error: {:?}", e);
                 FsError::GeneralFailure
@@ -532,6 +538,11 @@ mod tests {
         assert_eq!(
             FsError::from(FileSystemError::UnknownError("unknown".to_string())),
             FsError::GeneralFailure
+        );
+        assert_eq!(
+            FsError::from(FileSystemError::TooManyOpenFiles),
+            FsError::GeneralFailure,
+            "TooManyOpenFiles must map to GeneralFailure so the client retries"
         );
     }
 

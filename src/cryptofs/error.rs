@@ -35,6 +35,9 @@ pub enum FileSystemError {
 
     #[error("Filesystem is read-only")]
     ReadOnly,
+
+    #[error("Too many open files")]
+    TooManyOpenFiles,
 }
 
 impl From<std::io::Error> for FileSystemError {
@@ -119,6 +122,9 @@ impl From<FileSystemError> for std::io::Error {
             }
             FileSystemError::CryptoError(e) => {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+            }
+            FileSystemError::TooManyOpenFiles => {
+                std::io::Error::new(std::io::ErrorKind::ResourceBusy, "too many open files")
             }
             _ => std::io::Error::other(err.to_string()),
         }

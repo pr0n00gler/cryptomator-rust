@@ -36,8 +36,8 @@ const FULL_NAME_FILENAME: &str = "name.c9s";
 const CONTENTS_FILENAME: &str = "contents.c9r";
 
 struct CacheShard {
-    dir_uuids: LruCache<PathBuf, Vec<u8>>,
-    dir_entries: LruCache<PathBuf, DirEntry>,
+    dir_uuids: LruCache<PathBuf, Arc<Vec<u8>>>,
+    dir_entries: LruCache<PathBuf, Arc<DirEntry>>,
     shortened_names: LruCache<PathBuf, String>,
 }
 
@@ -176,7 +176,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         config: CryptoFsConfig,
     ) -> Result<CryptoFs<FS>, FileSystemError> {
         if config.max_open_files == 0 {
-            return Err(FileSystemError::InvalidPathError(
+            return Err(FileSystemError::InvalidConfig(
                 "max_open_files must be greater than zero".to_string(),
             ));
         }
@@ -303,12 +303,12 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             let mut shard = self.lock_shard(&full_path)?;
             shard.dir_uuids.get_mut(&full_path).cloned()
         } {
-            return Ok(cached_dir_id);
+            // Arc clone is cheap — just a pointer copy + refcount bump.
+            return Ok(cached_dir_id.as_ref().clone());
         }
 
         let mut dir_uuid = Vec::new();
         if self.file_system_provider.exists(&full_path) {
-            let _guard = self.acquire_open_file_slot()?;
             let mut reader = self
                 .file_system_provider
                 .open_file(full_path.join(DIR_FILENAME), OpenOptions::new())?;
@@ -320,12 +320,13 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             return Err(PathDoesNotExist(component_name.to_string()));
         }
 
+        let dir_uuid_arc = Arc::new(dir_uuid);
         {
             let mut shard = self.lock_shard(&full_path)?;
-            shard.dir_uuids.insert(full_path, dir_uuid.clone());
+            shard.dir_uuids.insert(full_path, Arc::clone(&dir_uuid_arc));
         }
 
-        Ok(dir_uuid)
+        Ok((*dir_uuid_arc).clone())
     }
 
     /// Translates a 'virtual' path to a real path
@@ -362,17 +363,23 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         let real_filename = self
             .cryptor
             .encrypt_filename(filename_str, dir_id.as_slice())?;
-        let full_encrypted_name = real_filename.clone() + ENCRYPTED_FILE_EXT;
-        let (full_name, is_shorten) = self.shorten_if_needed(full_encrypted_name);
+        let full_encrypted_name = real_filename + ENCRYPTED_FILE_EXT;
+        let is_shorten =
+            full_encrypted_name.len() > self.cryptor.vault.claims.shorteningThreshold as usize;
 
         let mut full_path = real_dir_path;
-        full_path.push(&full_name);
-
         if is_shorten {
+            full_path.push(shorten_name(&full_encrypted_name) + SHORTEN_FILENAME_EXT);
+            // Store the full encrypted name (without the shortened extension)
+            // so that create_additional_shorten_entries doesn't need to re-encrypt.
+            let base_name = full_encrypted_name
+                .strip_suffix(ENCRYPTED_FILE_EXT)
+                .unwrap_or(&full_encrypted_name)
+                .to_string();
             let mut shard = self.lock_shard(&full_path)?;
-            shard
-                .shortened_names
-                .insert(full_path.clone(), real_filename);
+            shard.shortened_names.insert(full_path.clone(), base_name);
+        } else {
+            full_path.push(&full_encrypted_name);
         }
 
         Ok(CryptoPath {
@@ -393,7 +400,8 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             let mut shard = self.lock_shard(&real_path)?;
             shard.dir_entries.get_mut(&real_path).cloned()
         } {
-            return Ok(virtual_dir_entry);
+            // Arc clone is cheap — avoids cloning PathBuf + OsString + Metadata.
+            return Ok(DirEntry::clone(&virtual_dir_entry));
         }
 
         let mut metadata = de.metadata;
@@ -409,7 +417,6 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             } else {
                 let mut read_name: Vec<u8> = vec![];
                 {
-                    let _guard = self.acquire_open_file_slot()?;
                     let mut fname_file = self
                         .file_system_provider
                         .open_file(de.path.join(FULL_NAME_FILENAME), OpenOptions::new())?;
@@ -454,20 +461,24 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             file_name: OsString::from(decrypted_filename),
         };
 
-        let mut shard = self.lock_shard(&real_path)?;
-        shard
-            .dir_entries
-            .insert(real_path, virtual_dir_entry.clone());
+        let arc_entry = Arc::new(virtual_dir_entry);
+        {
+            let mut shard = self.lock_shard(&real_path)?;
+            shard.dir_entries.insert(real_path, Arc::clone(&arc_entry));
+        }
 
-        Ok(virtual_dir_entry)
+        Ok(DirEntry::clone(&arc_entry))
     }
 
     /// Creates additional filesystem entries (like "name.c9s" and parent folder)
-    /// for name shortening support
+    /// for name shortening support.
+    ///
+    /// `encrypted_name` is the already-encrypted base name (without extension),
+    /// avoiding redundant re-encryption.
     fn create_additional_shorten_entries<P: AsRef<Path>>(
         &self,
         real_path: P,
-        virtual_path: P,
+        encrypted_name: &str,
     ) -> Result<(), FileSystemError> {
         if !self.file_system_provider.exists(&real_path) {
             self.file_system_provider.create_dir(&real_path)?;
@@ -479,21 +490,13 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             self.file_system_provider
                 .remove_file(real_path.as_ref().join(FULL_NAME_FILENAME))?;
         }
-        let virtual_filename = last_path_component(&virtual_path)?;
-        let virtual_filename_str = self.os_str_to_utf8(virtual_filename.as_os_str())?;
-
-        let full_encrypted_name = self.cryptor.encrypt_filename(
-            virtual_filename_str,
-            self.dir_id_from_path(parent_path(&virtual_path))?
-                .as_slice(),
-        )?;
 
         {
-            let _guard = self.acquire_open_file_slot()?;
             let mut full_name_file = self
                 .file_system_provider
                 .create_file(real_path.as_ref().join(FULL_NAME_FILENAME))?;
-            full_name_file.write_all((full_encrypted_name + ENCRYPTED_FILE_EXT).as_bytes())?;
+            let full_name_with_ext = format!("{encrypted_name}{ENCRYPTED_FILE_EXT}");
+            full_name_file.write_all(full_name_with_ext.as_bytes())?;
         }
         Ok(())
     }
@@ -557,7 +560,14 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     ) -> Result<Vec<u8>, FileSystemError> {
         let encrypted_name = self.cryptor.encrypt_filename(name, parent_dir_id)?;
         let full_encrypted_name = encrypted_name + ENCRYPTED_FILE_EXT;
-        let (storage_name, is_shorten) = self.shorten_if_needed(full_encrypted_name.clone());
+        let threshold = self.cryptor.vault.claims.shorteningThreshold as usize;
+        let is_shorten = full_encrypted_name.len() > threshold;
+
+        let storage_name = if is_shorten {
+            shorten_name(&full_encrypted_name) + SHORTEN_FILENAME_EXT
+        } else {
+            full_encrypted_name.clone()
+        };
 
         let mut real_path = self.real_path_from_dir_id(parent_dir_id)?;
         real_path.push(&storage_name);
@@ -565,7 +575,8 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         self.file_system_provider.create_dir_all(&real_path)?;
 
         if is_shorten {
-            let _guard = self.acquire_open_file_slot()?;
+            // Write the full encrypted name to name.c9s. No clone was needed
+            // in the non-shortened case since we reused `full_encrypted_name` directly.
             let mut name_writer = self
                 .file_system_provider
                 .create_file(real_path.join(FULL_NAME_FILENAME))?;
@@ -574,7 +585,6 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
 
         let dir_uuid_bytes = uuid::Uuid::new_v4().to_string().into_bytes();
         {
-            let _guard = self.acquire_open_file_slot()?;
             let mut writer = self
                 .file_system_provider
                 .create_file(real_path.join(DIR_FILENAME))?;
@@ -587,7 +597,9 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
 
         {
             let mut shard = self.lock_shard(&real_path)?;
-            shard.dir_uuids.insert(real_path, dir_uuid_bytes.clone());
+            shard
+                .dir_uuids
+                .insert(real_path, Arc::new(dir_uuid_bytes.clone()));
         }
 
         Ok(dir_uuid_bytes)
@@ -629,11 +641,18 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         let guard = self.acquire_open_file_slot()?;
         let mut real_path = self.filepath_to_real_path(&path)?;
         if real_path.is_shorten {
-            #[allow(clippy::unnecessary_to_owned)]
-            self.create_additional_shorten_entries(
-                &real_path.full_path,
-                &path.as_ref().to_path_buf(),
-            )?;
+            // Retrieve the already-encrypted name from the cache (populated by
+            // filepath_to_real_path) to avoid re-encrypting.
+            let encrypted_name = {
+                let mut shard = self.lock_shard(&real_path.full_path)?;
+                shard.shortened_names.get_mut(&real_path.full_path).cloned()
+            }
+            .ok_or_else(|| {
+                FileSystemError::UnknownError(
+                    "shortened name not found in cache after path resolution".to_string(),
+                )
+            })?;
+            self.create_additional_shorten_entries(&real_path.full_path, &encrypted_name)?;
 
             real_path.full_path = real_path.full_path.join(CONTENTS_FILENAME);
         }
@@ -712,11 +731,19 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             src_real_path.full_path = src_real_path.full_path.join(CONTENTS_FILENAME);
         }
         if dst_real_path.is_shorten {
-            #[allow(clippy::unnecessary_to_owned)]
-            self.create_additional_shorten_entries(
-                &dst_real_path.full_path,
-                &_dest.as_ref().to_path_buf(),
-            )?;
+            let encrypted_name = {
+                let mut shard = self.lock_shard(&dst_real_path.full_path)?;
+                shard
+                    .shortened_names
+                    .get_mut(&dst_real_path.full_path)
+                    .cloned()
+            }
+            .ok_or_else(|| {
+                FileSystemError::UnknownError(
+                    "shortened name not found in cache after path resolution".to_string(),
+                )
+            })?;
+            self.create_additional_shorten_entries(&dst_real_path.full_path, &encrypted_name)?;
 
             dst_real_path.full_path = dst_real_path.full_path.join(CONTENTS_FILENAME);
         }
@@ -882,6 +909,9 @@ pub struct CryptoFsFile {
     /// Buffer for reading chunks to avoid repeated allocations
     read_buffer: Zeroizing<Vec<u8>>,
 
+    /// Buffer for decrypting chunks to avoid repeated allocations
+    decrypt_buffer: Zeroizing<Vec<u8>>,
+
     /// Buffer for encrypting chunks to avoid repeated allocations
     write_buffer: Zeroizing<Vec<u8>>,
 
@@ -928,6 +958,7 @@ impl CryptoFsFile {
             real_len,
             chunk_cache: LruCache::new(chunk_cache_cap),
             read_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_LENGTH)),
+            decrypt_buffer: Zeroizing::new(vec![0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH]),
             write_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_LENGTH)),
             read_only,
             _open_guard: open_guard,
@@ -962,36 +993,30 @@ impl CryptoFsFile {
             real_len,
             chunk_cache: LruCache::new(chunk_cache_cap),
             read_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_LENGTH)),
+            decrypt_buffer: Zeroizing::new(vec![0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH]),
             write_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_LENGTH)),
             read_only: false,
             _open_guard: open_guard,
         })
     }
 
-    /// Returns a cleartext size of the file
-    pub fn file_size(&mut self) -> Result<u64, FileSystemError> {
-        let current_pos = self.rfs_file.stream_position()?;
-        let real_file_size = self.rfs_file.seek(SeekFrom::End(0))?;
-        self.rfs_file.seek(SeekFrom::Start(current_pos))?;
-        Ok(calculate_cleartext_size(real_file_size))
+    /// Returns a cleartext size of the file using the cached `real_len`
+    /// instead of seeking to the end of the underlying file.
+    pub fn file_size(&self) -> u64 {
+        calculate_cleartext_size(self.real_len)
     }
 
-    /// Return a real size of the file
-    pub fn real_file_size(&mut self) -> Result<u64, FileSystemError> {
-        let current_pos = self.rfs_file.stream_position()?;
-        let real_file_size = self.rfs_file.seek(SeekFrom::End(0))?;
-        self.rfs_file.seek(SeekFrom::Start(current_pos))?;
-        Ok(real_file_size)
+    /// Return the cached real (ciphertext) size of the file.
+    pub fn real_file_size(&self) -> u64 {
+        self.real_len
     }
 
-    /// Updates metadata according to a real file
+    /// Updates metadata according to a real file.
+    /// Uses `metadata()` from the underlying file handle instead of seeking
+    /// to the end and back (avoids 3 extra syscalls).
     fn update_metadata(&mut self) -> Result<(), FileSystemError> {
-        let current_pos = self.rfs_file.stream_position()?;
-        let real_len = self.rfs_file.seek(SeekFrom::End(0))?;
-        self.rfs_file.seek(SeekFrom::Start(current_pos))?;
-
         let real_metadata = self.rfs_file.metadata()?;
-        self.real_len = real_len;
+        self.real_len = real_metadata.len;
         self.metadata = real_metadata;
         self.metadata.len = calculate_cleartext_size(self.real_len);
         Ok(())
@@ -1045,7 +1070,16 @@ impl CryptoFsFile {
         ))?;
 
         self.read_buffer.resize(FILE_CHUNK_LENGTH, 0);
-        let read_bytes = self.rfs_file.read(&mut self.read_buffer)?;
+        // Use a loop to handle short reads from the underlying file.
+        // A single read() is not guaranteed to return the full chunk.
+        let mut read_bytes = 0;
+        while read_bytes < FILE_CHUNK_LENGTH {
+            let n = self.rfs_file.read(&mut self.read_buffer[read_bytes..])?;
+            if n == 0 {
+                break;
+            }
+            read_bytes += n;
+        }
 
         if read_bytes == 0 {
             if expected_plain_len > 0 {
@@ -1070,13 +1104,15 @@ impl CryptoFsFile {
 
         let chunk_slice = &self.read_buffer[..read_bytes];
 
-        let mut decrypted_buffer = Zeroizing::new(vec![0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH]);
+        // Reuse the pre-allocated decrypt buffer instead of allocating per chunk.
+        self.decrypt_buffer
+            .resize(FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, 0);
         let decrypted_len = match self.cryptor.decrypt_chunk(
             &self.header.nonce,
             self.header.payload.content_key.as_ref(),
             chunk_index,
             chunk_slice,
-            &mut decrypted_buffer,
+            &mut self.decrypt_buffer,
         ) {
             Ok(len) => len,
             Err(err) => {
@@ -1096,8 +1132,10 @@ impl CryptoFsFile {
             )));
         }
 
-        decrypted_buffer.truncate(decrypted_len);
-        self.chunk_cache.insert(chunk_index, decrypted_buffer);
+        // Copy only the decrypted data into the cache entry.
+        let mut cache_entry = Zeroizing::new(Vec::with_capacity(decrypted_len));
+        cache_entry.extend_from_slice(&self.decrypt_buffer[..decrypted_len]);
+        self.chunk_cache.insert(chunk_index, cache_entry);
 
         Ok(())
     }
@@ -1179,13 +1217,7 @@ impl Seek for CryptoFsFile {
                 self.current_pos = new_pos as u64;
             }
             SeekFrom::End(p) => {
-                let size = match self.file_size() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!("Failed to determine cleartext file size: {:?}", e);
-                        return Err(e.into());
-                    }
-                };
+                let size = self.file_size();
                 let size = i64::try_from(size).map_err(|_| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -1211,6 +1243,9 @@ impl Seek for CryptoFsFile {
 impl Read for CryptoFsFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let payload_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        // Refresh metadata to detect external modifications (e.g. another
+        // handle writing to the same file).  This uses fstat which is cheap
+        // compared to the seek-to-end-and-back approach.
         self.refresh_metadata().map_err(|e| {
             error!("Failed to read file metadata: {:?}", e);
             std::io::Error::from(e)
@@ -1280,7 +1315,7 @@ impl Write for CryptoFsFile {
             return Err(FileSystemError::ReadOnly.into());
         }
         let payload_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
-        let mut known_size = self.file_size().map_err(std::io::Error::from)?;
+        let mut known_size = self.file_size();
 
         // If we're writing past the end of the file, fill the gap with zeros
         while known_size < self.current_pos {

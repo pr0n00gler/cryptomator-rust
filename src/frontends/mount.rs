@@ -56,23 +56,25 @@ pub async fn mount_webdav<FS: 'static + FileSystem>(
     let conn_semaphore = Arc::new(Semaphore::new(MAX_WEBDAV_CONNECTIONS));
 
     loop {
-        // Acquire a semaphore permit *before* accepting so that we
-        // back-pressure when the connection limit is reached instead of
-        // accumulating unbounded TCP sockets.
-        let permit = conn_semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("connection semaphore closed unexpectedly");
-
         let (stream, _) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
                 error!("Failed to accept WebDAV connection: {:?}", e);
-                drop(permit);
                 // Brief pause to avoid a tight error loop when FDs are
                 // temporarily exhausted.
                 tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+
+        // Acquire a semaphore permit *after* accepting so that the accept
+        // loop is never stalled when the connection limit is reached.
+        // If the permit cannot be acquired immediately, drop the connection.
+        let permit = match conn_semaphore.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                warn!("WebDAV connection limit reached; dropping new connection");
+                drop(stream);
                 continue;
             }
         };

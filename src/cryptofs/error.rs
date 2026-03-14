@@ -38,6 +38,9 @@ pub enum FileSystemError {
 
     #[error("Too many open files")]
     TooManyOpenFiles,
+
+    #[error("Invalid configuration")]
+    InvalidConfig(String),
 }
 
 impl From<std::io::Error> for FileSystemError {
@@ -123,8 +126,9 @@ impl From<FileSystemError> for std::io::Error {
             FileSystemError::CryptoError(e) => {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
             }
-            FileSystemError::TooManyOpenFiles => {
-                std::io::Error::new(std::io::ErrorKind::ResourceBusy, "too many open files")
+            FileSystemError::TooManyOpenFiles => std::io::Error::from_raw_os_error(libc::EMFILE),
+            FileSystemError::InvalidConfig(msg) => {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, msg)
             }
             _ => std::io::Error::other(err.to_string()),
         }

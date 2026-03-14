@@ -176,7 +176,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         config: CryptoFsConfig,
     ) -> Result<CryptoFs<FS>, FileSystemError> {
         if config.max_open_files == 0 {
-            return Err(FileSystemError::InvalidPathError(
+            return Err(FileSystemError::InvalidConfig(
                 "max_open_files must be greater than zero".to_string(),
             ));
         }
@@ -309,7 +309,6 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
 
         let mut dir_uuid = Vec::new();
         if self.file_system_provider.exists(&full_path) {
-            let _guard = self.acquire_open_file_slot()?;
             let mut reader = self
                 .file_system_provider
                 .open_file(full_path.join(DIR_FILENAME), OpenOptions::new())?;
@@ -327,7 +326,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             shard.dir_uuids.insert(full_path, Arc::clone(&dir_uuid_arc));
         }
 
-        Ok(Arc::try_unwrap(dir_uuid_arc).unwrap_or_else(|arc| arc.as_ref().clone()))
+        Ok((*dir_uuid_arc).clone())
     }
 
     /// Translates a 'virtual' path to a real path
@@ -365,12 +364,12 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             .cryptor
             .encrypt_filename(filename_str, dir_id.as_slice())?;
         let full_encrypted_name = real_filename + ENCRYPTED_FILE_EXT;
-        let (full_name, is_shorten) = self.shorten_if_needed(full_encrypted_name.clone());
+        let is_shorten =
+            full_encrypted_name.len() > self.cryptor.vault.claims.shorteningThreshold as usize;
 
         let mut full_path = real_dir_path;
-        full_path.push(&full_name);
-
         if is_shorten {
+            full_path.push(shorten_name(&full_encrypted_name) + SHORTEN_FILENAME_EXT);
             // Store the full encrypted name (without the shortened extension)
             // so that create_additional_shorten_entries doesn't need to re-encrypt.
             let base_name = full_encrypted_name
@@ -379,6 +378,8 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
                 .to_string();
             let mut shard = self.lock_shard(&full_path)?;
             shard.shortened_names.insert(full_path.clone(), base_name);
+        } else {
+            full_path.push(&full_encrypted_name);
         }
 
         Ok(CryptoPath {
@@ -416,7 +417,6 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             } else {
                 let mut read_name: Vec<u8> = vec![];
                 {
-                    let _guard = self.acquire_open_file_slot()?;
                     let mut fname_file = self
                         .file_system_provider
                         .open_file(de.path.join(FULL_NAME_FILENAME), OpenOptions::new())?;
@@ -464,12 +464,10 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         let arc_entry = Arc::new(virtual_dir_entry);
         {
             let mut shard = self.lock_shard(&real_path)?;
-            shard
-                .dir_entries
-                .insert(real_path, Arc::clone(&arc_entry));
+            shard.dir_entries.insert(real_path, Arc::clone(&arc_entry));
         }
 
-        Ok(Arc::try_unwrap(arc_entry).unwrap_or_else(|arc| DirEntry::clone(&arc)))
+        Ok(DirEntry::clone(&arc_entry))
     }
 
     /// Creates additional filesystem entries (like "name.c9s" and parent folder)
@@ -494,7 +492,6 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
 
         {
-            let _guard = self.acquire_open_file_slot()?;
             let mut full_name_file = self
                 .file_system_provider
                 .create_file(real_path.as_ref().join(FULL_NAME_FILENAME))?;
@@ -580,7 +577,6 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         if is_shorten {
             // Write the full encrypted name to name.c9s. No clone was needed
             // in the non-shortened case since we reused `full_encrypted_name` directly.
-            let _guard = self.acquire_open_file_slot()?;
             let mut name_writer = self
                 .file_system_provider
                 .create_file(real_path.join(FULL_NAME_FILENAME))?;
@@ -589,7 +585,6 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
 
         let dir_uuid_bytes = uuid::Uuid::new_v4().to_string().into_bytes();
         {
-            let _guard = self.acquire_open_file_slot()?;
             let mut writer = self
                 .file_system_provider
                 .create_file(real_path.join(DIR_FILENAME))?;
@@ -602,7 +597,9 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
 
         {
             let mut shard = self.lock_shard(&real_path)?;
-            shard.dir_uuids.insert(real_path, Arc::new(dir_uuid_bytes.clone()));
+            shard
+                .dir_uuids
+                .insert(real_path, Arc::new(dir_uuid_bytes.clone()));
         }
 
         Ok(dir_uuid_bytes)
@@ -648,10 +645,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             // filepath_to_real_path) to avoid re-encrypting.
             let encrypted_name = {
                 let mut shard = self.lock_shard(&real_path.full_path)?;
-                shard
-                    .shortened_names
-                    .get_mut(&real_path.full_path)
-                    .cloned()
+                shard.shortened_names.get_mut(&real_path.full_path).cloned()
             }
             .ok_or_else(|| {
                 FileSystemError::UnknownError(
@@ -1111,7 +1105,8 @@ impl CryptoFsFile {
         let chunk_slice = &self.read_buffer[..read_bytes];
 
         // Reuse the pre-allocated decrypt buffer instead of allocating per chunk.
-        self.decrypt_buffer.resize(FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, 0);
+        self.decrypt_buffer
+            .resize(FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, 0);
         let decrypted_len = match self.cryptor.decrypt_chunk(
             &self.header.nonce,
             self.header.payload.content_key.as_ref(),
@@ -1357,8 +1352,6 @@ impl Write for CryptoFsFile {
             self.current_pos += slice_len as u64;
             known_size = known_size.max(self.current_pos);
         }
-
-        self.rfs_file.flush()?;
 
         if let Err(e) = self.update_metadata() {
             error!("Failed to update metadata after write");

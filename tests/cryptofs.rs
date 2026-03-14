@@ -973,30 +973,28 @@ fn test_internal_ops_respect_open_file_limit() {
     }
     assert_eq!(crypto_fs.open_file_count(), LIMIT);
 
-    // With all slots taken, `read_dir` on a nested path should fail
-    // gracefully because resolve_component needs to open `dir.c9r`
-    // internally but the guard blocks it.
-    let result = crypto_fs.read_dir("/parent");
-    assert!(
-        result.is_err(),
-        "read_dir on nested path should fail when budget is exhausted"
-    );
-
-    // Similarly, `metadata` on a nested path should fail.
-    let result = crypto_fs.metadata("/parent/child.dat");
-    assert!(
-        matches!(result, Err(FileSystemError::TooManyOpenFiles)),
-        "metadata on nested path should fail with TooManyOpenFiles when budget is exhausted, got {result:?}"
-    );
-
-    // After releasing handles, the operations should succeed.
-    handles.clear();
-    assert_eq!(crypto_fs.open_file_count(), 0);
-
+    // With all user-facing slots taken, internal operations like `read_dir`
+    // and `metadata` should still succeed because they do NOT consume
+    // user-facing FD budget.
     let entries: Vec<_> = crypto_fs.read_dir("/parent").unwrap().collect();
     assert_eq!(entries.len(), 1, "should have one file in /parent");
     assert_eq!(entries[0].file_name, "child.dat");
 
     let metadata = crypto_fs.metadata("/parent/child.dat").unwrap();
     assert!(!metadata.is_dir);
+
+    // But opening another user-facing file handle should still fail.
+    let result = crypto_fs.open_file("/parent/child.dat", OpenOptions::new());
+    assert!(
+        matches!(result, Err(FileSystemError::TooManyOpenFiles)),
+        "opening another user-facing file should fail with TooManyOpenFiles, got {result:?}"
+    );
+
+    // After releasing handles, user-facing opens succeed again.
+    handles.clear();
+    assert_eq!(crypto_fs.open_file_count(), 0);
+
+    let _file = crypto_fs
+        .open_file("/parent/child.dat", OpenOptions::new())
+        .expect("should succeed after releasing handles");
 }

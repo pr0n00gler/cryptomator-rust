@@ -4,7 +4,7 @@ use cryptomator::crypto::{
 };
 use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem, OpenOptions, parent_path};
 use cryptomator::logging::init_logger;
-use cryptomator::providers::LocalFs;
+use cryptomator::providers::{LocalFs, WebDavFs};
 
 use tracing::info;
 
@@ -26,6 +26,7 @@ const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum FilesystemProvider {
     Local,
+    WebDav,
 }
 
 #[derive(Parser)]
@@ -39,9 +40,17 @@ struct Opts {
     #[arg(short, long)]
     vault_path: Option<String>,
 
-    /// Filesystem provider. Supported values: only "local" for now
+    /// Filesystem provider. Supported values: "local", "web-dav"
     #[arg(value_enum, default_value_t = FilesystemProvider::Local)]
     filesystem_provider: FilesystemProvider,
+
+    /// WebDAV server URL for the WebDav filesystem provider
+    #[arg(long)]
+    webdav_provider_url: Option<String>,
+
+    /// WebDAV server username for the WebDav filesystem provider
+    #[arg(long)]
+    webdav_provider_user: Option<String>,
 
     /// Log level
     #[arg(short, long, default_value = "info")]
@@ -112,18 +121,40 @@ async fn main() {
 
     let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
 
+    let build_webdav = || {
+        let url = opts
+            .webdav_provider_url
+            .as_deref()
+            .expect("--webdav-provider-url is required for web-dav provider");
+        let user = opts.webdav_provider_user.as_deref();
+        let pass = user.map(|u| {
+            Zeroizing::new(
+                rpassword::prompt_password(format!("WebDAV provider password for {u}: "))
+                    .expect("Unable to read WebDAV provider password"),
+            )
+        });
+        WebDavFs::new(url, user, pass.as_deref().map(|z| z.as_str()))
+    };
+
     match opts.subcmd {
         Command::Create(c) => match opts.filesystem_provider {
             FilesystemProvider::Local => {
                 create_command(LocalFs::new(), &vault_path, &full_storage_path, c)
             }
+            FilesystemProvider::WebDav => {
+                create_command(build_webdav(), &vault_path, &full_storage_path, c)
+            }
         },
         Command::MigrateV7ToV8 => match opts.filesystem_provider {
             FilesystemProvider::Local => migrate_v7_to_v8_command(LocalFs::new(), &vault_path),
+            FilesystemProvider::WebDav => migrate_v7_to_v8_command(build_webdav(), &vault_path),
         },
         Command::Unlock(u) => match opts.filesystem_provider {
             FilesystemProvider::Local => {
                 unlock_command(LocalFs::new(), &vault_path, &full_storage_path, u).await
+            }
+            FilesystemProvider::WebDav => {
+                unlock_command(build_webdav(), &vault_path, &full_storage_path, u).await
             }
         },
     }

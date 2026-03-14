@@ -1,26 +1,19 @@
 use crate::cryptofs::{DirEntry, File, FileSystem, Metadata, OpenOptions, Stats};
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_TYPE, HeaderValue};
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// Maximum file size (in bytes) that `WebDavFs` will load into memory.
-///
-/// **Warning**: `WebDavFs` buffers entire file contents in memory for both
-/// reads and writes. Files larger than this limit (256 MiB by default) will
-/// be rejected with an error. This provider is not suitable for very large
-/// files.
-const MAX_WEBDAV_FILE_SIZE: u64 = 256 * 1024 * 1024;
-
 /// A [`FileSystem`] implementation backed by a WebDAV server.
 ///
-/// **Important**: every opened file is buffered entirely in memory.
-/// See [`MAX_WEBDAV_FILE_SIZE`] for the enforced size limit. This provider
-/// is intended for vault metadata and moderately-sized encrypted chunks,
-/// not for multi-gigabyte media files.
+/// Reads use HTTP Range GET requests to fetch only the requested byte
+/// ranges, avoiding the need to buffer entire files in memory. Writes are
+/// accumulated in memory and flushed back to the server via a
+/// read-modify-write cycle on [`flush`].
 #[derive(Clone)]
 pub struct WebDavFs {
     base_url: String,
@@ -278,75 +271,210 @@ fn href_to_path(href: &str, base_url: &str) -> PathBuf {
 pub(crate) struct WebDavFile {
     url: String,
     client: Client,
-    cursor: Cursor<Vec<u8>>,
-    dirty: bool,
+    current_pos: u64,
+    content_length: u64,
+    pending_writes: BTreeMap<u64, Vec<u8>>,
     meta: Metadata,
+}
+
+impl WebDavFile {
+    /// Returns the effective file length considering both the server-side
+    /// content length and any pending writes that extend past it.
+    fn effective_length(&self) -> u64 {
+        let mut len = self.content_length;
+        for (&offset, data) in &self.pending_writes {
+            let end = offset + data.len() as u64;
+            if end > len {
+                len = end;
+            }
+        }
+        len
+    }
+
+    /// Returns `true` if there are any unflushed writes.
+    fn is_dirty(&self) -> bool {
+        !self.pending_writes.is_empty()
+    }
 }
 
 impl fmt::Debug for WebDavFile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WebDavFile")
             .field("url", &self.url)
-            .field("dirty", &self.dirty)
-            .field("len", &self.cursor.get_ref().len())
+            .field("pos", &self.current_pos)
+            .field("content_length", &self.content_length)
+            .field("pending_writes", &self.pending_writes.len())
             .finish()
     }
 }
 
 impl Read for WebDavFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.cursor.read(buf)
+        let effective_len = self.effective_length();
+        if buf.is_empty() || self.current_pos >= effective_len {
+            return Ok(0);
+        }
+
+        let start = self.current_pos;
+        let end = (start + buf.len() as u64 - 1).min(effective_len - 1);
+        let read_len = (end - start + 1) as usize;
+
+        // Fetch from server if the range overlaps with server-side content.
+        if start < self.content_length {
+            let server_end = end.min(self.content_length - 1);
+            let resp = self
+                .client
+                .get(&self.url)
+                .header("Range", format!("bytes={start}-{server_end}"))
+                .send()
+                .map_err(std::io::Error::other)?;
+
+            let status = resp.status().as_u16();
+            if status == 206 || status == 200 {
+                let bytes = resp.bytes().map_err(std::io::Error::other)?;
+                let n = bytes.len().min(read_len);
+                buf[..n].copy_from_slice(&bytes[..n]);
+                // Zero-fill any portion beyond server content but within
+                // our read range (pending writes will overlay below).
+                if read_len > n {
+                    buf[n..read_len].fill(0);
+                }
+            } else {
+                // Server returned an error; fill with zeros and let
+                // pending writes overlay below.
+                buf[..read_len].fill(0);
+            }
+        } else {
+            // Entirely beyond server content; fill with zeros first.
+            buf[..read_len].fill(0);
+        }
+
+        // Overlay any pending writes that intersect the requested range.
+        for (&write_offset, write_data) in &self.pending_writes {
+            let write_end = write_offset + write_data.len() as u64;
+            if write_end <= start || write_offset > end {
+                continue;
+            }
+            let overlap_start = start.max(write_offset);
+            let overlap_end = (end + 1).min(write_end);
+            let buf_offset = (overlap_start - start) as usize;
+            let data_offset = (overlap_start - write_offset) as usize;
+            let len = (overlap_end - overlap_start) as usize;
+            buf[buf_offset..buf_offset + len]
+                .copy_from_slice(&write_data[data_offset..data_offset + len]);
+        }
+
+        self.current_pos += read_len as u64;
+        Ok(read_len)
     }
 }
 
 impl Write for WebDavFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.dirty = true;
-        self.cursor.write(buf)
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.pending_writes.insert(self.current_pos, buf.to_vec());
+        self.current_pos += buf.len() as u64;
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        if self.dirty {
-            let data = self.cursor.get_ref().clone();
-            let resp = self
-                .client
-                .put(&self.url)
-                .body(data)
-                .send()
-                .map_err(std::io::Error::other)?;
-            if !resp.status().is_success() {
-                return Err(std::io::Error::other(format!(
-                    "PUT failed with status {}",
-                    resp.status()
-                )));
-            }
-            self.dirty = false;
+        if self.pending_writes.is_empty() {
+            return Ok(());
         }
+
+        // Download current server content (if any).
+        let mut data = if self.content_length > 0 {
+            match self.client.get(&self.url).send() {
+                Ok(resp) if resp.status().is_success() => {
+                    resp.bytes().map_err(std::io::Error::other)?.to_vec()
+                }
+                Ok(resp) => {
+                    return Err(std::io::Error::other(format!(
+                        "GET for flush failed with status {}",
+                        resp.status()
+                    )));
+                }
+                Err(e) => return Err(std::io::Error::other(e)),
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Apply all pending writes.
+        for (&offset, write_data) in &self.pending_writes {
+            let end = offset as usize + write_data.len();
+            if end > data.len() {
+                data.resize(end, 0);
+            }
+            data[offset as usize..end].copy_from_slice(write_data);
+        }
+
+        // Upload the modified content.
+        let resp = self
+            .client
+            .put(&self.url)
+            .body(data.clone())
+            .send()
+            .map_err(std::io::Error::other)?;
+        if !resp.status().is_success() {
+            return Err(std::io::Error::other(format!(
+                "PUT failed with status {}",
+                resp.status()
+            )));
+        }
+
+        self.content_length = data.len() as u64;
+        self.pending_writes.clear();
         Ok(())
     }
 }
 
 impl Seek for WebDavFile {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        self.cursor.seek(pos)
+        let effective_len = self.effective_length();
+        match pos {
+            SeekFrom::Start(p) => self.current_pos = p,
+            SeekFrom::Current(p) => {
+                let new = self.current_pos as i64 + p;
+                if new < 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "seek before start of file",
+                    ));
+                }
+                self.current_pos = new as u64;
+            }
+            SeekFrom::End(p) => {
+                let new = effective_len as i64 + p;
+                if new < 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "seek before start of file",
+                    ));
+                }
+                self.current_pos = new as u64;
+            }
+        }
+        Ok(self.current_pos)
     }
 }
 
 impl File for WebDavFile {
     fn metadata(&self) -> Result<Metadata, Box<dyn Error>> {
         let mut meta = self.meta;
-        meta.len = self.cursor.get_ref().len() as u64;
+        meta.len = self.effective_length();
         Ok(meta)
     }
 }
 
 impl Drop for WebDavFile {
     fn drop(&mut self) {
-        if self.dirty {
-            tracing::warn!(url = %self.url, "WebDavFile dropped with unflushed data, attempting upload");
-            let data = self.cursor.get_ref().clone();
-            if let Err(e) = self.client.put(&self.url).body(data).send() {
-                tracing::error!(url = %self.url, error = %e, "failed to upload data on drop");
+        if self.is_dirty() {
+            tracing::warn!(url = %self.url, "WebDavFile dropped with unflushed writes, attempting flush");
+            if let Err(e) = self.flush() {
+                tracing::error!(url = %self.url, error = %e, "failed to flush writes on drop");
             }
         }
     }
@@ -431,66 +559,61 @@ impl FileSystem for WebDavFs {
     ) -> Result<Box<dyn File>, Box<dyn Error>> {
         let url = self.url_for(&path);
 
+        let now = SystemTime::now();
+        let empty_meta = Metadata {
+            is_dir: false,
+            is_file: true,
+            len: 0,
+            modified: now,
+            accessed: now,
+            created: now,
+            #[cfg(unix)]
+            uid: 0,
+            #[cfg(unix)]
+            gid: 0,
+        };
+
         if options.create_new {
-            // Need to check existence first for create_new semantics
             if self.exists(&path) {
                 return Err("file already exists".into());
             }
             self.client.put(&url).body(Vec::new()).send()?;
-            let meta = Metadata {
-                is_dir: false,
-                is_file: true,
-                len: 0,
-                modified: SystemTime::now(),
-                accessed: SystemTime::now(),
-                created: SystemTime::now(),
-                #[cfg(unix)]
-                uid: 0,
-                #[cfg(unix)]
-                gid: 0,
-            };
             return Ok(Box::new(WebDavFile {
                 url,
                 client: self.client.clone(),
-                cursor: Cursor::new(Vec::new()),
-                dirty: false,
-                meta,
+                current_pos: 0,
+                content_length: 0,
+                pending_writes: BTreeMap::new(),
+                meta: empty_meta,
             }));
         }
 
-        // Try GET first to avoid redundant HEAD + PROPFIND requests
-        let resp = self.client.get(&url).send()?;
+        // Use HEAD to check existence and get content length without
+        // downloading the file body.
+        let resp = self.client.head(&url).send()?;
         let file_exists = resp.status().is_success();
 
         if !file_exists && !options.create {
             return Err("file not found".into());
         }
 
-        let (data, meta) = if file_exists && !options.truncate {
+        let (content_length, meta) = if file_exists && !options.truncate {
             let content_length = resp
                 .headers()
                 .get("content-length")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(0);
-            // Size guard
-            if content_length > MAX_WEBDAV_FILE_SIZE {
-                return Err(format!(
-                    "file size {content_length} exceeds maximum {MAX_WEBDAV_FILE_SIZE}"
-                )
-                .into());
-            }
             let last_modified = resp
                 .headers()
                 .get("last-modified")
                 .and_then(|v| v.to_str().ok())
                 .map(parse_http_date)
                 .unwrap_or(SystemTime::UNIX_EPOCH);
-            let bytes = resp.bytes()?.to_vec();
             let meta = Metadata {
                 is_dir: false,
                 is_file: true,
-                len: bytes.len() as u64,
+                len: content_length,
                 modified: last_modified,
                 accessed: last_modified,
                 created: SystemTime::UNIX_EPOCH,
@@ -499,36 +622,31 @@ impl FileSystem for WebDavFs {
                 #[cfg(unix)]
                 gid: 0,
             };
-            (bytes, meta)
+            (content_length, meta)
         } else {
             if !file_exists {
                 self.client.put(&url).body(Vec::new()).send()?;
             }
-            let meta = Metadata {
-                is_dir: false,
-                is_file: true,
-                len: 0,
-                modified: SystemTime::now(),
-                accessed: SystemTime::now(),
-                created: SystemTime::now(),
-                #[cfg(unix)]
-                uid: 0,
-                #[cfg(unix)]
-                gid: 0,
-            };
-            (Vec::new(), meta)
+            (0, empty_meta)
         };
 
-        let mut cursor = Cursor::new(data);
-        if options.append {
-            cursor.seek(SeekFrom::End(0))?;
-        }
+        let initial_pos = if options.append { content_length } else { 0 };
+
+        // When truncating an existing file, upload an empty body immediately
+        // so the server-side content is cleared.
+        let content_length = if options.truncate && file_exists {
+            self.client.put(&url).body(Vec::new()).send()?;
+            0
+        } else {
+            content_length
+        };
 
         Ok(Box::new(WebDavFile {
             url,
             client: self.client.clone(),
-            cursor,
-            dirty: options.truncate,
+            current_pos: initial_pos,
+            content_length,
+            pending_writes: BTreeMap::new(),
             meta,
         }))
     }
@@ -537,13 +655,14 @@ impl FileSystem for WebDavFs {
         let url = self.url_for(&path);
         self.client.put(&url).body(Vec::new()).send()?;
 
+        let now = SystemTime::now();
         let meta = Metadata {
             is_dir: false,
             is_file: true,
             len: 0,
-            modified: SystemTime::now(),
-            accessed: SystemTime::now(),
-            created: SystemTime::now(),
+            modified: now,
+            accessed: now,
+            created: now,
             #[cfg(unix)]
             uid: 0,
             #[cfg(unix)]
@@ -553,8 +672,9 @@ impl FileSystem for WebDavFs {
         Ok(Box::new(WebDavFile {
             url,
             client: self.client.clone(),
-            cursor: Cursor::new(Vec::new()),
-            dirty: false,
+            current_pos: 0,
+            content_length: 0,
+            pending_writes: BTreeMap::new(),
             meta,
         }))
     }

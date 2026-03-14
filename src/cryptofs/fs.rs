@@ -78,10 +78,17 @@ impl CryptoFsCaches {
 const CHUNK_CACHE_CAP: usize = 500;
 
 /// Default maximum number of simultaneously open file handles.
-/// This is deliberately conservative to stay well below the typical OS
-/// per-process limit of 1024 file descriptors, leaving headroom for
-/// directory traversal, internal metadata reads, and other OS-level FDs.
-const DEFAULT_MAX_OPEN_FILES: usize = 512;
+///
+/// Every `CryptoFsFile` *and* every internal metadata file (`dir.c9r`,
+/// `name.c9s`) opened by path resolution and directory listing is counted
+/// against this budget.  The value must leave headroom for TCP sockets
+/// (capped by the frontend connection limit) and miscellaneous OS-level
+/// FDs (stdin, stdout, log files, etc.).
+///
+/// macOS defaults to a soft limit of 256 FDs per process; Linux typically
+/// allows 1024.  128 is a safe default that works on both without raising
+/// the soft limit.
+const DEFAULT_MAX_OPEN_FILES: usize = 128;
 
 #[derive(Clone, Debug, Copy)]
 pub struct CryptoFsConfig {
@@ -301,6 +308,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
 
         let mut dir_uuid = Vec::new();
         if self.file_system_provider.exists(&full_path) {
+            let _guard = self.acquire_open_file_slot()?;
             let mut reader = self
                 .file_system_provider
                 .open_file(full_path.join(DIR_FILENAME), OpenOptions::new())?;
@@ -400,10 +408,13 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
                 name
             } else {
                 let mut read_name: Vec<u8> = vec![];
-                let mut fname_file = self
-                    .file_system_provider
-                    .open_file(de.path.join(FULL_NAME_FILENAME), OpenOptions::new())?;
-                fname_file.read_to_end(&mut read_name)?;
+                {
+                    let _guard = self.acquire_open_file_slot()?;
+                    let mut fname_file = self
+                        .file_system_provider
+                        .open_file(de.path.join(FULL_NAME_FILENAME), OpenOptions::new())?;
+                    fname_file.read_to_end(&mut read_name)?;
+                }
                 let full_name = String::from_utf8(read_name)?;
                 let name = if let Some(filename) = full_name.strip_suffix(ENCRYPTED_FILE_EXT) {
                     filename.to_string()
@@ -468,10 +479,6 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             self.file_system_provider
                 .remove_file(real_path.as_ref().join(FULL_NAME_FILENAME))?;
         }
-        let mut full_name_file = self
-            .file_system_provider
-            .create_file(real_path.as_ref().join(FULL_NAME_FILENAME))?;
-
         let virtual_filename = last_path_component(&virtual_path)?;
         let virtual_filename_str = self.os_str_to_utf8(virtual_filename.as_os_str())?;
 
@@ -480,7 +487,14 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             self.dir_id_from_path(parent_path(&virtual_path))?
                 .as_slice(),
         )?;
-        full_name_file.write_all((full_encrypted_name + ENCRYPTED_FILE_EXT).as_bytes())?;
+
+        {
+            let _guard = self.acquire_open_file_slot()?;
+            let mut full_name_file = self
+                .file_system_provider
+                .create_file(real_path.as_ref().join(FULL_NAME_FILENAME))?;
+            full_name_file.write_all((full_encrypted_name + ENCRYPTED_FILE_EXT).as_bytes())?;
+        }
         Ok(())
     }
 
@@ -551,6 +565,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         self.file_system_provider.create_dir_all(&real_path)?;
 
         if is_shorten {
+            let _guard = self.acquire_open_file_slot()?;
             let mut name_writer = self
                 .file_system_provider
                 .create_file(real_path.join(FULL_NAME_FILENAME))?;
@@ -558,10 +573,13 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
 
         let dir_uuid_bytes = uuid::Uuid::new_v4().to_string().into_bytes();
-        let mut writer = self
-            .file_system_provider
-            .create_file(real_path.join(DIR_FILENAME))?;
-        writer.write_all(&dir_uuid_bytes)?;
+        {
+            let _guard = self.acquire_open_file_slot()?;
+            let mut writer = self
+                .file_system_provider
+                .create_file(real_path.join(DIR_FILENAME))?;
+            writer.write_all(&dir_uuid_bytes)?;
+        }
 
         let real_folder_path = self.real_path_from_dir_id(&dir_uuid_bytes)?;
         self.file_system_provider

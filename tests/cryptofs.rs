@@ -915,3 +915,88 @@ fn test_open_file_limit_is_respected_under_concurrent_access() {
         "counter must be zero after all threads complete"
     );
 }
+
+/// Internal operations like `read_dir` and `metadata` on nested paths open
+/// internal metadata files (`dir.c9r`, `name.c9s`) through the same guard
+/// budget.  When the budget is exhausted by CryptoFsFile handles, these
+/// operations must return `TooManyOpenFiles` instead of causing an OS-level
+/// EMFILE panic.
+#[test]
+fn test_internal_ops_respect_open_file_limit() {
+    const LIMIT: usize = 3;
+
+    // Step 1: create the directory structure using one CryptoFs instance.
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+    let mem_fs = MemoryFs::new();
+    let setup_fs = CryptoFs::new(
+        VFS_STORAGE_PATH,
+        cryptor,
+        mem_fs.clone(),
+        CryptoFsConfig::default(),
+    )
+    .unwrap();
+
+    setup_fs.create_dir("/parent").unwrap();
+    let mut f = setup_fs.create_file("/parent/child.dat").unwrap();
+    f.write_all(b"test data").unwrap();
+    drop(f);
+
+    for i in 0..LIMIT {
+        let path = format!("/root_file_{i}.dat");
+        let mut f = setup_fs.create_file(&path).unwrap();
+        f.write_all(b"data").unwrap();
+    }
+    drop(setup_fs);
+
+    // Step 2: open a FRESH CryptoFs instance sharing the same underlying
+    // MemoryFs but with a **cold cache**.  This forces `resolve_component`
+    // to actually open `dir.c9r` files, exercising the guard.
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+    let crypto_fs = CryptoFs::new(
+        VFS_STORAGE_PATH,
+        cryptor,
+        mem_fs,
+        CryptoFsConfig {
+            max_open_files: LIMIT,
+            ..CryptoFsConfig::default()
+        },
+    )
+    .unwrap();
+
+    // Fill the guard budget with user-facing CryptoFsFile handles.
+    let mut handles = Vec::new();
+    for i in 0..LIMIT {
+        let path = format!("/root_file_{i}.dat");
+        handles.push(crypto_fs.open_file(&path, OpenOptions::new()).unwrap());
+    }
+    assert_eq!(crypto_fs.open_file_count(), LIMIT);
+
+    // With all slots taken, `read_dir` on a nested path should fail
+    // gracefully because resolve_component needs to open `dir.c9r`
+    // internally but the guard blocks it.
+    let result = crypto_fs.read_dir("/parent");
+    assert!(
+        result.is_err(),
+        "read_dir on nested path should fail when budget is exhausted"
+    );
+
+    // Similarly, `metadata` on a nested path should fail.
+    let result = crypto_fs.metadata("/parent/child.dat");
+    assert!(
+        matches!(result, Err(FileSystemError::TooManyOpenFiles)),
+        "metadata on nested path should fail with TooManyOpenFiles when budget is exhausted, got {result:?}"
+    );
+
+    // After releasing handles, the operations should succeed.
+    handles.clear();
+    assert_eq!(crypto_fs.open_file_count(), 0);
+
+    let entries: Vec<_> = crypto_fs.read_dir("/parent").unwrap().collect();
+    assert_eq!(entries.len(), 1, "should have one file in /parent");
+    assert_eq!(entries[0].file_name, "child.dat");
+
+    let metadata = crypto_fs.metadata("/parent/child.dat").unwrap();
+    assert!(!metadata.is_dir);
+}

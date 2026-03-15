@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use tracing::info;
 use zeroize::Zeroizing;
@@ -87,8 +87,12 @@ where
     // wrapped key material on the heap with no zeroize semantics — a full
     // vault-compromise vector if the process is inspected via crash dump or
     // memory scan.
+    let mut mk_bytes = Zeroizing::new(Vec::new());
+    mk_file
+        .read_to_end(&mut mk_bytes)
+        .context("failed to read masterkey file")?;
     let mk_json: MasterKeyJson =
-        serde_json::from_reader(&mut mk_file).context("failed to read masterkey file")?;
+        serde_json::from_slice(&mk_bytes).context("failed to parse masterkey file")?;
 
     // Snapshot the non-sensitive fields we need to reconstruct the masterkey
     // file BEFORE consuming mk_json.  These are all public, non-secret values.

@@ -18,7 +18,7 @@ use cryptomator::frontends::mount::*;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::env;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
 const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
@@ -227,8 +227,12 @@ fn migrate_v7_to_v8_command<FS: FileSystem, P: AsRef<Path>>(fs: FS, vault_path: 
     // wrapped key material on the heap with no zeroize semantics — a full
     // vault-compromise vector if the process is inspected via crash dump or
     // memory scan.
+    let mut mk_bytes = Zeroizing::new(Vec::new());
+    mk_file
+        .read_to_end(&mut mk_bytes)
+        .expect("failed to read masterkey file");
     let mk_json: MasterKeyJson =
-        serde_json::from_reader(&mut mk_file).expect("failed to read masterkey file");
+        serde_json::from_slice(&mk_bytes).expect("failed to parse masterkey file");
 
     // Snapshot the non-sensitive fields we need to reconstruct the masterkey
     // file BEFORE consuming mk_json.  These are all public, non-secret values.

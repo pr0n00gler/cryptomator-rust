@@ -290,6 +290,88 @@ async fn test_webdav_metadata() {
     });
 }
 
+/// Verify that `metadata()` works correctly for directories.
+/// Many WebDAV servers require a trailing slash on directory URLs for PROPFIND.
+/// This test ensures that `metadata()` handles directories whose URL does not
+/// initially include a trailing slash.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webdav_metadata_directory() {
+    let (base_url, _handle) = setup_test_server().await;
+
+    run_blocking(move || {
+        let fs = WebDavFs::new(&base_url, None, None);
+        let path = "/test_metadata_dir_webdav";
+
+        let _ = fs.remove_dir(path);
+        let _guard = CleanupDir { fs: &fs, path };
+
+        fs.create_dir(path).expect("failed to create dir");
+
+        let meta = fs
+            .metadata(path)
+            .expect("failed to get metadata for directory");
+        assert!(meta.is_dir, "expected is_dir to be true");
+        assert!(!meta.is_file, "expected is_file to be false");
+    });
+}
+
+/// Verify that `metadata()` works for the root path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webdav_metadata_root() {
+    let (base_url, _handle) = setup_test_server().await;
+
+    run_blocking(move || {
+        let fs = WebDavFs::new(&base_url, None, None);
+
+        let meta = fs.metadata("/").expect("failed to get metadata for root");
+        assert!(meta.is_dir, "expected root to be a directory");
+    });
+}
+
+/// Verify that `metadata()` works for nested directory paths like those
+/// used by CryptoFs (e.g. `/d/AB/CDEFGHIJKLMN`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webdav_metadata_nested_directory() {
+    let (base_url, _handle) = setup_test_server().await;
+
+    run_blocking(move || {
+        let fs = WebDavFs::new(&base_url, None, None);
+        let parent = "/d";
+        let child = "/d/AB";
+        let nested = "/d/AB/CDEFGHIJK";
+
+        let _ = fs.remove_dir(nested);
+        let _ = fs.remove_dir(child);
+        let _ = fs.remove_dir(parent);
+
+        fs.create_dir(parent).expect("failed to create parent dir");
+        fs.create_dir(child).expect("failed to create child dir");
+        fs.create_dir(nested).expect("failed to create nested dir");
+
+        // RAII guards ensure cleanup runs even if an assertion panics.
+        // Declared innermost-to-outermost so they drop in the right order.
+        let _guard_nested = CleanupDir {
+            fs: &fs,
+            path: nested,
+        };
+        let _guard_child = CleanupDir {
+            fs: &fs,
+            path: child,
+        };
+        let _guard_parent = CleanupDir {
+            fs: &fs,
+            path: parent,
+        };
+
+        // Metadata on a nested directory path without trailing slash
+        let meta = fs
+            .metadata(nested)
+            .expect("failed to get metadata for nested dir");
+        assert!(meta.is_dir, "expected nested path to be a directory");
+        assert!(!meta.is_file, "expected nested path not to be a file");
+    });
+}
+
 // ============================================================================
 // Range-based I/O tests
 // ============================================================================
@@ -643,6 +725,195 @@ async fn test_webdav_double_flush_read_modify_write() {
             assert!(result[50..70].iter().all(|&b| b == 0xFF));
             assert!(result[70..100].iter().all(|&b| b == 0x00));
         }
+    });
+}
+
+/// Verify that JSON can be written and deserialized back via a buffered
+/// read_to_end + serde_json::from_slice round-trip.  This guards against
+/// regressions where serde_json::from_reader was passed a WebDavFile
+/// directly, causing byte-by-byte HTTP Range requests that appeared to hang.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webdav_json_round_trip_via_buffered_read() {
+    let (base_url, _handle) = setup_test_server().await;
+
+    run_blocking(move || {
+        let fs = WebDavFs::new(&base_url, None, None);
+        let path = "/test_json_roundtrip.json";
+        let _ = fs.remove_file(path);
+        let _guard = CleanupFile { fs: &fs, path };
+
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+        struct Sample {
+            name: String,
+            value: u64,
+        }
+
+        let original = Sample {
+            name: "test_entry".to_string(),
+            value: 42,
+        };
+
+        // Write JSON to a WebDAV-backed file.
+        {
+            let mut f = fs.create_file(path).unwrap();
+            serde_json::to_writer(&mut f, &original).unwrap();
+            f.flush().unwrap();
+        }
+
+        // Read back using read_to_end + from_slice (the correct pattern).
+        {
+            let mut f = fs.open_file(path, OpenOptions::new()).unwrap();
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf).unwrap();
+            let deserialized: Sample = serde_json::from_slice(&buf).unwrap();
+            assert_eq!(deserialized, original);
+        }
+    });
+}
+
+// ============================================================================
+// Overlapping-write regression tests
+// ============================================================================
+
+/// Bug 1 regression: writing a shorter buffer at the same offset as a longer
+/// prior write must preserve the tail bytes of the original.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webdav_write_seek_back_shorter_overwrite() {
+    let (base_url, _handle) = setup_test_server().await;
+
+    run_blocking(move || {
+        let fs = WebDavFs::new(&base_url, None, None);
+        let path = "/test_shorter_overwrite.dat";
+        let _ = fs.remove_file(path);
+        let _guard = CleanupFile { fs: &fs, path };
+
+        let mut f = fs.create_file(path).unwrap();
+        f.write_all(b"aaaaaaaaaa").unwrap(); // 10 bytes at offset 0
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(b"BBB").unwrap(); // 3 bytes at offset 0
+        f.flush().unwrap();
+        drop(f);
+
+        let mut f = fs.open_file(path, OpenOptions::new()).unwrap();
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf.len(), 10);
+        assert_eq!(&buf, b"BBBaaaaaaa");
+    });
+}
+
+/// Bug 2 regression: a chronologically-later write at a lower offset that
+/// fully covers an earlier write at a higher offset must win entirely.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webdav_overlapping_write_later_write_wins() {
+    let (base_url, _handle) = setup_test_server().await;
+
+    run_blocking(move || {
+        let fs = WebDavFs::new(&base_url, None, None);
+        let path = "/test_later_write_wins.dat";
+        let _ = fs.remove_file(path);
+        let _guard = CleanupFile { fs: &fs, path };
+
+        let mut f = fs.create_file(path).unwrap();
+        f.seek(SeekFrom::Start(5)).unwrap();
+        f.write_all(&[b'A'; 10]).unwrap(); // 10 bytes at offset 5
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(&[b'B'; 20]).unwrap(); // 20 bytes at offset 0
+        f.flush().unwrap();
+        drop(f);
+
+        let mut f = fs.open_file(path, OpenOptions::new()).unwrap();
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf.len(), 20);
+        assert!(buf.iter().all(|&b| b == b'B'));
+    });
+}
+
+/// Partial overlap at the end: two writes where the second starts inside the
+/// first's range and extends beyond it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webdav_write_partial_overlap_at_end() {
+    let (base_url, _handle) = setup_test_server().await;
+
+    run_blocking(move || {
+        let fs = WebDavFs::new(&base_url, None, None);
+        let path = "/test_partial_overlap_end.dat";
+        let _ = fs.remove_file(path);
+        let _guard = CleanupFile { fs: &fs, path };
+
+        let mut f = fs.create_file(path).unwrap();
+        f.write_all(&[b'A'; 10]).unwrap(); // 10 bytes at offset 0
+        f.seek(SeekFrom::Start(7)).unwrap();
+        f.write_all(&[b'B'; 10]).unwrap(); // 10 bytes at offset 7
+        f.flush().unwrap();
+        drop(f);
+
+        let mut f = fs.open_file(path, OpenOptions::new()).unwrap();
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf.len(), 17);
+        // bytes 0..7 from first write, bytes 7..17 from second write
+        assert_eq!(&buf[..7], &[b'A'; 7]);
+        assert_eq!(&buf[7..], &[b'B'; 10]);
+    });
+}
+
+/// A later write completely encloses an earlier write; the inner write must
+/// be fully removed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webdav_write_completely_enclosed_by_later_write() {
+    let (base_url, _handle) = setup_test_server().await;
+
+    run_blocking(move || {
+        let fs = WebDavFs::new(&base_url, None, None);
+        let path = "/test_enclosed_write.dat";
+        let _ = fs.remove_file(path);
+        let _guard = CleanupFile { fs: &fs, path };
+
+        let mut f = fs.create_file(path).unwrap();
+        f.seek(SeekFrom::Start(5)).unwrap();
+        f.write_all(&[b'A'; 5]).unwrap(); // 5 bytes at offset 5
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(&[b'B'; 20]).unwrap(); // 20 bytes at offset 0, fully covers the above
+        f.flush().unwrap();
+        drop(f);
+
+        let mut f = fs.open_file(path, OpenOptions::new()).unwrap();
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf.len(), 20);
+        assert!(buf.iter().all(|&b| b == b'B'));
+    });
+}
+
+/// An inner write splits a larger earlier write into a prefix and a suffix,
+/// with the middle replaced by the later write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webdav_write_split_by_inner_write() {
+    let (base_url, _handle) = setup_test_server().await;
+
+    run_blocking(move || {
+        let fs = WebDavFs::new(&base_url, None, None);
+        let path = "/test_split_write.dat";
+        let _ = fs.remove_file(path);
+        let _guard = CleanupFile { fs: &fs, path };
+
+        let mut f = fs.create_file(path).unwrap();
+        f.write_all(&[b'A'; 20]).unwrap(); // 20 bytes at offset 0
+        f.seek(SeekFrom::Start(5)).unwrap();
+        f.write_all(&[b'B'; 5]).unwrap(); // 5 bytes at offset 5
+        f.flush().unwrap();
+        drop(f);
+
+        let mut f = fs.open_file(path, OpenOptions::new()).unwrap();
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf.len(), 20);
+        // prefix: 0..5 = A, middle: 5..10 = B, suffix: 10..20 = A
+        assert_eq!(&buf[..5], &[b'A'; 5]);
+        assert_eq!(&buf[5..10], &[b'B'; 5]);
+        assert_eq!(&buf[10..], &[b'A'; 10]);
     });
 }
 

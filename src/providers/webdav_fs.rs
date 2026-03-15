@@ -374,7 +374,46 @@ impl Write for WebDavFile {
         if buf.is_empty() {
             return Ok(0);
         }
-        self.pending_writes.insert(self.current_pos, buf.to_vec());
+
+        let new_start = self.current_pos;
+        let new_end = new_start + buf.len() as u64;
+
+        // Collect only the keys of overlapping entries, then remove and
+        // process one at a time to avoid cloning data buffers.
+        let overlapping_keys: Vec<u64> = self
+            .pending_writes
+            .range(..new_end)
+            .filter(|&(&offset, data)| offset + data.len() as u64 > new_start)
+            .map(|(&offset, _)| offset)
+            .collect();
+
+        for e_offset in overlapping_keys {
+            let e_data = self.pending_writes.remove(&e_offset).unwrap();
+            let e_end = e_offset + e_data.len() as u64;
+
+            if e_offset >= new_start && e_end <= new_end {
+                // Existing entry entirely within new write: remove it (already done).
+            } else if e_offset < new_start && e_end <= new_end {
+                // Existing entry starts before new write and ends within it:
+                // truncate to [e_offset, new_start).
+                let trimmed = e_data[..(new_start - e_offset) as usize].to_vec();
+                self.pending_writes.insert(e_offset, trimmed);
+            } else if e_offset >= new_start && e_end > new_end {
+                // Existing entry starts within new write and extends past it:
+                // keep the tail at [new_end, e_end).
+                let tail = e_data[(new_end - e_offset) as usize..].to_vec();
+                self.pending_writes.insert(new_end, tail);
+            } else {
+                // Existing entry spans entirely across new write: split into
+                // prefix [e_offset, new_start) and suffix [new_end, e_end).
+                let prefix = e_data[..(new_start - e_offset) as usize].to_vec();
+                let suffix = e_data[(new_end - e_offset) as usize..].to_vec();
+                self.pending_writes.insert(e_offset, prefix);
+                self.pending_writes.insert(new_end, suffix);
+            }
+        }
+
+        self.pending_writes.insert(new_start, buf.to_vec());
         self.current_pos += buf.len() as u64;
         Ok(buf.len())
     }
@@ -404,18 +443,25 @@ impl Write for WebDavFile {
 
         // Apply all pending writes.
         for (&offset, write_data) in &self.pending_writes {
-            let end = offset as usize + write_data.len();
+            let offset_usize = usize::try_from(offset).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "write offset exceeds platform address space",
+                )
+            })?;
+            let end = offset_usize + write_data.len();
             if end > data.len() {
                 data.resize(end, 0);
             }
-            data[offset as usize..end].copy_from_slice(write_data);
+            data[offset_usize..end].copy_from_slice(write_data);
         }
 
         // Upload the modified content.
+        let new_len = data.len() as u64;
         let resp = self
             .client
             .put(&self.url)
-            .body(data.clone())
+            .body(data)
             .send()
             .map_err(std::io::Error::other)?;
         if !resp.status().is_success() {
@@ -425,7 +471,7 @@ impl Write for WebDavFile {
             )));
         }
 
-        self.content_length = data.len() as u64;
+        self.content_length = new_len;
         self.pending_writes.clear();
         Ok(())
     }
@@ -485,7 +531,10 @@ impl FileSystem for WebDavFs {
         &self,
         path: P,
     ) -> Result<Box<dyn Iterator<Item = DirEntry>>, Box<dyn Error>> {
-        let url = self.url_for(&path);
+        let mut url = self.url_for(&path);
+        if !url.ends_with('/') {
+            url.push('/');
+        }
         let xml = self.propfind(&url, "1")?;
         let all_entries = Self::parse_multistatus(&xml);
 
@@ -683,12 +732,31 @@ impl FileSystem for WebDavFs {
         let url = self.url_for(&path);
         match self.client.head(&url).send() {
             Ok(resp) if resp.status().is_success() => true,
+            Ok(resp) if resp.status().as_u16() == 404 => false,
             Ok(resp) if resp.status().as_u16() == 405 => {
                 // HEAD may not be supported for directories on some WebDAV
                 // servers; fall back to a depth-0 PROPFIND to check existence.
+                // Try without trailing slash first, then with.
                 self.propfind(&url, "0").is_ok()
+                    || (!url.ends_with('/') && self.propfind(&format!("{url}/"), "0").is_ok())
             }
-            _ => false,
+            _ => {
+                // The server may have returned a redirect (e.g. 301 for a
+                // directory without trailing slash) that reqwest could not
+                // follow for HEAD.  Retry with a trailing slash.
+                if !url.ends_with('/') {
+                    let dir_url = format!("{url}/");
+                    match self.client.head(&dir_url).send() {
+                        Ok(resp) if resp.status().is_success() => true,
+                        Ok(resp) if resp.status().as_u16() == 405 => {
+                            self.propfind(&dir_url, "0").is_ok()
+                        }
+                        _ => false,
+                    }
+                } else {
+                    false
+                }
+            }
         }
     }
 
@@ -782,12 +850,35 @@ impl FileSystem for WebDavFs {
 
     fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, Box<dyn Error>> {
         let url = self.url_for(&path);
-        let xml = self.propfind(&url, "0")?;
-        let entries = Self::parse_multistatus(&xml);
-        let entry = entries
-            .first()
-            .ok_or("no metadata returned from PROPFIND")?;
-        Ok(metadata_from_propfind(entry))
+
+        match self.propfind(&url, "0") {
+            Ok(xml) => {
+                if let Some(entry) = Self::parse_multistatus(&xml).into_iter().next() {
+                    return Ok(metadata_from_propfind(&entry));
+                }
+                // PROPFIND succeeded but returned no entries — try with trailing slash
+            }
+            Err(e) => {
+                // If the URL already has a trailing slash, no point retrying
+                if url.ends_with('/') {
+                    return Err(e);
+                }
+                // Otherwise fall through to trailing-slash retry
+            }
+        }
+
+        // Retry with trailing slash (for directories)
+        if !url.ends_with('/') {
+            let dir_url = format!("{url}/");
+            let xml = self.propfind(&dir_url, "0")?; // propagate errors
+            let entry = Self::parse_multistatus(&xml)
+                .into_iter()
+                .next()
+                .ok_or("no metadata returned from PROPFIND")?;
+            return Ok(metadata_from_propfind(&entry));
+        }
+
+        Err("no metadata returned from PROPFIND".into())
     }
 
     fn stats<P: AsRef<Path>>(&self, _path: P) -> Result<Stats, Box<dyn Error>> {

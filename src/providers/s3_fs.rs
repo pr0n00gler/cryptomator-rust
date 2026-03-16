@@ -941,9 +941,7 @@ impl FileSystem for S3Fs {
 
         // Delete phase -- only delete source keys whose copy succeeded, plus
         // any orphan keys that had no corresponding destination.
-        let delete_keys = copied_src_keys
-            .into_iter()
-            .chain(orphan_delete_keys);
+        let delete_keys = copied_src_keys.into_iter().chain(orphan_delete_keys);
 
         for src_key in delete_keys {
             let response = self.bucket.delete_object(&src_key).map_err(Self::box_err)?;

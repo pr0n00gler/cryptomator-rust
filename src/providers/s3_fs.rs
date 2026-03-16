@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,13 +11,19 @@ use s3::error::S3Error;
 use s3::region::Region;
 use tempfile::NamedTempFile;
 use thiserror::Error;
-use tracing::warn;
+use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::cryptofs::{DirEntry, File, FileSystem, Metadata, OpenOptions, Stats};
 
 /// Configuration for connecting to S3-compatible storage.
-#[derive(Clone, Debug)]
+///
+/// # Security
+///
+/// The `Debug` implementation redacts credential fields (`access_key`,
+/// `secret_key`, `session_token`) to prevent accidental leakage to logs.
+/// `Clone` is intentionally not derived to discourage unnecessary copies of
+/// credential material in memory.
 pub struct S3FsConfig {
     /// Name of the S3 bucket that holds vault data.
     pub bucket: String,
@@ -51,6 +57,26 @@ pub struct S3FsConfig {
     pub request_timeout: Option<Duration>,
 }
 
+impl std::fmt::Debug for S3FsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3FsConfig")
+            .field("bucket", &self.bucket)
+            .field("prefix", &self.prefix)
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field("force_path_style", &self.force_path_style)
+            .field("validate_bucket", &self.validate_bucket)
+            .field("access_key", &self.access_key.as_ref().map(|_| "[REDACTED]"))
+            .field("secret_key", &self.secret_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "session_token",
+                &self.session_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("request_timeout", &self.request_timeout)
+            .finish()
+    }
+}
+
 /// Errors returned by S3 filesystem initialization and operations.
 #[derive(Debug, Error)]
 pub enum S3FsError {
@@ -75,6 +101,17 @@ pub enum S3FsError {
 }
 
 /// S3-backed filesystem provider.
+///
+/// # Credential lifetime caveat
+///
+/// Although [`S3FsConfig`] wraps credential fields in [`Zeroizing`] wrappers,
+/// the underlying `rust-s3` crate copies them into plain `String` values inside
+/// its [`Credentials`] / [`Bucket`] types. As a result, credential material
+/// will remain in process memory as regular heap-allocated strings for the
+/// lifetime of this struct and cannot be reliably zeroized on drop. If your
+/// threat model requires strict in-memory credential hygiene, consider running
+/// the S3 provider in a short-lived process or using ambient credential
+/// mechanisms (e.g. instance metadata / IRSA) that avoid long-lived secrets.
 #[derive(Clone, Debug)]
 pub struct S3Fs {
     bucket: Arc<Bucket>,
@@ -99,8 +136,7 @@ struct S3File {
 
 enum S3FileInner {
     ReadOnly {
-        size: u64,
-        cursor: u64,
+        cursor: Cursor<Vec<u8>>,
     },
     Staged {
         file: NamedTempFile,
@@ -116,11 +152,13 @@ impl std::fmt::Debug for S3File {
 }
 
 impl S3File {
-    fn new_read_only(bucket: Arc<Bucket>, key: String, size: u64) -> Self {
+    fn new_read_only(bucket: Arc<Bucket>, key: String, data: Vec<u8>) -> Self {
         S3File {
             bucket,
             key,
-            inner: S3FileInner::ReadOnly { size, cursor: 0 },
+            inner: S3FileInner::ReadOnly {
+                cursor: Cursor::new(data),
+            },
         }
     }
 
@@ -166,35 +204,7 @@ impl S3File {
 
     fn read_only_seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         match &mut self.inner {
-            S3FileInner::ReadOnly { size, cursor } => {
-                let new_pos: i64 = match pos {
-                    SeekFrom::Start(offset) => i64::try_from(offset).map_err(|_| {
-                        io::Error::new(io::ErrorKind::InvalidInput, "seek offset too large")
-                    })?,
-                    SeekFrom::Current(offset) => i64::try_from(*cursor)
-                        .map_err(|_| {
-                            io::Error::new(io::ErrorKind::InvalidInput, "cursor overflow")
-                        })?
-                        .checked_add(offset)
-                        .ok_or_else(|| {
-                            io::Error::new(io::ErrorKind::InvalidInput, "seek overflow")
-                        })?,
-                    SeekFrom::End(offset) => i64::try_from(*size)
-                        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "size overflow"))?
-                        .checked_add(offset)
-                        .ok_or_else(|| {
-                            io::Error::new(io::ErrorKind::InvalidInput, "seek overflow")
-                        })?,
-                };
-                if new_pos < 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "invalid seek to a negative position",
-                    ));
-                }
-                *cursor = new_pos as u64;
-                Ok(*cursor)
-            }
+            S3FileInner::ReadOnly { cursor } => cursor.seek(pos),
             S3FileInner::Staged { .. } => {
                 Err(io::Error::other("read_only_seek called on staged file"))
             }
@@ -213,25 +223,7 @@ impl Drop for S3File {
 impl Read for S3File {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match &mut self.inner {
-            S3FileInner::ReadOnly { size, cursor } => {
-                if buf.is_empty() || *cursor >= *size {
-                    return Ok(0);
-                }
-                let end = cursor
-                    .checked_add(buf.len() as u64)
-                    .and_then(|v| v.checked_sub(1))
-                    .map(|v| v.min(*size - 1))
-                    .unwrap_or(*size - 1);
-                let response = self
-                    .bucket
-                    .get_object_range(&self.key, *cursor, Some(end))
-                    .map_err(io::Error::other)?;
-                let data = response.as_slice();
-                let to_copy = data.len().min(buf.len());
-                buf[..to_copy].copy_from_slice(&data[..to_copy]);
-                *cursor += to_copy as u64;
-                Ok(to_copy)
-            }
+            S3FileInner::ReadOnly { cursor } => cursor.read(buf),
             S3FileInner::Staged { file, .. } => file.as_file_mut().read(buf),
         }
     }
@@ -279,7 +271,7 @@ impl Seek for S3File {
 impl File for S3File {
     fn metadata(&self) -> Result<Metadata, Box<dyn std::error::Error>> {
         let size = match &self.inner {
-            S3FileInner::ReadOnly { size, .. } => *size,
+            S3FileInner::ReadOnly { cursor } => cursor.get_ref().len() as u64,
             // Read the actual on-disk temp-file size to avoid reporting a stale
             // high-water-mark when the file has been seeked without writing.
             S3FileInner::Staged { file, .. } => file.as_file().metadata()?.len(),
@@ -463,12 +455,10 @@ impl S3Fs {
         //                     and proceed with creation; for read-only opens we
         //                     surface the original error.
         let head_outcome: Option<bool>;
-        let mut head_meta = None;
         let mut head_error: Option<S3FsError> = None;
 
         match self.bucket.head_object(&key) {
-            Ok((head, status)) if (200..300).contains(&status) => {
-                head_meta = Some(head);
+            Ok((_, status)) if (200..300).contains(&status) => {
                 head_outcome = Some(true);
             }
             Ok((_, 404)) | Err(S3Error::HttpFailWithBody(404, _)) => {
@@ -529,10 +519,19 @@ impl S3Fs {
             if !exists {
                 return Err(S3FsError::NotFound);
             }
-            let head = head_meta.ok_or(S3FsError::MissingContentLength)?;
-            let size = head.content_length.ok_or(S3FsError::MissingContentLength)?;
-            let size = if size < 0 { 0 } else { size as u64 };
-            return Ok(S3File::new_read_only(Arc::clone(&self.bucket), key, size));
+            // Pre-fetch the entire object into memory so that subsequent
+            // `read()` calls are served from a local buffer instead of
+            // issuing one S3 GET per call.
+            let response = self.bucket.get_object(&key)?;
+            let status = response.status_code();
+            if !(200..300).contains(&status) {
+                return Err(S3FsError::HttpStatus {
+                    op: "get_object",
+                    status,
+                });
+            }
+            let data = response.to_vec();
+            return Ok(S3File::new_read_only(Arc::clone(&self.bucket), key, data));
         }
 
         if !(exists || options.create || options.create_new) {
@@ -683,7 +682,14 @@ impl FileSystem for S3Fs {
         }
         let response = match self.bucket.put_object(&dir_prefix, &[]) {
             Ok(response) => response,
-            Err(S3Error::HttpFailWithBody(400, _)) => return Ok(()),
+            Err(S3Error::HttpFailWithBody(400, ref body)) => {
+                debug!(
+                    prefix = %dir_prefix,
+                    body = %body,
+                    "create_dir: ignoring HTTP 400 from put_object"
+                );
+                return Ok(());
+            }
             Err(err) => return Err(Self::box_err(err)),
         };
         let status = response.status_code();
@@ -734,15 +740,20 @@ impl FileSystem for S3Fs {
             return true;
         }
 
-        if let Ok((result, _)) = self
-            .bucket
-            .list_page(key.clone(), None, None, None, Some(1))
-        {
-            if result.contents.iter().any(|object| object.key == key) {
-                return true;
+        // Try an exact HEAD first to avoid false positives from prefix-based
+        // listing (e.g. key "foo" matching object "foobar").
+        match self.bucket.head_object(&key) {
+            Ok((_, status)) if (200..300).contains(&status) => return true,
+            Ok((_, 404)) | Err(S3Error::HttpFailWithBody(404, _)) => {
+                // Object does not exist as a file; fall through to directory check.
+            }
+            _ => {
+                // Ambiguous error (e.g. 500) -- fall through to directory check
+                // rather than returning a definitive answer.
             }
         }
 
+        // Check whether the key represents a directory (has children).
         let dir_prefix = if key.ends_with('/') {
             key
         } else {
@@ -787,6 +798,10 @@ impl FileSystem for S3Fs {
             return Ok(());
         }
 
+        // NOTE: Objects are deleted one-by-one because `rust-s3` (v0.37) does
+        // not expose the S3 multi-object delete (DeleteObjects) API in its
+        // synchronous interface. If a future version adds batch delete support,
+        // this loop should be replaced to reduce the number of HTTP round-trips.
         let results = self
             .bucket
             .list(dir_prefix.clone(), None)
@@ -851,6 +866,23 @@ impl FileSystem for S3Fs {
         self.remove_file(src)
     }
 
+    /// Moves a directory from `src` to `dest` using server-side copies
+    /// followed by deletion of the source objects.
+    ///
+    /// # Non-atomicity and partial failure
+    ///
+    /// S3 does not support atomic directory renames. This method performs the
+    /// move in two phases:
+    ///
+    /// 1. **Copy phase** -- each object under `src` is copied to the
+    ///    corresponding key under `dest`. If any copy fails, the operation
+    ///    stops immediately. Objects that were already copied to `dest` will
+    ///    **not** be cleaned up automatically (the caller may need to remove
+    ///    partial copies manually).
+    /// 2. **Delete phase** -- only source keys whose copy succeeded are
+    ///    deleted. If a delete fails, the operation stops; objects already
+    ///    deleted cannot be recovered, while remaining source objects are left
+    ///    intact. The copied versions at `dest` are considered authoritative.
     fn move_dir<P: AsRef<Path>>(&self, src: P, dest: P) -> Result<(), Box<dyn std::error::Error>> {
         let src_prefix = self.dir_to_prefix(&src).map_err(Self::boxed_error)?;
         let dest_prefix = self.dir_to_prefix(&dest).map_err(Self::boxed_error)?;
@@ -873,14 +905,14 @@ impl FileSystem for S3Fs {
             .map_err(Self::box_err)?;
 
         let mut mappings = Vec::new();
-        let mut delete_keys = Vec::new();
+        let mut orphan_delete_keys = Vec::new();
         for result in results {
             for object in result.contents {
                 let src_key = object.key;
                 let relative = src_key.strip_prefix(&src_prefix).unwrap_or(&src_key);
                 let dest_key = if relative.is_empty() {
                     if dest_prefix.is_empty() {
-                        delete_keys.push(src_key);
+                        orphan_delete_keys.push(src_key);
                         continue;
                     }
                     dest_prefix.clone()
@@ -893,14 +925,19 @@ impl FileSystem for S3Fs {
             }
         }
 
+        // Copy phase -- track which copies succeeded so we only delete those.
+        let mut copied_src_keys: Vec<String> = Vec::with_capacity(mappings.len());
         for (src_key, dest_key) in &mappings {
             self.copy_object(src_key, dest_key)
                 .map_err(Self::boxed_error)?;
+            copied_src_keys.push(src_key.clone());
         }
 
-        for (src_key, _) in &mappings {
-            delete_keys.push(src_key.clone());
-        }
+        // Delete phase -- only delete source keys whose copy succeeded, plus
+        // any orphan keys that had no corresponding destination.
+        let delete_keys = copied_src_keys
+            .into_iter()
+            .chain(orphan_delete_keys.into_iter());
 
         for src_key in delete_keys {
             let response = self.bucket.delete_object(&src_key).map_err(Self::box_err)?;
@@ -931,7 +968,12 @@ impl FileSystem for S3Fs {
         match head_result {
             Ok((head, status)) if (200..300).contains(&status) => {
                 let size = head.content_length.ok_or(S3FsError::MissingContentLength)?;
-                let size = if size < 0 { 0 } else { size as u64 };
+                let size = if size < 0 {
+                    warn!(key = %key, content_length = size, "head_object returned negative content_length; treating as 0");
+                    0
+                } else {
+                    size as u64
+                };
                 Ok(Metadata {
                     is_dir: false,
                     is_file: true,
@@ -977,7 +1019,41 @@ impl FileSystem for S3Fs {
                 op: "head_object",
                 status,
             })),
-            Err(S3Error::HttpFailWithBody(404, _)) => Err(Self::boxed_error(S3FsError::NotFound)),
+            Err(S3Error::HttpFailWithBody(404, _)) => {
+                // Fall through to directory listing check, same as Ok((_, 404))
+                let dir_prefix = self.dir_to_prefix(&path).map_err(Self::boxed_error)?;
+                let (result, status) = self
+                    .bucket
+                    .list_page(
+                        dir_prefix.clone(),
+                        Some("/".to_string()),
+                        None,
+                        None,
+                        Some(1),
+                    )
+                    .map_err(Self::box_err)?;
+                if !(200..300).contains(&status) {
+                    return Err(Self::boxed_error(S3FsError::HttpStatus {
+                        op: "list_objects",
+                        status,
+                    }));
+                }
+                let has_contents = !result.contents.is_empty();
+                let has_prefixes = result
+                    .common_prefixes
+                    .as_ref()
+                    .is_some_and(|prefixes| !prefixes.is_empty());
+                if has_contents || has_prefixes {
+                    Ok(Metadata {
+                        is_dir: true,
+                        is_file: false,
+                        len: 0,
+                        ..Default::default()
+                    })
+                } else {
+                    Err(Self::boxed_error(S3FsError::NotFound))
+                }
+            }
             Err(err) => Err(Self::boxed_error(S3FsError::S3(err))),
         }
     }

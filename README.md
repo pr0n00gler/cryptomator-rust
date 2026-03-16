@@ -78,56 +78,33 @@ Now you can mount it:
 
 ### Using S3 storage
 
-The CLI can use an S3-compatible backend when you pass `--filesystem-provider s3` and a
-JSON config file via `--s3-config`. The `--storage-path` value becomes the S3 prefix
-inside the bucket (the provider will still use the `d/` subfolder under that prefix).
+The CLI can use an S3-compatible backend when you pass `--filesystem-provider s3`.
+S3 configuration is loaded from environment variables (or a `.env` file in the
+working directory).
 
-Example config (`s3_config.json`):
+Environment variables:
 
-```json
-{
-  "bucket": "my-cryptomator-bucket",
-  "prefix": "vaults/demo",
-  "region": "us-east-1",
-  "endpoint": "https://s3.amazonaws.com",
-  "force_path_style": false,
-  "validate_bucket": true,
-  "access_key": "AKIA...",
-  "secret_key": "...",
-  "session_token": null,
-  "request_timeout_seconds": 30
-}
-```
+* `S3_BUCKET` (required) -- name of the S3 bucket
+* `S3_REGION` (required) -- AWS region name (e.g. `us-east-1`)
+* `S3_PREFIX` (optional) -- key prefix inside the bucket
+* `S3_ENDPOINT` (optional) -- custom endpoint URL for S3-compatible services
+* `S3_FORCE_PATH_STYLE` (optional, `true`/`false`) -- use path-style addressing
+* `S3_VALIDATE_BUCKET` (optional, `true`/`false`) -- verify bucket access on startup
+* `S3_ACCESS_KEY` / `S3_SECRET_KEY` (optional; must be provided together)
+* `S3_SESSION_TOKEN` (optional) -- for temporary credentials
+* `S3_REQUEST_TIMEOUT_SECONDS` (optional, integer > 0) -- per-request timeout
 
 Command examples:
 
 ```shell
-cryptomator \
-  --filesystem-provider s3 \
-  --s3-config /path/to/s3_config.json \
-  --storage-path vaults/demo \
-  create
+S3_BUCKET=my-bucket S3_REGION=us-east-1 S3_ACCESS_KEY=AKIA... S3_SECRET_KEY=... \
+  cryptomator --filesystem-provider s3 --storage-path vaults/demo create
 ```
 
 ```shell
-cryptomator \
-  --filesystem-provider s3 \
-  --s3-config /path/to/s3_config.json \
-  --storage-path vaults/demo \
-  unlock
+# Or use a .env file in the current directory
+cryptomator --filesystem-provider s3 --storage-path vaults/demo unlock
 ```
-
-Config fields:
-
-* `bucket` (string, required)
-* `prefix` (string, optional)
-* `region` (string, required)
-* `endpoint` (string, optional, for S3-compatible targets)
-* `force_path_style` (bool, optional)
-* `validate_bucket` (bool, optional; performs a lightweight list request on startup)
-* `access_key` / `secret_key` (string, optional; must be provided together)
-* `session_token` (string, optional)
-* `request_timeout_seconds` (integer, optional; must be > 0)
 
 ### Unlock a vault in read-only mode
 

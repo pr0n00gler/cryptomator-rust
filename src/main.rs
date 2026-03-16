@@ -1,11 +1,11 @@
 use std::env;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::{Parser, ValueEnum};
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use thiserror::Error;
@@ -140,82 +140,68 @@ async fn main() {
         WebDavFs::new(url, user, pass.as_deref().map(|z| z.as_str()))
     };
 
+    // Resolves vault and storage paths based on the filesystem provider.
+    // For S3 the storage_path is ignored (the prefix lives in the S3 config),
+    // so default paths are relative. For local and WebDAV providers the paths
+    // are resolved relative to storage_path.
+    let resolve_paths = |provider: FilesystemProvider| -> (PathBuf, PathBuf) {
+        let vault_path = match opts.vault_path.as_deref() {
+            Some(m) => Path::new(m).to_path_buf(),
+            None => match provider {
+                FilesystemProvider::S3 => Path::new(DEFAULT_VAULT_FILENAME).to_path_buf(),
+                _ => storage_path.join(DEFAULT_VAULT_FILENAME),
+            },
+        };
+        let full_storage_path = match provider {
+            FilesystemProvider::S3 => Path::new(DEFAULT_STORAGE_SUB_FOLDER).to_path_buf(),
+            _ => storage_path.join(DEFAULT_STORAGE_SUB_FOLDER),
+        };
+        (vault_path, full_storage_path)
+    };
+
     match opts.subcmd {
-        Command::Create(c) => match opts.filesystem_provider {
-            FilesystemProvider::Local => {
-                let vault_path = match opts.vault_path.as_deref() {
-                    Some(m) => Path::new(m).to_path_buf(),
-                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
-                };
-                let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
-                create_command(LocalFs::new(), &vault_path, &full_storage_path, c)
+        Command::Create(c) => {
+            let (vault_path, full_storage_path) = resolve_paths(opts.filesystem_provider);
+            match opts.filesystem_provider {
+                FilesystemProvider::Local => {
+                    create_command(LocalFs::new(), &vault_path, &full_storage_path, c)
+                }
+                FilesystemProvider::S3 => {
+                    create_command(require_s3_fs(), &vault_path, &full_storage_path, c)
+                }
+                FilesystemProvider::WebDav => {
+                    create_command(build_webdav(), &vault_path, &full_storage_path, c)
+                }
             }
-            FilesystemProvider::S3 => {
-                let vault_path = match opts.vault_path.as_deref() {
-                    Some(m) => Path::new(m).to_path_buf(),
-                    None => Path::new(DEFAULT_VAULT_FILENAME).to_path_buf(),
-                };
-                let full_storage_path = Path::new(DEFAULT_STORAGE_SUB_FOLDER).to_path_buf();
-                create_command(require_s3_fs(), &vault_path, &full_storage_path, c)
+        }
+        Command::MigrateV7ToV8 => {
+            let (vault_path, _) = resolve_paths(opts.filesystem_provider);
+            match opts.filesystem_provider {
+                FilesystemProvider::Local => {
+                    migrate_v7_to_v8_command(LocalFs::new(), &vault_path)
+                }
+                FilesystemProvider::S3 => {
+                    migrate_v7_to_v8_command(require_s3_fs(), &vault_path)
+                }
+                FilesystemProvider::WebDav => {
+                    migrate_v7_to_v8_command(build_webdav(), &vault_path)
+                }
             }
-            FilesystemProvider::WebDav => {
-                let vault_path = match opts.vault_path.as_deref() {
-                    Some(m) => Path::new(m).to_path_buf(),
-                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
-                };
-                let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
-                create_command(build_webdav(), &vault_path, &full_storage_path, c)
+        }
+        Command::Unlock(u) => {
+            let (vault_path, full_storage_path) = resolve_paths(opts.filesystem_provider);
+            match opts.filesystem_provider {
+                FilesystemProvider::Local => {
+                    unlock_command(LocalFs::new(), &vault_path, &full_storage_path, u).await
+                }
+                FilesystemProvider::S3 => {
+                    unlock_command(require_s3_fs(), &vault_path, &full_storage_path, u).await
+                }
+                FilesystemProvider::WebDav => {
+                    unlock_command(build_webdav(), &vault_path, &full_storage_path, u).await
+                }
             }
-        },
-        Command::MigrateV7ToV8 => match opts.filesystem_provider {
-            FilesystemProvider::Local => {
-                let vault_path = match opts.vault_path.as_deref() {
-                    Some(m) => Path::new(m).to_path_buf(),
-                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
-                };
-                migrate_v7_to_v8_command(LocalFs::new(), &vault_path)
-            }
-            FilesystemProvider::S3 => {
-                let vault_path = match opts.vault_path.as_deref() {
-                    Some(m) => Path::new(m).to_path_buf(),
-                    None => Path::new(DEFAULT_VAULT_FILENAME).to_path_buf(),
-                };
-                migrate_v7_to_v8_command(require_s3_fs(), &vault_path)
-            }
-            FilesystemProvider::WebDav => {
-                let vault_path = match opts.vault_path.as_deref() {
-                    Some(m) => Path::new(m).to_path_buf(),
-                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
-                };
-                migrate_v7_to_v8_command(build_webdav(), &vault_path)
-            }
-        },
-        Command::Unlock(u) => match opts.filesystem_provider {
-            FilesystemProvider::Local => {
-                let vault_path = match opts.vault_path.as_deref() {
-                    Some(m) => Path::new(m).to_path_buf(),
-                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
-                };
-                let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
-                unlock_command(LocalFs::new(), &vault_path, &full_storage_path, u).await
-            }
-            FilesystemProvider::S3 => {
-                let vault_path = match opts.vault_path.as_deref() {
-                    Some(m) => Path::new(m).to_path_buf(),
-                    None => Path::new(DEFAULT_VAULT_FILENAME).to_path_buf(),
-                };
-                let full_storage_path = Path::new(DEFAULT_STORAGE_SUB_FOLDER).to_path_buf();
-                unlock_command(require_s3_fs(), &vault_path, &full_storage_path, u).await
-            }
-            FilesystemProvider::WebDav => {
-                let vault_path = match opts.vault_path.as_deref() {
-                    Some(m) => Path::new(m).to_path_buf(),
-                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
-                };
-                let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
-                unlock_command(build_webdav(), &vault_path, &full_storage_path, u).await
-            }
-        },
+        }
     }
 }
 

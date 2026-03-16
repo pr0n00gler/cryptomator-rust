@@ -66,8 +66,14 @@ impl std::fmt::Debug for S3FsConfig {
             .field("endpoint", &self.endpoint)
             .field("force_path_style", &self.force_path_style)
             .field("validate_bucket", &self.validate_bucket)
-            .field("access_key", &self.access_key.as_ref().map(|_| "[REDACTED]"))
-            .field("secret_key", &self.secret_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "access_key",
+                &self.access_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "secret_key",
+                &self.secret_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field(
                 "session_token",
                 &self.session_token.as_ref().map(|_| "[REDACTED]"),
@@ -937,7 +943,7 @@ impl FileSystem for S3Fs {
         // any orphan keys that had no corresponding destination.
         let delete_keys = copied_src_keys
             .into_iter()
-            .chain(orphan_delete_keys.into_iter());
+            .chain(orphan_delete_keys);
 
         for src_key in delete_keys {
             let response = self.bucket.delete_object(&src_key).map_err(Self::box_err)?;

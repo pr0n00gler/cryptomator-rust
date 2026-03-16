@@ -177,15 +177,9 @@ async fn main() {
         Command::MigrateV7ToV8 => {
             let (vault_path, _) = resolve_paths(opts.filesystem_provider);
             match opts.filesystem_provider {
-                FilesystemProvider::Local => {
-                    migrate_v7_to_v8_command(LocalFs::new(), &vault_path)
-                }
-                FilesystemProvider::S3 => {
-                    migrate_v7_to_v8_command(require_s3_fs(), &vault_path)
-                }
-                FilesystemProvider::WebDav => {
-                    migrate_v7_to_v8_command(build_webdav(), &vault_path)
-                }
+                FilesystemProvider::Local => migrate_v7_to_v8_command(LocalFs::new(), &vault_path),
+                FilesystemProvider::S3 => migrate_v7_to_v8_command(require_s3_fs(), &vault_path),
+                FilesystemProvider::WebDav => migrate_v7_to_v8_command(build_webdav(), &vault_path),
             }
         }
         Command::Unlock(u) => {

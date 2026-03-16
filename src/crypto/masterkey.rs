@@ -186,10 +186,12 @@ impl MasterKey {
 
     /// Returns a new MasterKey instance by reading io::Reader
     pub fn from_reader<R: std::io::Read>(
-        file: R,
+        mut file: R,
         password: &str,
     ) -> Result<MasterKey, MasterKeyError> {
-        let mk_json: MasterKeyJson = serde_json::from_reader(file)?;
+        let mut buf = Zeroizing::new(Vec::new());
+        file.read_to_end(&mut buf)?;
+        let mk_json: MasterKeyJson = serde_json::from_slice(&buf)?;
         MasterKey::from_masterkey_json(mk_json, password)
     }
 }

@@ -297,6 +297,17 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
                             as Box<dyn DavFile>,
                     );
                 }
+                // When truncating an existing file, remove and recreate it
+                // rather than trying to open-with-truncate.  CryptoFsFile::open
+                // always reads the encrypted header, which fails on a
+                // truncated (empty) file.
+                if truncate && write && exists {
+                    crypto_fs.remove_file(&path_buf)?;
+                    return Ok(
+                        Box::new(DFile::new(Box::new(crypto_fs.create_file(&path_buf)?)))
+                            as Box<dyn DavFile>,
+                    );
+                }
                 Ok(Box::new(DFile::new(Box::new(
                     crypto_fs.open_file(
                         &path_buf,

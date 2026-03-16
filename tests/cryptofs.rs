@@ -6,6 +6,8 @@ use rand::distributions::Alphanumeric;
 use rand::{Rng, thread_rng};
 use std::io::{Read, Seek, Write};
 use std::path::Path;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 const TEST_STORAGE_PATH: &str = "tests/test_storage/d";
 const TEST_FILE_PATH: &str = "tests/lorem-ipsum.pdf";
@@ -696,4 +698,303 @@ fn test_read_only_mode_blocks_move_path() {
 
     let result = crypto_fs.move_path("/src.txt", "/dst.txt");
     assert!(matches!(result, Err(FileSystemError::ReadOnly)));
+}
+
+// ============================================================================
+// Open File Limit Tests
+// ============================================================================
+
+/// Helper: build a `CryptoFs` backed by an in-memory filesystem with a custom
+/// `max_open_files` limit.
+fn make_crypto_fs_with_limit(max_open_files: usize) -> CryptoFs<MemoryFs> {
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+    let mem_fs = MemoryFs::new();
+    CryptoFs::new(
+        VFS_STORAGE_PATH,
+        cryptor,
+        mem_fs,
+        CryptoFsConfig {
+            max_open_files,
+            ..CryptoFsConfig::default()
+        },
+    )
+    .unwrap()
+}
+
+/// Opening exactly `max_open_files` handles must succeed; attempting to open
+/// one more must return `TooManyOpenFiles` instead of forwarding the call to
+/// the OS (which would eventually raise EMFILE and panic the process).
+#[test]
+fn test_open_file_limit_returns_error_when_exceeded() {
+    const LIMIT: usize = 3;
+    let crypto_fs = make_crypto_fs_with_limit(LIMIT);
+
+    // Pre-create the files so that `open_file` (not `create_file`) is used.
+    for i in 0..LIMIT {
+        let path = format!("/file{i}.dat");
+        let mut f = crypto_fs.create_file(&path).unwrap();
+        f.write_all(b"data").unwrap();
+        // Drop immediately so the slot is returned to the pool.
+    }
+
+    // Now open LIMIT files simultaneously, keeping the handles alive.
+    let mut handles: Vec<_> = (0..LIMIT)
+        .map(|i| {
+            let path = format!("/file{i}.dat");
+            crypto_fs
+                .open_file(&path, OpenOptions::new())
+                .unwrap_or_else(|_| panic!("handle {i} should open successfully"))
+        })
+        .collect();
+
+    assert_eq!(
+        crypto_fs.open_file_count(),
+        LIMIT,
+        "counter must equal LIMIT while all handles are alive"
+    );
+
+    // One more open must fail with the correct error variant.
+    let result = crypto_fs.open_file("/file0.dat", OpenOptions::new());
+    assert!(
+        matches!(result, Err(FileSystemError::TooManyOpenFiles)),
+        "expected TooManyOpenFiles, got {result:?}"
+    );
+
+    // Releasing one handle must free the slot.
+    handles.pop();
+
+    assert_eq!(
+        crypto_fs.open_file_count(),
+        LIMIT - 1,
+        "counter must decrease after a handle is dropped"
+    );
+
+    // Now the open must succeed again.
+    let _new_handle = crypto_fs
+        .open_file("/file0.dat", OpenOptions::new())
+        .expect("open must succeed after a slot is freed");
+
+    assert_eq!(
+        crypto_fs.open_file_count(),
+        LIMIT,
+        "counter must be back at LIMIT after re-opening"
+    );
+}
+
+/// `create_file` must also respect the open-file limit.
+#[test]
+fn test_create_file_limit_returns_error_when_exceeded() {
+    const LIMIT: usize = 2;
+    let crypto_fs = make_crypto_fs_with_limit(LIMIT);
+
+    // Fill the pool via create_file.
+    let _h1 = crypto_fs.create_file("/a.dat").unwrap();
+    let _h2 = crypto_fs.create_file("/b.dat").unwrap();
+
+    assert_eq!(crypto_fs.open_file_count(), LIMIT);
+
+    // A third create must be rejected.
+    let result = crypto_fs.create_file("/c.dat");
+    assert!(
+        matches!(result, Err(FileSystemError::TooManyOpenFiles)),
+        "expected TooManyOpenFiles on create_file, got {result:?}"
+    );
+}
+
+/// When all handles are dropped the counter must return to zero.
+#[test]
+fn test_open_file_count_returns_to_zero_after_all_handles_dropped() {
+    const LIMIT: usize = 5;
+    let crypto_fs = make_crypto_fs_with_limit(LIMIT);
+
+    {
+        let mut handles: Vec<_> = (0..LIMIT)
+            .map(|i| {
+                let path = format!("/file{i}.dat");
+                crypto_fs.create_file(&path).unwrap()
+            })
+            .collect();
+
+        assert_eq!(crypto_fs.open_file_count(), LIMIT);
+        // Drop all handles inside this block.
+        handles.clear();
+    }
+
+    assert_eq!(
+        crypto_fs.open_file_count(),
+        0,
+        "counter must be zero after all handles are dropped"
+    );
+}
+
+/// Concurrent opens from multiple threads must never exceed the configured
+/// limit.  This test opens files from many threads simultaneously, keeping
+/// handles alive across all attempts, and verifies:
+/// - the counter never exceeds the limit at any point in time
+/// - every outcome is either `Ok` or `TooManyOpenFiles` (never a panic)
+/// - the counter returns to zero after all handles are dropped
+#[test]
+fn test_open_file_limit_is_respected_under_concurrent_access() {
+    const LIMIT: usize = 4;
+    const THREADS: usize = 8;
+    // Each thread will try to open this many handles concurrently.
+    const OPENS_PER_THREAD: usize = 3;
+
+    let crypto_fs = Arc::new(make_crypto_fs_with_limit(LIMIT));
+
+    // Pre-create one file per thread-slot combination so we have enough
+    // distinct files to avoid OS-level sharing constraints.
+    for i in 0..THREADS * OPENS_PER_THREAD {
+        let path = format!("/shared_{i}.dat");
+        let mut f = crypto_fs.create_file(&path).unwrap();
+        f.write_all(b"shared data").unwrap();
+    }
+
+    let barrier = Arc::new(Barrier::new(THREADS));
+    let mut join_handles = Vec::with_capacity(THREADS);
+
+    for t in 0..THREADS {
+        let fs = Arc::clone(&crypto_fs);
+        let b = Arc::clone(&barrier);
+
+        join_handles.push(thread::spawn(move || {
+            // All threads reach this point together to maximise contention.
+            b.wait();
+
+            // Open multiple handles and keep them all alive simultaneously
+            // to create real concurrent pressure on the limit.
+            let mut live_handles = Vec::new();
+            let mut limit_errors = 0usize;
+
+            for i in 0..OPENS_PER_THREAD {
+                let path = format!("/shared_{}.dat", t * OPENS_PER_THREAD + i);
+                match fs.open_file(&path, OpenOptions::new()) {
+                    Ok(handle) => {
+                        // Verify the counter never exceeds the limit while
+                        // all handles in this thread are alive.
+                        let count = fs.open_file_count();
+                        assert!(
+                            count <= LIMIT,
+                            "open_file_count ({count}) exceeded limit ({LIMIT})"
+                        );
+                        // Keep the handle alive to hold the slot.
+                        live_handles.push(handle);
+                    }
+                    Err(FileSystemError::TooManyOpenFiles) => {
+                        limit_errors += 1;
+                    }
+                    Err(e) => panic!("unexpected error: {e:?}"),
+                }
+            }
+
+            // Verify invariant once more while all handles are still live.
+            let count = fs.open_file_count();
+            assert!(
+                count <= LIMIT,
+                "open_file_count ({count}) exceeded limit ({LIMIT}) after all opens"
+            );
+
+            // Drop all handles in this thread.
+            drop(live_handles);
+
+            limit_errors
+        }));
+    }
+
+    for handle in join_handles {
+        let _limit_errors = handle.join().expect("thread panicked");
+        // Any mix of successes and TooManyOpenFiles is valid; the key
+        // invariant is that the counter never exceeded the limit.
+    }
+
+    // After all threads finish, the counter must be back to zero.
+    assert_eq!(
+        crypto_fs.open_file_count(),
+        0,
+        "counter must be zero after all threads complete"
+    );
+}
+
+/// Internal operations like `read_dir` and `metadata` on nested paths open
+/// internal metadata files (`dir.c9r`, `name.c9s`) through the same guard
+/// budget.  When the budget is exhausted by CryptoFsFile handles, these
+/// operations must return `TooManyOpenFiles` instead of causing an OS-level
+/// EMFILE panic.
+#[test]
+fn test_internal_ops_respect_open_file_limit() {
+    const LIMIT: usize = 3;
+
+    // Step 1: create the directory structure using one CryptoFs instance.
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+    let mem_fs = MemoryFs::new();
+    let setup_fs = CryptoFs::new(
+        VFS_STORAGE_PATH,
+        cryptor,
+        mem_fs.clone(),
+        CryptoFsConfig::default(),
+    )
+    .unwrap();
+
+    setup_fs.create_dir("/parent").unwrap();
+    let mut f = setup_fs.create_file("/parent/child.dat").unwrap();
+    f.write_all(b"test data").unwrap();
+    drop(f);
+
+    for i in 0..LIMIT {
+        let path = format!("/root_file_{i}.dat");
+        let mut f = setup_fs.create_file(&path).unwrap();
+        f.write_all(b"data").unwrap();
+    }
+    drop(setup_fs);
+
+    // Step 2: open a FRESH CryptoFs instance sharing the same underlying
+    // MemoryFs but with a **cold cache**.  This forces `resolve_component`
+    // to actually open `dir.c9r` files, exercising the guard.
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+    let crypto_fs = CryptoFs::new(
+        VFS_STORAGE_PATH,
+        cryptor,
+        mem_fs,
+        CryptoFsConfig {
+            max_open_files: LIMIT,
+            ..CryptoFsConfig::default()
+        },
+    )
+    .unwrap();
+
+    // Fill the guard budget with user-facing CryptoFsFile handles.
+    let mut handles = Vec::new();
+    for i in 0..LIMIT {
+        let path = format!("/root_file_{i}.dat");
+        handles.push(crypto_fs.open_file(&path, OpenOptions::new()).unwrap());
+    }
+    assert_eq!(crypto_fs.open_file_count(), LIMIT);
+
+    // With all user-facing slots taken, internal operations like `read_dir`
+    // and `metadata` should still succeed because they do NOT consume
+    // user-facing FD budget.
+    let entries: Vec<_> = crypto_fs.read_dir("/parent").unwrap().collect();
+    assert_eq!(entries.len(), 1, "should have one file in /parent");
+    assert_eq!(entries[0].file_name, "child.dat");
+
+    let metadata = crypto_fs.metadata("/parent/child.dat").unwrap();
+    assert!(!metadata.is_dir);
+
+    // But opening another user-facing file handle should still fail.
+    let result = crypto_fs.open_file("/parent/child.dat", OpenOptions::new());
+    assert!(
+        matches!(result, Err(FileSystemError::TooManyOpenFiles)),
+        "opening another user-facing file should fail with TooManyOpenFiles, got {result:?}"
+    );
+
+    // After releasing handles, user-facing opens succeed again.
+    handles.clear();
+    assert_eq!(crypto_fs.open_file_count(), 0);
+
+    let _file = crypto_fs
+        .open_file("/parent/child.dat", OpenOptions::new())
+        .expect("should succeed after releasing handles");
 }

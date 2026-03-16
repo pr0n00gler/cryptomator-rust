@@ -1,5 +1,5 @@
 use std::env;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -17,12 +17,11 @@ use cryptomator::crypto::{
     DEFAULT_VAULT_FILENAME, MasterKey, MasterKeyJson, Vault,
 };
 use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem, OpenOptions, parent_path};
-use cryptomator::logging::init_logger;
-
 use cryptomator::frontends::auth::WebDavAuth;
 use cryptomator::frontends::mount::mount_nfs;
 use cryptomator::frontends::mount::*;
-use cryptomator::providers::{LocalFs, S3Fs, S3FsConfig};
+use cryptomator::logging::init_logger;
+use cryptomator::providers::{LocalFs, S3Fs, S3FsConfig, WebDavFs};
 
 const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
 
@@ -39,6 +38,7 @@ pub enum S3ConfigError {
 enum FilesystemProvider {
     Local,
     S3,
+    WebDav,
 }
 
 #[derive(Parser)]
@@ -52,9 +52,17 @@ struct Opts {
     #[arg(short, long)]
     vault_path: Option<String>,
 
-    /// Filesystem provider. Supported values: "local" and "s3"
+    /// Filesystem provider. Supported values: "local", "web-dav" and "s3"
     #[arg(value_enum, default_value_t = FilesystemProvider::Local)]
     filesystem_provider: FilesystemProvider,
+
+    /// WebDAV server URL for the WebDav filesystem provider
+    #[arg(long)]
+    webdav_provider_url: Option<String>,
+
+    /// WebDAV server username for the WebDav filesystem provider
+    #[arg(long)]
+    webdav_provider_user: Option<String>,
 
     /// Log level
     #[arg(short, long, default_value = "info")]
@@ -117,11 +125,24 @@ async fn main() {
 
     let storage_path = Path::new(opts.storage_path.as_str()).to_path_buf();
 
+    let build_webdav = || {
+        let url = opts
+            .webdav_provider_url
+            .as_deref()
+            .expect("--webdav-provider-url is required for web-dav provider");
+        let user = opts.webdav_provider_user.as_deref();
+        let pass = user.map(|u| {
+            Zeroizing::new(
+                rpassword::prompt_password(format!("WebDAV provider password for {u}: "))
+                    .expect("Unable to read WebDAV provider password"),
+            )
+        });
+        WebDavFs::new(url, user, pass.as_deref().map(|z| z.as_str()))
+    };
+
     match opts.subcmd {
         Command::Create(c) => match opts.filesystem_provider {
             FilesystemProvider::Local => {
-                // For the local provider the storage_path IS the on-disk directory
-                // that contains vault.cryptomator, so we join it as a prefix here.
                 let vault_path = match opts.vault_path.as_deref() {
                     Some(m) => Path::new(m).to_path_buf(),
                     None => storage_path.join(DEFAULT_VAULT_FILENAME),
@@ -130,16 +151,20 @@ async fn main() {
                 create_command(LocalFs::new(), &vault_path, &full_storage_path, c)
             }
             FilesystemProvider::S3 => {
-                // For the S3 provider the prefix is already encoded in S3FsConfig.
-                // Paths passed to FileSystem are resolved relative to that prefix,
-                // so vault.cryptomator lives at the prefix root — never prepend
-                // storage_path again or it would be doubled in every S3 key.
                 let vault_path = match opts.vault_path.as_deref() {
                     Some(m) => Path::new(m).to_path_buf(),
                     None => Path::new(DEFAULT_VAULT_FILENAME).to_path_buf(),
                 };
                 let full_storage_path = Path::new(DEFAULT_STORAGE_SUB_FOLDER).to_path_buf();
                 create_command(require_s3_fs(), &vault_path, &full_storage_path, c)
+            }
+            FilesystemProvider::WebDav => {
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
+                };
+                let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
+                create_command(build_webdav(), &vault_path, &full_storage_path, c)
             }
         },
         Command::MigrateV7ToV8 => match opts.filesystem_provider {
@@ -156,6 +181,13 @@ async fn main() {
                     None => Path::new(DEFAULT_VAULT_FILENAME).to_path_buf(),
                 };
                 migrate_v7_to_v8_command(require_s3_fs(), &vault_path)
+            }
+            FilesystemProvider::WebDav => {
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
+                };
+                migrate_v7_to_v8_command(build_webdav(), &vault_path)
             }
         },
         Command::Unlock(u) => match opts.filesystem_provider {
@@ -175,6 +207,14 @@ async fn main() {
                 let full_storage_path = Path::new(DEFAULT_STORAGE_SUB_FOLDER).to_path_buf();
                 unlock_command(require_s3_fs(), &vault_path, &full_storage_path, u).await
             }
+            FilesystemProvider::WebDav => {
+                let vault_path = match opts.vault_path.as_deref() {
+                    Some(m) => Path::new(m).to_path_buf(),
+                    None => storage_path.join(DEFAULT_VAULT_FILENAME),
+                };
+                let full_storage_path = storage_path.join(DEFAULT_STORAGE_SUB_FOLDER);
+                unlock_command(build_webdav(), &vault_path, &full_storage_path, u).await
+            }
         },
     }
 }
@@ -185,9 +225,6 @@ fn create_command<FS: FileSystem, P: AsRef<Path>>(
     full_storage_path: P,
     c: Create,
 ) {
-    // Wrap immediately in Zeroizing so the plaintext password is wiped from
-    // the heap when `pass` goes out of scope at the end of this function,
-    // regardless of the return path.
     let pass = Zeroizing::new(
         rpassword::prompt_password("Vault password: ").expect("Unable to read password"),
     );
@@ -229,8 +266,6 @@ fn create_command<FS: FileSystem, P: AsRef<Path>>(
 }
 
 fn migrate_v7_to_v8_command<FS: FileSystem, P: AsRef<Path>>(fs: FS, vault_path: P) {
-    // Wrap immediately in Zeroizing so the plaintext password is wiped from
-    // the heap when `pass` drops at the end of this function.
     let pass = Zeroizing::new(
         rpassword::prompt_password("Vault password: ").expect("Unable to read password"),
     );
@@ -241,16 +276,13 @@ fn migrate_v7_to_v8_command<FS: FileSystem, P: AsRef<Path>>(fs: FS, vault_path: 
         .open_file(&mk_path, OpenOptions::new())
         .expect("Failed to open masterkey file");
 
-    // Deserialize into a local binding that is consumed (not cloned) below.
-    // Cloning MasterKeyJson would leave a second copy of the base64-encoded
-    // wrapped key material on the heap with no zeroize semantics — a full
-    // vault-compromise vector if the process is inspected via crash dump or
-    // memory scan.
+    let mut mk_bytes = Zeroizing::new(Vec::new());
+    mk_file
+        .read_to_end(&mut mk_bytes)
+        .expect("failed to read masterkey file");
     let mk_json: MasterKeyJson =
-        serde_json::from_reader(&mut mk_file).expect("failed to read masterkey file");
+        serde_json::from_slice(&mk_bytes).expect("failed to parse masterkey file");
 
-    // Snapshot the non-sensitive fields we need to reconstruct the masterkey
-    // file BEFORE consuming mk_json.  These are all public, non-secret values.
     let scrypt_salt = mk_json.scryptSalt.clone();
     let scrypt_cost_param = mk_json.scryptCostParam;
     let scrypt_block_size = mk_json.scryptBlockSize;
@@ -260,13 +292,8 @@ fn migrate_v7_to_v8_command<FS: FileSystem, P: AsRef<Path>>(fs: FS, vault_path: 
     fs.remove_file(&mk_path)
         .expect("failed to delete old masterkey file");
 
-    // Consume mk_json — no clone.  The base64-encoded wrapped keys inside it
-    // are moved into from_masterkey_json and dropped at the end of that call.
     let masterkey = MasterKey::from_masterkey_json(mk_json, pass.as_str())
         .expect("Failed to decrypt master key file");
-    // `pass` is no longer needed after key derivation.  Drop it explicitly
-    // here so the plaintext password bytes are zeroed before the function
-    // continues — rather than waiting until the end of the outer scope.
     drop(pass);
 
     let mut key: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(64));
@@ -282,10 +309,6 @@ fn migrate_v7_to_v8_command<FS: FileSystem, P: AsRef<Path>>(fs: FS, vault_path: 
     )
     .expect("failed to create vault");
 
-    // Recompute the versionMac over the new version number (999) using the
-    // unwrapped HMAC master key.  We rebuild MasterKeyJson from scratch rather
-    // than mutating a leftover clone, so there is never a second live copy of
-    // the wrapped key material.
     let new_version: u32 = 999;
     let mut version_mac: Hmac<Sha256> =
         Hmac::new_from_slice(masterkey.hmac_master_key.as_ref()).unwrap();
@@ -324,10 +347,6 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
     full_storage_path: P,
     u: Unlock,
 ) {
-    // Wrap immediately in Zeroizing so the plaintext vault password is wiped
-    // from the heap as soon as key derivation finishes.  The `Zeroizing`
-    // binding is dropped at the end of the inner block below, before any
-    // long-running async server tasks are started.
     let vault = {
         let pass = Zeroizing::new(
             rpassword::prompt_password("Vault password: ").expect("Unable to read password"),
@@ -335,7 +354,6 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
         info!("Unlocking the storage...");
         info!("Deriving keys...");
         Vault::open(&fs, vault_path, pass.as_str()).expect("failed to open vault")
-        // `pass` is dropped (and zeroed) here — before the server loop begins.
     };
 
     let cryptor = Cryptor::new(vault);
@@ -360,11 +378,6 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
 
     if let Some(webdav_listen_address) = &u.webdav_listen_address {
         let auth = u.webdav_user.as_ref().map(|user| {
-            // SEC: always prompt for the WebDAV password interactively.
-            // Accepting it via a CLI flag would expose the credential in shell
-            // history and `ps` output.
-            // Wrap in Zeroizing immediately so the plaintext password is wiped
-            // from the heap when `webdav_pass` drops at the end of this closure.
             let webdav_pass = Zeroizing::new(
                 rpassword::prompt_password(format!("WebDAV password for {user}: "))
                     .expect("Unable to read WebDAV password"),
@@ -382,18 +395,6 @@ async fn unlock_command<FS: 'static + FileSystem, P: AsRef<Path>>(
 }
 
 /// Loads S3 configuration from environment variables.
-///
-/// Environment variables:
-/// - `S3_BUCKET` (required): Name of the S3 bucket
-/// - `S3_PREFIX` (optional): Key prefix within the bucket
-/// - `S3_REGION` (required): AWS region name
-/// - `S3_ENDPOINT` (optional): Custom endpoint URL for S3-compatible services
-/// - `S3_FORCE_PATH_STYLE` (optional): Use path-style bucket addressing
-/// - `S3_VALIDATE_BUCKET` (optional): Validate bucket accessibility on startup
-/// - `S3_ACCESS_KEY` (optional): AWS access key ID
-/// - `S3_SECRET_KEY` (optional): AWS secret access key
-/// - `S3_SESSION_TOKEN` (optional): Session token for temporary credentials
-/// - `S3_REQUEST_TIMEOUT_SECONDS` (optional): Per-request timeout in seconds
 fn load_s3_from_env() -> Result<S3FsConfig, S3ConfigError> {
     let bucket = env::var("S3_BUCKET")
         .map_err(|_| S3ConfigError::MissingConfig("S3_BUCKET is required".to_string()))?;
@@ -463,7 +464,6 @@ fn load_s3_from_env() -> Result<S3FsConfig, S3ConfigError> {
 /// Loads the S3 filesystem from environment variables, or exits the process
 /// with a user-facing error message if initialization fails.
 fn require_s3_fs() -> S3Fs {
-    // Try to load .env file if it exists (does not fail if not present)
     let _ = dotenv();
 
     let config = match load_s3_from_env() {

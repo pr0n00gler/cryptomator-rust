@@ -44,6 +44,12 @@ impl From<FileSystemError> for FsError {
                 res
             }
             FileSystemError::InvalidPathError(_) => FsError::Forbidden,
+            // Surface the open-file limit as a retriable server error rather
+            // than letting the OS panic the whole process with EMFILE.
+            FileSystemError::TooManyOpenFiles => {
+                warn!("WebDAV open file limit reached; rejecting with GeneralFailure");
+                FsError::GeneralFailure
+            }
             e => {
                 error!("WebDAV filesystem error: {:?}", e);
                 FsError::GeneralFailure
@@ -291,6 +297,17 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
                             as Box<dyn DavFile>,
                     );
                 }
+                // When truncating an existing file, remove and recreate it
+                // rather than trying to open-with-truncate.  CryptoFsFile::open
+                // always reads the encrypted header, which fails on a
+                // truncated (empty) file.
+                if truncate && write && exists {
+                    crypto_fs.remove_file(&path_buf)?;
+                    return Ok(
+                        Box::new(DFile::new(Box::new(crypto_fs.create_file(&path_buf)?)))
+                            as Box<dyn DavFile>,
+                    );
+                }
                 Ok(Box::new(DFile::new(Box::new(
                     crypto_fs.open_file(
                         &path_buf,
@@ -532,6 +549,11 @@ mod tests {
         assert_eq!(
             FsError::from(FileSystemError::UnknownError("unknown".to_string())),
             FsError::GeneralFailure
+        );
+        assert_eq!(
+            FsError::from(FileSystemError::TooManyOpenFiles),
+            FsError::GeneralFailure,
+            "TooManyOpenFiles must map to GeneralFailure so the client retries"
         );
     }
 

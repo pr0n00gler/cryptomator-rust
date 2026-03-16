@@ -4,8 +4,16 @@
 
 This is pure-Rust implementation of the [Cryptomator](cryptomator.org) project.
 
-Right now this is a minimal command-line program that unlocks vaults of vault format 7.
+Right now this is a minimal command-line program that unlocks vaults of vault format 8.
 After the unlock the vault content can then be accessed via an embedded WebDAV server.
+
+> ### Notice of Non-Affiliation and Disclaimer
+> 
+> Cryptomator Rust is not affiliated, associated, authorized, endorsed by, or in any way officially connected with Cryptomator™, or any of its subsidiaries or its affiliates.
+>
+> The official Cryptomator™ website can be found at https://cryptomator.org.
+> 
+> The name Cryptomator™ as well as related names, marks, emblems and images are registered trademarks of their respective owners.
 
 ## Disclaimer
 
@@ -14,18 +22,16 @@ evaluation purposes.
 
 ## Features
 
-* Full support of the original Cryptomator vaults of vault format 7.
+* Full support of the original Cryptomator vaults of vault format 8.
 * Works with local vaults
 * Unlocked content can be accessed via an embedded WebDav or NFS server;
-* Windows/Unix support
 * Experimental S3-compatible storage provider (library use)
+* Unix support
 * Read-only mode for safe vault access
 
 ## Work in progress
 
-* Dropbox, Google Drive, OneDrive and other cloud storages to work with without synchronizing with a local directory
-* GUI
-* Log coverage
+* Dropbox, Google Drive, OneDrive, S3 compatible and other cloud storages to work with without synchronizing with a local directory.
 
 ## Building
 

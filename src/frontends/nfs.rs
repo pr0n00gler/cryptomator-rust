@@ -1,4 +1,4 @@
-use crate::cryptofs::{CryptoFs, FileSystem, Metadata, OpenOptions};
+use crate::cryptofs::{CryptoFs, FileSystem, FileSystemError, Metadata, OpenOptions};
 use async_trait::async_trait;
 use nfsserve::nfs::{fattr3, fileid3, ftype3, nfsstat3, nfsstring, nfstime3, sattr3, specdata3};
 use nfsserve::vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
@@ -7,7 +7,27 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
+
+/// Maps a `FileSystemError` to an appropriate NFS status code.
+///
+/// `TooManyOpenFiles` is mapped to `NFS3ERR_JUKEBOX` ("resource temporarily
+/// unavailable — retry later") rather than `NFS3ERR_IO` (a non-retriable I/O
+/// error).  This is the closest semantic match in the NFSv3 vocabulary and
+/// tells well-behaved clients to back off and retry instead of reporting a
+/// hard failure.
+fn fs_err_to_nfsstat(e: &FileSystemError) -> nfsstat3 {
+    match e {
+        FileSystemError::TooManyOpenFiles => {
+            warn!("NFS open file limit reached; returning NFS3ERR_JUKEBOX");
+            nfsstat3::NFS3ERR_JUKEBOX
+        }
+        FileSystemError::PathDoesNotExist(_) => nfsstat3::NFS3ERR_NOENT,
+        FileSystemError::InvalidPathError(_) => nfsstat3::NFS3ERR_INVAL,
+        FileSystemError::ReadOnly => nfsstat3::NFS3ERR_ROFS,
+        _ => nfsstat3::NFS3ERR_IO,
+    }
+}
 
 /// All NFS file-handle bookkeeping lives in a single struct protected by a
 /// single `Mutex`.
@@ -318,7 +338,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
                 .open_file(&path, *OpenOptions::new().read(true))
                 .map_err(|e| {
                     error!("Failed to open file for read: {:?}", e);
-                    nfsstat3::NFS3ERR_IO
+                    fs_err_to_nfsstat(&e)
                 })?;
 
             // Get the cleartext file size
@@ -368,7 +388,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
                 .open_file(&path, *OpenOptions::new().write(true).read(true))
                 .map_err(|e| {
                     error!("Failed to open file for write: {:?}", e);
-                    nfsstat3::NFS3ERR_IO
+                    fs_err_to_nfsstat(&e)
                 })?;
 
             file.seek(SeekFrom::Start(offset)).map_err(|e| {
@@ -422,7 +442,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         let metadata = tokio::task::spawn_blocking(move || {
             let file = crypto_fs.create_file(&file_path_clone).map_err(|e| {
                 error!("Failed to create file: {:?}", e);
-                nfsstat3::NFS3ERR_IO
+                fs_err_to_nfsstat(&e)
             })?;
 
             // Explicitly drop the file to ensure it's closed and flushed
@@ -471,7 +491,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
             crypto_fs.create_file(&file_path_clone).map_err(|e| {
                 error!("Failed to create file exclusively: {:?}", e);
-                nfsstat3::NFS3ERR_IO
+                fs_err_to_nfsstat(&e)
             })?;
             Ok(())
         })

@@ -1,4 +1,4 @@
-.PHONY: clippy test build run
+.PHONY: clippy test build run gui
 
 clippy:
 	rustup component add clippy || true
@@ -12,3 +12,9 @@ build: clippy test
 
 run:
 	cargo run
+
+gui: clippy test
+	cargo build --release --features gui --bin cryptomator-gui
+
+run-gui:
+	cargo run --features gui --bin cryptomator-gui

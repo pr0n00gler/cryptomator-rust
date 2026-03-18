@@ -9,7 +9,7 @@ use eframe::egui;
 use zeroize::Zeroizing;
 
 use cryptomator::crypto::{Cryptor, Vault, DEFAULT_VAULT_FILENAME};
-use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem};
+use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem, IoStats};
 use cryptomator::frontends::auth::WebDavAuth;
 use cryptomator::frontends::mount::{mount_nfs, mount_webdav};
 use cryptomator::operations::{create_vault, migrate_v7_to_v8, DEFAULT_STORAGE_SUB_FOLDER};
@@ -30,6 +30,8 @@ enum LogMsg {
     ServerRunning(String),
     /// The server has stopped (vault locked).
     ServerStopped(String),
+    /// Carries IoStats from the unlock thread to the GUI.
+    Stats(IoStats),
 }
 
 /// Shared log buffer that is rendered in the status area.
@@ -135,6 +137,14 @@ struct CryptomatorGui {
     unlock_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     /// True while a server (WebDAV/NFS) is actively serving.
     unlocked: Arc<Mutex<bool>>,
+
+    // -- I/O stats --
+    io_stats: Option<IoStats>,
+    prev_bytes_read: u64,
+    prev_bytes_written: u64,
+    last_stats_instant: std::time::Instant,
+    read_throughput: f64,
+    write_throughput: f64,
 }
 
 impl Default for CryptomatorGui {
@@ -169,6 +179,13 @@ impl Default for CryptomatorGui {
 
             unlock_shutdown: None,
             unlocked: Arc::new(Mutex::new(false)),
+
+            io_stats: None,
+            prev_bytes_read: 0,
+            prev_bytes_written: 0,
+            last_stats_instant: std::time::Instant::now(),
+            read_throughput: 0.0,
+            write_throughput: 0.0,
         }
     }
 }
@@ -219,6 +236,17 @@ impl CryptomatorGui {
                     self.log.push(LogLevel::Info, s);
                     *self.unlocked.lock().unwrap_or_else(|e| e.into_inner()) = false;
                     self.unlock_shutdown = None;
+                    self.io_stats = None;
+                    self.read_throughput = 0.0;
+                    self.write_throughput = 0.0;
+                }
+                LogMsg::Stats(stats) => {
+                    self.prev_bytes_read = stats.bytes_read();
+                    self.prev_bytes_written = stats.bytes_written();
+                    self.io_stats = Some(stats);
+                    self.read_throughput = 0.0;
+                    self.write_throughput = 0.0;
+                    self.last_stats_instant = std::time::Instant::now();
                 }
             }
         }
@@ -273,10 +301,7 @@ impl CryptomatorGui {
         if mem_usage > 2_147_483_648 {
             self.log.push(
                 LogLevel::Error,
-                format!(
-                    "Scrypt parameters too large: 128 * r * N = {} exceeds 2 GB limit.",
-                    mem_usage
-                ),
+                format!("Scrypt parameters too large: 128 * r * N = {mem_usage} exceeds 2 GB limit."),
             );
             return;
         }
@@ -423,6 +448,7 @@ impl CryptomatorGui {
 
         std::thread::spawn(move || {
             let _guard = BusyGuard(busy);
+            #[allow(clippy::too_many_arguments)]
             fn do_unlock<FS: FileSystem + 'static>(
                 fs: FS,
                 vault_path: &Path,
@@ -453,6 +479,8 @@ impl CryptomatorGui {
 
                 let crypto_fs = CryptoFs::new(full_path_str, cryptor, fs, config)
                     .map_err(|e| anyhow::anyhow!("Failed to initialize storage: {e}"))?;
+
+                let _ = tx.send(LogMsg::Stats(crypto_fs.io_stats().clone()));
 
                 let rt = tokio::runtime::Runtime::new()
                     .map_err(|e| anyhow::anyhow!("Failed to create tokio runtime: {e}"))?;
@@ -562,7 +590,7 @@ impl CryptomatorGui {
                 ui.add_space(4.0);
                 labeled_text_field(ui, "URL:", &mut self.webdav_provider_url, "https://example.com/dav");
                 labeled_text_field(ui, "Username:", &mut self.webdav_provider_user, "");
-                labeled_password_field(ui, "Password:", &mut *self.webdav_provider_pass);
+                labeled_password_field(ui, "Password:", &mut self.webdav_provider_pass);
             });
         }
     }
@@ -710,7 +738,7 @@ impl CryptomatorGui {
                     labeled_password_field(
                         ui,
                         "WebDAV auth password:",
-                        &mut *self.webdav_frontend_pass,
+                        &mut self.webdav_frontend_pass,
                     );
                 }
             }
@@ -771,6 +799,56 @@ impl CryptomatorGui {
         });
     }
 
+    fn update_stats(&mut self) {
+        if let Some(ref stats) = self.io_stats {
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(self.last_stats_instant).as_secs_f64();
+            if elapsed >= 1.0 {
+                let current_read = stats.bytes_read();
+                let current_written = stats.bytes_written();
+
+                let read_delta = current_read.saturating_sub(self.prev_bytes_read);
+                let write_delta = current_written.saturating_sub(self.prev_bytes_written);
+
+                self.read_throughput = read_delta as f64 / elapsed;
+                self.write_throughput = write_delta as f64 / elapsed;
+
+                self.prev_bytes_read = current_read;
+                self.prev_bytes_written = current_written;
+                self.last_stats_instant = now;
+            }
+        }
+    }
+
+    fn draw_stats_panel(&self, ui: &mut egui::Ui) {
+        if let Some(ref stats) = self.io_stats {
+            let total_read = stats.bytes_read();
+            let total_written = stats.bytes_written();
+
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 16.0;
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Read: {} ({})  ",
+                        format_bytes_per_sec(self.read_throughput),
+                        format_bytes(total_read),
+                    ))
+                    .color(egui::Color32::from_rgb(100, 180, 255))
+                    .monospace(),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Write: {} ({})  ",
+                        format_bytes_per_sec(self.write_throughput),
+                        format_bytes(total_written),
+                    ))
+                    .color(egui::Color32::from_rgb(255, 180, 100))
+                    .monospace(),
+                );
+            });
+        }
+    }
+
     fn draw_log_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Status");
@@ -827,6 +905,30 @@ fn labeled_password_field(ui: &mut egui::Ui, label: &str, value: &mut String) {
     });
 }
 
+fn format_bytes_per_sec(bps: f64) -> String {
+    if bps >= 1_073_741_824.0 {
+        format!("{:.1} GB/s", bps / 1_073_741_824.0)
+    } else if bps >= 1_048_576.0 {
+        format!("{:.1} MB/s", bps / 1_048_576.0)
+    } else if bps >= 1024.0 {
+        format!("{:.1} KB/s", bps / 1024.0)
+    } else {
+        format!("{bps:.0} B/s")
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // eframe::App implementation
 // ---------------------------------------------------------------------------
@@ -835,10 +937,14 @@ impl eframe::App for CryptomatorGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Drain background messages.
         self.drain_log_channel();
+        self.update_stats();
 
-        // If busy or unlocked, request continuous repaints so we pick up log messages.
-        if self.is_busy() || *self.unlocked.lock().unwrap_or_else(|e| e.into_inner()) {
+        // Fast polling while busy (waiting for log messages from background threads).
+        // Once unlocked and idle, repaint once per second to update the stats panel.
+        if self.is_busy() {
             ctx.request_repaint();
+        } else if *self.unlocked.lock().unwrap_or_else(|e| e.into_inner()) {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
 
         // Sidebar with tab navigation.
@@ -882,6 +988,15 @@ impl eframe::App for CryptomatorGui {
             .show(ctx, |ui| {
                 self.draw_log_panel(ui);
             });
+
+        // Stats panel (only visible when vault is unlocked, sits above the log).
+        if self.io_stats.is_some() {
+            egui::TopBottomPanel::bottom("stats_panel")
+                .resizable(false)
+                .show(ctx, |ui| {
+                    self.draw_stats_panel(ui);
+                });
+        }
 
         // Central panel with the active tab content.
         egui::CentralPanel::default().show(ctx, |ui| {

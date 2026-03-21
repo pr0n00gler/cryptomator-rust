@@ -1445,9 +1445,10 @@ fn do_simple_mount<FS: FileSystem + 'static>(
             return false;
         }
 
-        // Run macOS mount_nfs command.
+        // Mount the NFS share to the user-specified folder.
         let _ = tx_clone.send(LogMsg::Info(format!("Mounting to {mount_folder_owned}...")));
 
+        #[cfg(target_os = "macos")]
         let mount_result = tokio::process::Command::new("mount_nfs")
             .arg("-o")
             .arg(format!(
@@ -1455,6 +1456,17 @@ fn do_simple_mount<FS: FileSystem + 'static>(
             ))
             .arg("127.0.0.1:/")
             .arg(&mount_folder_owned)
+            .output()
+            .await;
+
+        #[cfg(target_os = "unix")]
+        let mount_result = tokio::process::Command::new("mount.nfs")
+            .arg(format!("127.0.0.1:/"))
+            .arg(&mount_folder_owned)
+            .arg("-o")
+            .arg(format!(
+                "nolocks,locallocks,vers=3,tcp,port={port},mountport={port},rsize=65536,wsize=65536"
+            ))
             .output()
             .await;
 
@@ -1466,14 +1478,14 @@ fn do_simple_mount<FS: FileSystem + 'static>(
                     )));
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                    let _ = tx_clone.send(LogMsg::Error(format!("mount_nfs failed: {stderr}")));
+                    let _ = tx_clone.send(LogMsg::Error(format!("NFS mount failed: {stderr}")));
                     nfs_handle.abort();
                     return false;
                 }
             }
             Err(e) => {
                 let _ = tx_clone.send(LogMsg::Error(format!(
-                    "Failed to run mount_nfs command: {e}"
+                    "Failed to run NFS mount command: {e}"
                 )));
                 nfs_handle.abort();
                 return false;

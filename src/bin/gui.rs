@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -70,6 +70,7 @@ enum Tab {
     Create,
     Unlock,
     Migrate,
+    Advanced,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -117,7 +118,10 @@ struct CryptomatorGui {
     scrypt_cost: String,
     scrypt_block_size: String,
 
-    // -- unlock fields --
+    // -- simple mount fields (Unlock tab) --
+    mount_folder: String,
+
+    // -- advanced unlock fields --
     frontend: Frontend,
     webdav_listen_address: String,
     webdav_frontend_user: String,
@@ -137,6 +141,9 @@ struct CryptomatorGui {
     unlock_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     /// True while a server (WebDAV/NFS) is actively serving.
     unlocked: Arc<Mutex<bool>>,
+    /// When using simple mount mode, stores the active mount folder path
+    /// so we know what to `umount` on lock.
+    active_mount_folder: Option<String>,
 
     // -- I/O stats --
     io_stats: Option<IoStats>,
@@ -165,6 +172,8 @@ impl Default for CryptomatorGui {
             scrypt_cost: "16384".to_owned(),
             scrypt_block_size: "8".to_owned(),
 
+            mount_folder: String::new(),
+
             frontend: Frontend::Nfs,
             webdav_listen_address: "127.0.0.1:8080".to_owned(),
             webdav_frontend_user: String::new(),
@@ -179,6 +188,7 @@ impl Default for CryptomatorGui {
 
             unlock_shutdown: None,
             unlocked: Arc::new(Mutex::new(false)),
+            active_mount_folder: None,
 
             io_stats: None,
             prev_bytes_read: 0,
@@ -236,6 +246,7 @@ impl CryptomatorGui {
                     self.log.push(LogLevel::Info, s);
                     *self.unlocked.lock().unwrap_or_else(|e| e.into_inner()) = false;
                     self.unlock_shutdown = None;
+                    self.active_mount_folder = None;
                     self.io_stats = None;
                     self.read_throughput = 0.0;
                     self.write_throughput = 0.0;
@@ -433,6 +444,189 @@ impl CryptomatorGui {
         });
     }
 
+    /// Simple mount mode: find a free port, start NFS server, then run
+    /// `mount_nfs` OS command to mount the share to the user-specified folder.
+    fn run_simple_mount(&mut self) {
+        if self.storage_path.is_empty() {
+            self.log
+                .push(LogLevel::Error, "Storage path is required.".into());
+            return;
+        }
+        if self.vault_password.is_empty() {
+            self.log
+                .push(LogLevel::Error, "Password is required.".into());
+            return;
+        }
+        if self.mount_folder.is_empty() {
+            self.log
+                .push(LogLevel::Error, "Mount folder is required.".into());
+            return;
+        }
+
+        // Validate mount folder path: must be absolute and not a system directory.
+        {
+            let mount_path = Path::new(&self.mount_folder);
+            if !mount_path.is_absolute() {
+                self.log.push(
+                    LogLevel::Error,
+                    "Mount folder must be an absolute path.".into(),
+                );
+                return;
+            }
+            const FORBIDDEN_DIRS: &[&str] = &[
+                "/", "/etc", "/usr", "/bin", "/sbin", "/System", "/var", "/tmp", "/private",
+                "/Library", "/dev", "/proc", "/boot", "/opt", "/home", "/Volumes",
+            ];
+
+            // Check the raw path first.
+            let raw_str = match mount_path.to_str() {
+                Some(s) => s,
+                None => {
+                    self.log.push(
+                        LogLevel::Error,
+                        "Mount folder path contains non-UTF-8 characters.".into(),
+                    );
+                    return;
+                }
+            };
+            let raw_trimmed = raw_str.trim_end_matches('/');
+            if FORBIDDEN_DIRS.iter().any(|d| raw_trimmed == *d) {
+                self.log.push(
+                    LogLevel::Error,
+                    format!(
+                        "Mount folder must not be a system directory: {}",
+                        self.mount_folder
+                    ),
+                );
+                return;
+            }
+
+            // Normalize the path to resolve ".." and "." segments, then re-check.
+            let mut normalized = PathBuf::new();
+            for component in mount_path.components() {
+                match component {
+                    Component::ParentDir => {
+                        normalized.pop();
+                    }
+                    Component::CurDir => {}
+                    c => normalized.push(c),
+                }
+            }
+            let normalized_str = match normalized.to_str() {
+                Some(s) => s,
+                None => {
+                    self.log.push(
+                        LogLevel::Error,
+                        "Normalized mount path contains non-UTF-8 characters.".into(),
+                    );
+                    return;
+                }
+            };
+            let normalized_trimmed = normalized_str.trim_end_matches('/');
+
+            if FORBIDDEN_DIRS.iter().any(|d| normalized_trimmed == *d) {
+                self.log.push(
+                    LogLevel::Error,
+                    format!(
+                        "Mount folder resolves to a system directory: {}",
+                        normalized_trimmed
+                    ),
+                );
+                return;
+            }
+
+            // Also reject paths that are children of forbidden directories
+            // (e.g. /etc/myvault, /dev/something).
+            if FORBIDDEN_DIRS
+                .iter()
+                .any(|d| *d != "/" && normalized_trimmed.starts_with(&format!("{d}/")))
+            {
+                self.log.push(
+                    LogLevel::Error,
+                    format!(
+                        "Mount folder must not be inside a system directory: {}",
+                        normalized_trimmed
+                    ),
+                );
+                return;
+            }
+        }
+
+        let vault_path = self.resolved_vault_path();
+        let full_storage_path = self.full_storage_path();
+        let password = Zeroizing::new(String::from(&**self.vault_password));
+        let tx = self.log_tx.clone();
+        let busy = self.busy.clone();
+        let provider = self.fs_provider;
+        let webdav_url = self.webdav_provider_url.clone();
+        let webdav_user = self.webdav_provider_user.clone();
+        let webdav_pass = Zeroizing::new(String::from(&**self.webdav_provider_pass));
+        let read_only = self.read_only;
+        let mount_folder = self.mount_folder.clone();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        self.unlock_shutdown = Some(shutdown_tx);
+        self.active_mount_folder = Some(mount_folder.clone());
+
+        self.set_busy(true);
+        self.log.push(LogLevel::Info, "Mounting vault...".into());
+
+        std::thread::spawn(move || {
+            let _guard = BusyGuard(busy);
+
+            let result = match provider {
+                FsProvider::Local => do_simple_mount(
+                    LocalFs::new(),
+                    &vault_path,
+                    &full_storage_path,
+                    password.as_str(),
+                    read_only,
+                    &mount_folder,
+                    &tx,
+                    shutdown_rx,
+                ),
+                FsProvider::WebDav => {
+                    let user = if webdav_user.is_empty() {
+                        None
+                    } else {
+                        Some(webdav_user.as_str())
+                    };
+                    let pass = if webdav_pass.is_empty() {
+                        None
+                    } else {
+                        Some(webdav_pass.as_str())
+                    };
+                    do_simple_mount(
+                        WebDavFs::new(&webdav_url, user, pass),
+                        &vault_path,
+                        &full_storage_path,
+                        password.as_str(),
+                        read_only,
+                        &mount_folder,
+                        &tx,
+                        shutdown_rx,
+                    )
+                }
+            };
+
+            match result {
+                Ok(()) => {
+                    let _ = tx.send(LogMsg::ServerStopped(
+                        "Vault unmounted. Server stopped.".into(),
+                    ));
+                }
+                Err(e) => {
+                    let _ = tx.send(LogMsg::Error(format!("Mount failed: {e:#}")));
+                    let _ = tx.send(LogMsg::ServerStopped(
+                        "Mount failed. Server stopped.".into(),
+                    ));
+                }
+            }
+        });
+    }
+
+    /// Advanced mode unlock: starts the NFS or WebDAV server without OS-level
+    /// mounting (the user connects manually).
     fn run_unlock(&mut self) {
         if self.storage_path.is_empty() {
             self.log
@@ -476,6 +670,7 @@ impl CryptomatorGui {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         self.unlock_shutdown = Some(shutdown_tx);
+        self.active_mount_folder = None;
 
         self.set_busy(true);
         self.log.push(LogLevel::Info, "Unlocking vault...".into());
@@ -609,17 +804,56 @@ impl CryptomatorGui {
                 }
                 Err(e) => {
                     let _ = tx.send(LogMsg::Error(format!("Unlock failed: {e:#}")));
-                    let _ = tx.send(LogMsg::Done("Unlock failed.".into()));
+                    let _ = tx.send(LogMsg::ServerStopped(
+                        "Unlock failed. Server stopped.".into(),
+                    ));
                 }
             }
         });
     }
 
+    /// Lock/unmount: if we are in simple mount mode, run `umount` first, then
+    /// send the shutdown signal. For advanced mode, just send the shutdown.
     fn run_lock(&mut self) {
-        if let Some(tx) = self.unlock_shutdown.take() {
-            let _ = tx.send(());
-            self.log.push(LogLevel::Info, "Locking vault...".into());
+        // Guard against double-click: if shutdown was already taken, do nothing.
+        if self.unlock_shutdown.is_none() {
+            return;
         }
+        let shutdown_tx = self.unlock_shutdown.take();
+        let folder = self.active_mount_folder.clone();
+        let log_tx = self.log_tx.clone();
+        let busy = self.busy.clone();
+
+        self.set_busy(true);
+        self.log.push(LogLevel::Info, "Locking vault...".into());
+
+        std::thread::spawn(move || {
+            let _guard = BusyGuard(busy);
+            if let Some(folder) = folder {
+                let _ = log_tx.send(LogMsg::Info(format!("Unmounting {folder}...")));
+
+                let output = std::process::Command::new("umount").arg(&folder).output();
+
+                match output {
+                    Ok(out) => {
+                        if out.status.success() {
+                            let _ = log_tx
+                                .send(LogMsg::Info(format!("Unmounted {folder} successfully.")));
+                        } else {
+                            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                            let _ = log_tx.send(LogMsg::Error(format!("umount warning: {stderr}")));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = log_tx.send(LogMsg::Error(format!("Failed to run umount: {e}")));
+                    }
+                }
+            }
+
+            if let Some(tx) = shutdown_tx {
+                let _ = tx.send(());
+            }
+        });
     }
 
     // -- UI drawing --------------------------------------------------------
@@ -728,7 +962,68 @@ impl CryptomatorGui {
     }
 
     fn draw_unlock_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Unlock Vault");
+        ui.heading("Mount Vault");
+        ui.add_space(8.0);
+
+        self.draw_storage_fields(ui);
+        ui.add_space(8.0);
+        self.draw_fs_provider_section(ui);
+        ui.add_space(8.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Vault password:");
+            ui.add(
+                egui::TextEdit::singleline(&mut *self.vault_password)
+                    .password(true)
+                    .desired_width(300.0),
+            );
+        });
+
+        ui.add_space(8.0);
+
+        ui.checkbox(&mut self.read_only, "Read-only mode");
+
+        ui.add_space(8.0);
+
+        labeled_text_field(
+            ui,
+            "Mount folder:",
+            &mut self.mount_folder,
+            "/Volumes/MyVault",
+        );
+
+        ui.add_space(12.0);
+
+        let busy = self.is_busy();
+        let unlocked = *self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
+
+        if unlocked {
+            ui.add_enabled_ui(!busy, |ui| {
+                if ui
+                    .button(
+                        egui::RichText::new("  Unmount  ")
+                            .size(16.0)
+                            .color(egui::Color32::from_rgb(255, 100, 100)),
+                    )
+                    .clicked()
+                {
+                    self.run_lock();
+                }
+            });
+        } else {
+            ui.add_enabled_ui(!busy && !unlocked, |ui| {
+                if ui
+                    .button(egui::RichText::new("  Mount  ").size(16.0))
+                    .clicked()
+                {
+                    self.run_simple_mount();
+                }
+            });
+        }
+    }
+
+    fn draw_advanced_tab(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Advanced Settings");
         ui.add_space(8.0);
 
         self.draw_storage_fields(ui);
@@ -752,7 +1047,7 @@ impl CryptomatorGui {
         ui.add_space(8.0);
 
         ui.group(|ui| {
-            ui.label("Mount Frontend");
+            ui.label("Frontend Server");
             ui.add_space(4.0);
 
             ui.horizontal(|ui| {
@@ -799,20 +1094,22 @@ impl CryptomatorGui {
         let unlocked = *self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
 
         if unlocked {
-            if ui
-                .button(
-                    egui::RichText::new("  Lock Vault  ")
-                        .size(16.0)
-                        .color(egui::Color32::from_rgb(255, 100, 100)),
-                )
-                .clicked()
-            {
-                self.run_lock();
-            }
-        } else {
             ui.add_enabled_ui(!busy, |ui| {
                 if ui
-                    .button(egui::RichText::new("  Unlock & Mount  ").size(16.0))
+                    .button(
+                        egui::RichText::new("  Stop Server  ")
+                            .size(16.0)
+                            .color(egui::Color32::from_rgb(255, 100, 100)),
+                    )
+                    .clicked()
+                {
+                    self.run_lock();
+                }
+            });
+        } else {
+            ui.add_enabled_ui(!busy && !unlocked, |ui| {
+                if ui
+                    .button(egui::RichText::new("  Start Server  ").size(16.0))
                     .clicked()
                 {
                     self.run_unlock();
@@ -1031,6 +1328,13 @@ impl eframe::App for CryptomatorGui {
                 {
                     self.active_tab = Tab::Migrate;
                 }
+                ui.add_space(4.0);
+                if ui
+                    .selectable_label(self.active_tab == Tab::Advanced, "Advanced")
+                    .clicked()
+                {
+                    self.active_tab = Tab::Advanced;
+                }
             });
 
         // Bottom panel for status/log.
@@ -1057,8 +1361,147 @@ impl eframe::App for CryptomatorGui {
                 Tab::Create => self.draw_create_tab(ui),
                 Tab::Unlock => self.draw_unlock_tab(ui),
                 Tab::Migrate => self.draw_migrate_tab(ui),
+                Tab::Advanced => self.draw_advanced_tab(ui),
             });
         });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn do_simple_mount<FS: FileSystem + 'static>(
+    fs: FS,
+    vault_path: &Path,
+    full_storage_path: &Path,
+    password: &str,
+    read_only: bool,
+    mount_folder: &str,
+    tx: &mpsc::Sender<LogMsg>,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) -> anyhow::Result<()> {
+    let _ = tx.send(LogMsg::Info("Deriving keys...".into()));
+    let vault = Vault::open(&fs, vault_path, password)
+        .map_err(|e| anyhow::anyhow!("Failed to open vault: {e}"))?;
+
+    let cryptor = Cryptor::new(vault);
+    let config = CryptoFsConfig {
+        read_only,
+        ..Default::default()
+    };
+
+    let full_path_str = full_storage_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid storage path encoding"))?;
+
+    let crypto_fs = CryptoFs::new(full_path_str, cryptor, fs, config)
+        .map_err(|e| anyhow::anyhow!("Failed to initialize storage: {e}"))?;
+
+    let _ = tx.send(LogMsg::Stats(crypto_fs.io_stats().clone()));
+
+    // Find an available port.
+    let _ = tx.send(LogMsg::Info("Finding available port...".into()));
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .map_err(|e| anyhow::anyhow!("Failed to find available port: {e}"))?;
+        listener.local_addr()?.port()
+    };
+    let listen_address = format!("127.0.0.1:{port}");
+    let _ = tx.send(LogMsg::Info(format!("Using port {port} for server")));
+
+    // Create mount folder if it doesn't exist.
+    std::fs::create_dir_all(mount_folder)
+        .map_err(|e| anyhow::anyhow!("Failed to create mount folder '{mount_folder}': {e}"))?;
+
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| anyhow::anyhow!("Failed to create tokio runtime: {e}"))?;
+
+    let mount_folder_owned = mount_folder.to_owned();
+    let tx_clone = tx.clone();
+
+    let mount_succeeded = rt.block_on(async {
+        // Spawn the NFS server as a background task.
+        let nfs_handle = tokio::spawn(mount_nfs(listen_address.clone(), crypto_fs));
+
+        // Wait briefly for the NFS server to start listening, then
+        // verify it is reachable before running the OS mount command.
+        let mut connected = false;
+        for attempt in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if tokio::net::TcpStream::connect(&listen_address)
+                .await
+                .is_ok()
+            {
+                connected = true;
+                break;
+            }
+            if attempt == 19 {
+                let _ = tx_clone.send(LogMsg::Error(
+                    "Timed out waiting for server to start".into(),
+                ));
+            }
+        }
+
+        if !connected {
+            nfs_handle.abort();
+            return false;
+        }
+
+        // Run macOS mount_nfs command.
+        let _ = tx_clone.send(LogMsg::Info(format!("Mounting to {mount_folder_owned}...")));
+
+        let mount_result = tokio::process::Command::new("mount_nfs")
+            .arg("-o")
+            .arg(format!(
+                "nolocks,locallocks,vers=3,tcp,port={port},mountport={port},rsize=65536,wsize=65536"
+            ))
+            .arg("127.0.0.1:/")
+            .arg(&mount_folder_owned)
+            .output()
+            .await;
+
+        match mount_result {
+            Ok(output) => {
+                if output.status.success() {
+                    let _ = tx_clone.send(LogMsg::ServerRunning(format!(
+                        "Vault mounted at {mount_folder_owned}"
+                    )));
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    let _ = tx_clone.send(LogMsg::Error(format!("mount_nfs failed: {stderr}")));
+                    nfs_handle.abort();
+                    return false;
+                }
+            }
+            Err(e) => {
+                let _ = tx_clone.send(LogMsg::Error(format!(
+                    "Failed to run mount_nfs command: {e}"
+                )));
+                nfs_handle.abort();
+                return false;
+            }
+        }
+
+        // Wait until shutdown is requested or NFS server exits.
+        tokio::select! {
+            result = nfs_handle => {
+                match result {
+                    Ok(()) => {}
+                    Err(e) => {
+                        let _ = tx_clone.send(LogMsg::Error(format!(
+                            "NFS server task failed: {e}"
+                        )));
+                    }
+                }
+            }
+            _ = shutdown_rx => {}
+        }
+
+        true
+    });
+
+    if mount_succeeded {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("Mount failed"))
     }
 }
 

@@ -310,7 +310,6 @@ impl<FS: FileSystem> NfsServer<FS> {
             }
         };
 
-        // Issue #11: directories should have nlink >= 2 (self + parent).
         let nlink = if metadata.is_dir { 2 } else { 1 };
 
         fattr3 {
@@ -755,8 +754,6 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         let file_path_clone = file_path.clone();
 
         tokio::task::spawn_blocking(move || {
-            // Issue #8: distinguish files from directories and call the
-            // appropriate removal method.
             let metadata = crypto_fs
                 .metadata(&file_path_clone)
                 .map_err(|e| fs_err_to_nfsstat(&e))?;
@@ -862,8 +859,6 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             nfsstat3::NFS3ERR_IO
         })??;
 
-        // Issue #13: skip entries where filename_string() fails instead
-        // of using unwrap_or_default().
         let mut resolved_entries: Vec<(String, fileid3, Metadata)> = Vec::new();
         for entry in entries {
             let name = match entry.filename_string() {

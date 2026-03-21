@@ -8,11 +8,11 @@ use std::sync::{Arc, Mutex};
 use eframe::egui;
 use zeroize::Zeroizing;
 
-use cryptomator::crypto::{Cryptor, Vault, DEFAULT_VAULT_FILENAME};
+use cryptomator::crypto::{Cryptor, DEFAULT_VAULT_FILENAME, Vault};
 use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem, IoStats};
 use cryptomator::frontends::auth::WebDavAuth;
 use cryptomator::frontends::mount::{mount_nfs, mount_webdav};
-use cryptomator::operations::{create_vault, migrate_v7_to_v8, DEFAULT_STORAGE_SUB_FOLDER};
+use cryptomator::operations::{DEFAULT_STORAGE_SUB_FOLDER, create_vault, migrate_v7_to_v8};
 use cryptomator::providers::{LocalFs, WebDavFs};
 
 // ---------------------------------------------------------------------------
@@ -256,28 +256,33 @@ impl CryptomatorGui {
 
     fn run_create(&mut self) {
         if self.storage_path.is_empty() {
-            self.log.push(LogLevel::Error, "Storage path is required.".into());
+            self.log
+                .push(LogLevel::Error, "Storage path is required.".into());
             return;
         }
         if self.vault_password.is_empty() {
-            self.log.push(LogLevel::Error, "Password is required.".into());
+            self.log
+                .push(LogLevel::Error, "Password is required.".into());
             return;
         }
         if *self.vault_password != *self.vault_password_confirm {
-            self.log.push(LogLevel::Error, "Passwords do not match.".into());
+            self.log
+                .push(LogLevel::Error, "Passwords do not match.".into());
             return;
         }
         let scrypt_cost: u64 = match self.scrypt_cost.parse() {
             Ok(v) => v,
             Err(_) => {
-                self.log.push(LogLevel::Error, "Invalid scrypt cost value.".into());
+                self.log
+                    .push(LogLevel::Error, "Invalid scrypt cost value.".into());
                 return;
             }
         };
         let scrypt_block_size: u32 = match self.scrypt_block_size.parse() {
             Ok(v) => v,
             Err(_) => {
-                self.log.push(LogLevel::Error, "Invalid scrypt block size.".into());
+                self.log
+                    .push(LogLevel::Error, "Invalid scrypt block size.".into());
                 return;
             }
         };
@@ -301,7 +306,9 @@ impl CryptomatorGui {
         if mem_usage > 2_147_483_648 {
             self.log.push(
                 LogLevel::Error,
-                format!("Scrypt parameters too large: 128 * r * N = {mem_usage} exceeds 2 GB limit."),
+                format!(
+                    "Scrypt parameters too large: 128 * r * N = {mem_usage} exceeds 2 GB limit."
+                ),
             );
             return;
         }
@@ -331,8 +338,16 @@ impl CryptomatorGui {
                     scrypt_block_size,
                 ),
                 FsProvider::WebDav => {
-                    let user = if webdav_user.is_empty() { None } else { Some(webdav_user.as_str()) };
-                    let pass = if webdav_pass.is_empty() { None } else { Some(webdav_pass.as_str()) };
+                    let user = if webdav_user.is_empty() {
+                        None
+                    } else {
+                        Some(webdav_user.as_str())
+                    };
+                    let pass = if webdav_pass.is_empty() {
+                        None
+                    } else {
+                        Some(webdav_pass.as_str())
+                    };
                     create_vault(
                         WebDavFs::new(&webdav_url, user, pass),
                         &vault_path,
@@ -344,10 +359,14 @@ impl CryptomatorGui {
                 }
             };
             match result {
-                Ok(()) => { let _ = tx.send(LogMsg::Done("Vault created successfully.".into())); }
+                Ok(()) => {
+                    let _ = tx.send(LogMsg::Done("Vault created successfully.".into()));
+                }
                 Err(e) => {
                     let _ = tx.send(LogMsg::Error(format!("Create failed: {e:#}")));
-                    let _ = tx.send(LogMsg::Done("Create operation finished with errors.".into()));
+                    let _ = tx.send(LogMsg::Done(
+                        "Create operation finished with errors.".into(),
+                    ));
                 }
             }
         });
@@ -355,11 +374,13 @@ impl CryptomatorGui {
 
     fn run_migrate(&mut self) {
         if self.storage_path.is_empty() {
-            self.log.push(LogLevel::Error, "Storage path is required.".into());
+            self.log
+                .push(LogLevel::Error, "Storage path is required.".into());
             return;
         }
         if self.vault_password.is_empty() {
-            self.log.push(LogLevel::Error, "Password is required.".into());
+            self.log
+                .push(LogLevel::Error, "Password is required.".into());
             return;
         }
 
@@ -373,7 +394,8 @@ impl CryptomatorGui {
         let webdav_pass = Zeroizing::new(String::from(&**self.webdav_provider_pass));
 
         self.set_busy(true);
-        self.log.push(LogLevel::Info, "Migrating vault v7 -> v8...".into());
+        self.log
+            .push(LogLevel::Info, "Migrating vault v7 -> v8...".into());
 
         std::thread::spawn(move || {
             let _guard = BusyGuard(busy);
@@ -382,8 +404,16 @@ impl CryptomatorGui {
                     migrate_v7_to_v8(LocalFs::new(), &vault_path, password.as_str())
                 }
                 FsProvider::WebDav => {
-                    let user = if webdav_user.is_empty() { None } else { Some(webdav_user.as_str()) };
-                    let pass = if webdav_pass.is_empty() { None } else { Some(webdav_pass.as_str()) };
+                    let user = if webdav_user.is_empty() {
+                        None
+                    } else {
+                        Some(webdav_user.as_str())
+                    };
+                    let pass = if webdav_pass.is_empty() {
+                        None
+                    } else {
+                        Some(webdav_pass.as_str())
+                    };
                     migrate_v7_to_v8(
                         WebDavFs::new(&webdav_url, user, pass),
                         &vault_path,
@@ -392,7 +422,9 @@ impl CryptomatorGui {
                 }
             };
             match result {
-                Ok(()) => { let _ = tx.send(LogMsg::Done("Migration completed successfully.".into())); }
+                Ok(()) => {
+                    let _ = tx.send(LogMsg::Done("Migration completed successfully.".into()));
+                }
                 Err(e) => {
                     let _ = tx.send(LogMsg::Error(format!("Migration failed: {e:#}")));
                     let _ = tx.send(LogMsg::Done("Migration finished with errors.".into()));
@@ -403,11 +435,13 @@ impl CryptomatorGui {
 
     fn run_unlock(&mut self) {
         if self.storage_path.is_empty() {
-            self.log.push(LogLevel::Error, "Storage path is required.".into());
+            self.log
+                .push(LogLevel::Error, "Storage path is required.".into());
             return;
         }
         if self.vault_password.is_empty() {
-            self.log.push(LogLevel::Error, "Password is required.".into());
+            self.log
+                .push(LogLevel::Error, "Password is required.".into());
             return;
         }
 
@@ -490,13 +524,17 @@ impl CryptomatorGui {
                         let auth = if webdav_fe_user.is_empty() {
                             None
                         } else {
-                            let pass = if webdav_fe_pass.is_empty() { "" } else { webdav_fe_pass };
+                            let pass = if webdav_fe_pass.is_empty() {
+                                ""
+                            } else {
+                                webdav_fe_pass
+                            };
                             Some(WebDavAuth::new(webdav_fe_user, pass))
                         };
                         let addr = webdav_listen.to_owned();
-                        let _ = tx.send(LogMsg::ServerRunning(
-                            format!("Vault unlocked. WebDAV server listening on {webdav_listen}"),
-                        ));
+                        let _ = tx.send(LogMsg::ServerRunning(format!(
+                            "Vault unlocked. WebDAV server listening on {webdav_listen}"
+                        )));
                         rt.block_on(async {
                             tokio::select! {
                                 _ = mount_webdav(addr, crypto_fs, auth) => {}
@@ -506,9 +544,9 @@ impl CryptomatorGui {
                     }
                     Frontend::Nfs => {
                         let addr = nfs_listen.to_owned();
-                        let _ = tx.send(LogMsg::ServerRunning(
-                            format!("Vault unlocked. NFS server listening on {nfs_listen}"),
-                        ));
+                        let _ = tx.send(LogMsg::ServerRunning(format!(
+                            "Vault unlocked. NFS server listening on {nfs_listen}"
+                        )));
                         rt.block_on(async {
                             tokio::select! {
                                 _ = mount_nfs(addr, crypto_fs) => {}
@@ -536,8 +574,16 @@ impl CryptomatorGui {
                     shutdown_rx,
                 ),
                 FsProvider::WebDav => {
-                    let user = if webdav_user.is_empty() { None } else { Some(webdav_user.as_str()) };
-                    let pass = if webdav_pass.is_empty() { None } else { Some(webdav_pass.as_str()) };
+                    let user = if webdav_user.is_empty() {
+                        None
+                    } else {
+                        Some(webdav_user.as_str())
+                    };
+                    let pass = if webdav_pass.is_empty() {
+                        None
+                    } else {
+                        Some(webdav_pass.as_str())
+                    };
                     do_unlock(
                         WebDavFs::new(&webdav_url, user, pass),
                         &vault_path,
@@ -557,7 +603,9 @@ impl CryptomatorGui {
 
             match result {
                 Ok(()) => {
-                    let _ = tx.send(LogMsg::ServerStopped("Vault locked. Server stopped.".into()));
+                    let _ = tx.send(LogMsg::ServerStopped(
+                        "Vault locked. Server stopped.".into(),
+                    ));
                 }
                 Err(e) => {
                     let _ = tx.send(LogMsg::Error(format!("Unlock failed: {e:#}")));
@@ -588,7 +636,12 @@ impl CryptomatorGui {
             ui.group(|ui| {
                 ui.label("WebDAV Provider Settings");
                 ui.add_space(4.0);
-                labeled_text_field(ui, "URL:", &mut self.webdav_provider_url, "https://example.com/dav");
+                labeled_text_field(
+                    ui,
+                    "URL:",
+                    &mut self.webdav_provider_url,
+                    "https://example.com/dav",
+                );
                 labeled_text_field(ui, "Username:", &mut self.webdav_provider_user, "");
                 labeled_password_field(ui, "Password:", &mut self.webdav_provider_pass);
             });
@@ -651,16 +704,12 @@ impl CryptomatorGui {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label("Cost (N):");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.scrypt_cost)
-                        .desired_width(100.0),
-                );
+                ui.add(egui::TextEdit::singleline(&mut self.scrypt_cost).desired_width(100.0));
             });
             ui.horizontal(|ui| {
                 ui.label("Block size (r):");
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.scrypt_block_size)
-                        .desired_width(100.0),
+                    egui::TextEdit::singleline(&mut self.scrypt_block_size).desired_width(100.0),
                 );
             });
         });
@@ -751,7 +800,11 @@ impl CryptomatorGui {
 
         if unlocked {
             if ui
-                .button(egui::RichText::new("  Lock Vault  ").size(16.0).color(egui::Color32::from_rgb(255, 100, 100)))
+                .button(
+                    egui::RichText::new("  Lock Vault  ")
+                        .size(16.0)
+                        .color(egui::Color32::from_rgb(255, 100, 100)),
+                )
                 .clicked()
             {
                 self.run_lock();
@@ -1000,12 +1053,10 @@ impl eframe::App for CryptomatorGui {
 
         // Central panel with the active tab content.
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                match self.active_tab {
-                    Tab::Create => self.draw_create_tab(ui),
-                    Tab::Unlock => self.draw_unlock_tab(ui),
-                    Tab::Migrate => self.draw_migrate_tab(ui),
-                }
+            egui::ScrollArea::vertical().show(ui, |ui| match self.active_tab {
+                Tab::Create => self.draw_create_tab(ui),
+                Tab::Unlock => self.draw_unlock_tab(ui),
+                Tab::Migrate => self.draw_migrate_tab(ui),
             });
         });
     }

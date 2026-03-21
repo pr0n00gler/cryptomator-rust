@@ -575,6 +575,13 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         let data = data.to_vec(); // Need to own data to move it
 
         tokio::task::spawn_blocking(move || {
+            let metadata = crypto_fs
+                .metadata(&path)
+                .map_err(|e| fs_err_to_nfsstat(&e))?;
+            if metadata.is_dir {
+                return Err(nfsstat3::NFS3ERR_ISDIR);
+            }
+
             let mut file = crypto_fs
                 .open_file(&path, *OpenOptions::new().write(true).read(true))
                 .map_err(|e| {

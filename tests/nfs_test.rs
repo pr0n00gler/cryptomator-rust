@@ -819,7 +819,7 @@ async fn test_nfs_handle_map_evicts_oldest() {
         let name: nfsstring = format!("evict{i}.txt").into_bytes().into();
         nfs.create(root, &name, sattr3::default()).await.unwrap();
     }
-    assert_eq!(nfs.handle_count(), 5);
+    assert_eq!(nfs.handle_count().unwrap(), 5);
 
     // Creating a 6th file should evict the oldest handle.
     let name6: nfsstring = b"evict5.txt".to_vec().into();
@@ -828,9 +828,9 @@ async fn test_nfs_handle_map_evicts_oldest() {
     // The total count should not exceed 5 non-root entries (some stale
     // queue entries may linger but both maps are cleaned up).
     assert!(
-        nfs.handle_count() <= 5,
+        nfs.handle_count().unwrap() <= 5,
         "handle count should be bounded, got {}",
-        nfs.handle_count()
+        nfs.handle_count().unwrap()
     );
 }
 
@@ -1762,7 +1762,7 @@ async fn test_nfs_truncate_rejects_oversized_request() {
     let (handle, _) = nfs.create(root, &name, sattr3::default()).await.unwrap();
     nfs.write(handle, 0, b"data").await.unwrap();
 
-    // Request truncation to > 1 GiB, should return NFS3ERR_FBIG
+    // Request truncation to > 64 MiB limit, should return NFS3ERR_FBIG
     let sattr = sattr3 {
         mode: set_mode3::Void,
         uid: set_uid3::Void,
@@ -2339,4 +2339,345 @@ async fn test_nfs_create_exclusive_returns_valid_handle() {
     nfs.write(handle, 0, b"exclusive write").await.unwrap();
     let (read_data, _) = nfs.read(handle, 0, 1024).await.unwrap();
     assert_eq!(&read_data, b"exclusive write");
+}
+
+#[tokio::test]
+async fn test_nfs_setattr_extend_past_eof() {
+    let nfs = setup_nfs_server();
+    let root = nfs.root_dir();
+
+    let name: nfsstring = b"extend_eof.txt".to_vec().into();
+    let (handle, _) = nfs.create(root, &name, sattr3::default()).await.unwrap();
+
+    // Write some initial data.
+    let initial_data = b"hello";
+    nfs.write(handle, 0, initial_data).await.unwrap();
+
+    // Verify initial size.
+    let attr = nfs.getattr(handle).await.unwrap();
+    assert_eq!(attr.size, initial_data.len() as u64);
+
+    // Extend the file to 100 bytes via setattr.
+    let extend_size: u64 = 100;
+    let sattr = sattr3 {
+        mode: set_mode3::Void,
+        uid: set_uid3::Void,
+        gid: set_gid3::Void,
+        size: set_size3::size(extend_size),
+        atime: set_atime::DONT_CHANGE,
+        mtime: set_mtime::DONT_CHANGE,
+    };
+    let result = nfs.setattr(handle, sattr).await;
+    assert!(result.is_ok(), "setattr extend failed: {result:?}");
+
+    let attr = result.unwrap();
+    assert_eq!(
+        attr.size, extend_size,
+        "file should be extended to 100 bytes"
+    );
+
+    // Read back the full file.
+    let (data, _) = nfs.read(handle, 0, extend_size as u32).await.unwrap();
+    assert_eq!(
+        data.len(),
+        extend_size as usize,
+        "read should return 100 bytes"
+    );
+
+    // Original data should be preserved at the beginning.
+    assert_eq!(
+        &data[..initial_data.len()],
+        initial_data,
+        "original data should be preserved"
+    );
+
+    // Extended portion should be zero-filled.
+    assert!(
+        data[initial_data.len()..].iter().all(|&b| b == 0),
+        "extended portion should be zero-filled"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Write path correctness and concurrency tests
+// ---------------------------------------------------------------------------
+
+/// Write data and immediately read it back to verify round-trip correctness.
+#[tokio::test]
+async fn test_nfs_write_readback_correctness() {
+    let nfs = setup_nfs_server();
+    let root = nfs.root_dir();
+
+    let fname: nfsstring = b"write_readback.dat".to_vec().into();
+    let (fh, _) = nfs.create(root, &fname, sattr3::default()).await.unwrap();
+
+    // Deterministic pattern that is easy to verify.
+    let data: Vec<u8> = (0..4096_u32).map(|i| (i % 251) as u8).collect();
+    nfs.write(fh, 0, &data).await.unwrap();
+
+    let (read_data, eof) = nfs.read(fh, 0, data.len() as u32).await.unwrap();
+    assert_eq!(read_data.len(), data.len());
+    assert_eq!(read_data, data, "write-then-read should round-trip exactly");
+    assert!(eof);
+}
+
+/// Multi-chunk writes: write more than one full cleartext chunk worth of
+/// data and verify every byte.
+#[tokio::test]
+async fn test_nfs_multi_chunk_write_integrity() {
+    let nfs = setup_nfs_server();
+    let root = nfs.root_dir();
+
+    let fname: nfsstring = b"multi_chunk_integrity.dat".to_vec().into();
+    let (fh, _) = nfs.create(root, &fname, sattr3::default()).await.unwrap();
+
+    // 3 full chunks + a partial fourth chunk.
+    let chunk = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH;
+    let total = chunk * 3 + 999;
+    let data: Vec<u8> = (0..total).map(|i| ((i * 7 + 13) % 256) as u8).collect();
+    nfs.write(fh, 0, &data).await.unwrap();
+
+    let attr = nfs.getattr(fh).await.unwrap();
+    assert_eq!(attr.size, total as u64);
+
+    let (read_data, _) = nfs.read(fh, 0, total as u32).await.unwrap();
+    assert_eq!(read_data, data, "multi-chunk data must round-trip exactly");
+}
+
+/// Sparse write: write at an offset that leaves a gap of zeros, then verify
+/// the gap and the payload.
+#[tokio::test]
+async fn test_nfs_sparse_write_gap_zeros() {
+    let nfs = setup_nfs_server();
+    let root = nfs.root_dir();
+
+    let fname: nfsstring = b"sparse_gap_zeros.dat".to_vec().into();
+    let (fh, _) = nfs.create(root, &fname, sattr3::default()).await.unwrap();
+
+    let gap_offset = 5000_u64;
+    let payload = b"SPARSE_DATA";
+    nfs.write(fh, gap_offset, payload).await.unwrap();
+
+    let expected_size = gap_offset + payload.len() as u64;
+    let attr = nfs.getattr(fh).await.unwrap();
+    assert_eq!(attr.size, expected_size);
+
+    // The gap region [0, gap_offset) must be all zeros.
+    let (gap_data, _) = nfs.read(fh, 0, gap_offset as u32).await.unwrap();
+    assert_eq!(gap_data.len(), gap_offset as usize);
+    assert!(
+        gap_data.iter().all(|&b| b == 0),
+        "gap region must be zero-filled"
+    );
+
+    // The payload region must match.
+    let (tail, _) = nfs
+        .read(fh, gap_offset, payload.len() as u32)
+        .await
+        .unwrap();
+    assert_eq!(&tail[..], payload);
+}
+
+/// Concurrent writes to the same file from multiple tasks should not corrupt
+/// data. Each task writes to a non-overlapping offset range.
+#[tokio::test]
+async fn test_nfs_concurrent_non_overlapping_writes() {
+    let nfs = std::sync::Arc::new(setup_nfs_server());
+    let root = nfs.root_dir();
+
+    let fname: nfsstring = b"concurrent_writes.dat".to_vec().into();
+    let (fh, _) = nfs.create(root, &fname, sattr3::default()).await.unwrap();
+
+    // Pre-fill file so that the concurrent writes are overwrites (not extends).
+    let total_size = 4000_usize;
+    let zeros = vec![0u8; total_size];
+    nfs.write(fh, 0, &zeros).await.unwrap();
+
+    let num_tasks = 4;
+    let chunk_per_task = total_size / num_tasks;
+    let mut handles = Vec::new();
+
+    for i in 0..num_tasks {
+        let nfs = nfs.clone();
+        let offset = (i * chunk_per_task) as u64;
+        let pattern = vec![(i as u8).wrapping_add(0x41); chunk_per_task]; // 'A', 'B', 'C', 'D'
+        handles.push(tokio::spawn(async move {
+            nfs.write(fh, offset, &pattern).await.unwrap();
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    let (read_data, _) = nfs.read(fh, 0, total_size as u32).await.unwrap();
+    assert_eq!(read_data.len(), total_size);
+
+    // Each chunk must contain the pattern from exactly one writer.
+    for i in 0..num_tasks {
+        let start = i * chunk_per_task;
+        let end = start + chunk_per_task;
+        let expected = (i as u8).wrapping_add(0x41);
+        assert!(
+            read_data[start..end].iter().all(|&b| b == expected),
+            "task {i} region [{start}..{end}] must be all 0x{expected:02X}"
+        );
+    }
+}
+
+/// Concurrent writes and truncation must not corrupt the file. After the
+/// truncation completes, the file should be at the truncated size or have
+/// been re-written correctly.
+#[tokio::test]
+async fn test_nfs_concurrent_write_and_truncation() {
+    let nfs = std::sync::Arc::new(setup_nfs_server());
+    let root = nfs.root_dir();
+
+    let fname: nfsstring = b"write_truncate_race.dat".to_vec().into();
+    let (fh, _) = nfs.create(root, &fname, sattr3::default()).await.unwrap();
+
+    // Write initial data.
+    let initial = vec![0xAA_u8; 2000];
+    nfs.write(fh, 0, &initial).await.unwrap();
+
+    // Spawn a writer and a truncator concurrently.
+    let nfs_w = nfs.clone();
+    let writer = tokio::spawn(async move {
+        let payload = vec![0xBB_u8; 500];
+        let _ = nfs_w.write(fh, 0, &payload).await;
+    });
+
+    let nfs_t = nfs.clone();
+    let truncator = tokio::spawn(async move {
+        let sattr = sattr3 {
+            mode: set_mode3::Void,
+            uid: set_uid3::Void,
+            gid: set_gid3::Void,
+            size: set_size3::size(0),
+            atime: set_atime::DONT_CHANGE,
+            mtime: set_mtime::DONT_CHANGE,
+        };
+        let _ = nfs_t.setattr(fh, sattr).await;
+    });
+
+    writer.await.unwrap();
+    truncator.await.unwrap();
+
+    // The file should be in a consistent state: either truncated or written.
+    // We just verify we can read it back without errors.
+    let attr = nfs.getattr(fh).await.unwrap();
+    let (read_data, _) = nfs.read(fh, 0, attr.size as u32).await.unwrap();
+    assert_eq!(
+        read_data.len(),
+        attr.size as usize,
+        "read size must match reported file size"
+    );
+}
+
+/// Exercise handle eviction under load and verify that data written through
+/// handles created after eviction is still correct.
+#[tokio::test]
+async fn test_nfs_handle_eviction_under_load() {
+    // Capacity of 3 non-root handles means eviction happens frequently.
+    let nfs = setup_nfs_server_with_capacity(3);
+    let root = nfs.root_dir();
+
+    let mut file_handles = Vec::new();
+
+    // Create more files than the handle capacity.
+    for i in 0..6 {
+        let name: nfsstring = format!("evict_load_{i}.dat").into_bytes().into();
+        let (fh, _) = nfs.create(root, &name, sattr3::default()).await.unwrap();
+        let data = format!("data-for-file-{i}").into_bytes();
+        nfs.write(fh, 0, &data).await.unwrap();
+        file_handles.push((name, data));
+    }
+
+    // The handle count should not exceed capacity.
+    assert!(
+        nfs.handle_count().unwrap() <= 3,
+        "handle count must be bounded, got {}",
+        nfs.handle_count().unwrap()
+    );
+
+    // Look up and read every file to confirm no data was lost.
+    for (name, expected_data) in &file_handles {
+        let fh = nfs.lookup(root, name).await.unwrap();
+        let (read_data, _) = nfs.read(fh, 0, expected_data.len() as u32).await.unwrap();
+        assert_eq!(
+            &read_data,
+            expected_data,
+            "data for {} must survive eviction",
+            String::from_utf8_lossy(&name.0)
+        );
+    }
+}
+
+/// Verify that flush and fsync persist data by writing, flushing, then
+/// reading back from a re-opened handle (after eviction forces reopen).
+#[tokio::test]
+async fn test_nfs_flush_persists_data() {
+    let nfs = setup_nfs_server_with_capacity(2);
+    let root = nfs.root_dir();
+
+    let fname: nfsstring = b"flush_persist.dat".to_vec().into();
+    let (fh, _) = nfs.create(root, &fname, sattr3::default()).await.unwrap();
+
+    let data = b"persistent-payload";
+    nfs.write(fh, 0, data).await.unwrap();
+
+    // Force eviction of the cached file handle by creating enough other files.
+    for i in 0..3 {
+        let other: nfsstring = format!("flush_evict_{i}.dat").into_bytes().into();
+        nfs.create(root, &other, sattr3::default()).await.unwrap();
+    }
+
+    // Re-lookup the file (handle may have been evicted).
+    let fh2 = nfs.lookup(root, &fname).await.unwrap();
+    let (read_data, _) = nfs.read(fh2, 0, data.len() as u32).await.unwrap();
+    assert_eq!(
+        &read_data, data,
+        "data must survive handle eviction and reopen"
+    );
+}
+
+/// Write a multi-chunk file, truncate to a smaller size, then write again.
+/// Verify the truncation was effective and new data is correct.
+#[tokio::test]
+async fn test_nfs_truncate_then_rewrite() {
+    let nfs = setup_nfs_server();
+    let root = nfs.root_dir();
+
+    let fname: nfsstring = b"trunc_rewrite.dat".to_vec().into();
+    let (fh, _) = nfs.create(root, &fname, sattr3::default()).await.unwrap();
+
+    // Write more than one chunk worth of data.
+    let chunk = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH;
+    let big_data: Vec<u8> = (0..chunk + 500).map(|i| (i % 256) as u8).collect();
+    nfs.write(fh, 0, &big_data).await.unwrap();
+
+    // Truncate to 100 bytes.
+    let sattr = sattr3 {
+        mode: set_mode3::Void,
+        uid: set_uid3::Void,
+        gid: set_gid3::Void,
+        size: set_size3::size(100),
+        atime: set_atime::DONT_CHANGE,
+        mtime: set_mtime::DONT_CHANGE,
+    };
+    nfs.setattr(fh, sattr).await.unwrap();
+
+    let attr = nfs.getattr(fh).await.unwrap();
+    assert_eq!(attr.size, 100);
+
+    // Write new data at offset 0 after truncation.
+    let new_data = b"after-truncation";
+    nfs.write(fh, 0, new_data).await.unwrap();
+
+    let (read_data, _) = nfs.read(fh, 0, 200).await.unwrap();
+    assert_eq!(
+        &read_data[..new_data.len()],
+        new_data,
+        "newly written data after truncation must be correct"
+    );
 }

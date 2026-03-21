@@ -145,10 +145,22 @@ pub async fn mount_webdav<FS: 'static + FileSystem>(
     }
 }
 
+/// Mount the NFS server on the given listen address.
+///
+/// Connection limiting note: the `nfsserve` crate manages its own TCP
+/// accept loop internally (`handle_forever`), so we cannot wrap
+/// individual connections with a semaphore the way we do for WebDAV.
+/// Instead, `NfsServer` carries an operation-level semaphore
+/// (`MAX_NFS_CONNECTIONS`) that bounds the number of concurrent NFS
+/// operations to prevent file-descriptor exhaustion.
 pub async fn mount_nfs<FS: 'static + FileSystem>(listen_address: String, crypto_fs: CryptoFs<FS>) {
     let nfs_server = NfsServer::new(crypto_fs);
 
-    info!("Starting NFS server on {}", listen_address);
+    info!(
+        "Starting NFS server on {} (max concurrent operations: {})",
+        listen_address,
+        super::nfs::MAX_NFS_CONNECTIONS,
+    );
 
     let listener = nfsserve::tcp::NFSTcpListener::bind(&listen_address, nfs_server)
         .await

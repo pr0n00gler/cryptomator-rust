@@ -1237,7 +1237,7 @@ impl Seek for CryptoFsFile {
                 // Refresh real_len from the underlying file to avoid
                 // returning a stale size on persistent handles.
                 self.refresh_metadata()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
                 let size = self.file_size();
                 let size = i64::try_from(size).map_err(|_| {
                     std::io::Error::new(

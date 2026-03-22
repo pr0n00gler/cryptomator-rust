@@ -7,6 +7,7 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
+gui = ["eframe"]
 
 [dependencies]
 anyhow = "1.0"
@@ -49,6 +50,12 @@ reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-fea
 roxmltree = "0.20"
 httpdate = "1.0"
 urlencoding = "2.1"
+eframe = { version = "0.31", optional = true }
+
+[[bin]]
+name = "cryptomator-gui"
+path = "src/bin/gui.rs"
+required-features = ["gui"]
 
 [profile.release]
 rpath = false

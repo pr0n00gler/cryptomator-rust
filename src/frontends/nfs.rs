@@ -1,13 +1,15 @@
-use crate::cryptofs::{CryptoFs, FileSystem, FileSystemError, Metadata, OpenOptions};
+use crate::cryptofs::{
+    CryptoFs, CryptoFsFile, File as CryptoFile, FileSystem, FileSystemError, Metadata, OpenOptions,
+};
 use async_trait::async_trait;
 use nfsserve::nfs::{
     fattr3, fileid3, ftype3, nfsstat3, nfsstring, nfstime3, sattr3, set_size3, specdata3,
 };
 use nfsserve::vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::UNIX_EPOCH;
 use tracing::{debug, error, warn};
 
@@ -96,13 +98,27 @@ fn secs_to_u32(secs: u64) -> u32 {
 struct HandleState {
     path_to_handle: HashMap<PathBuf, u64>,
     handle_to_path: HashMap<u64, PathBuf>,
-    /// Insertion-order queue for eviction.  The root handle is never
-    /// enqueued and therefore never evicted.
-    insertion_order: VecDeque<u64>,
+    /// Tracks the insertion order of each handle for LRU eviction.
+    /// Maps handle -> insertion sequence number.
+    handle_order: HashMap<u64, u64>,
+    /// Reverse mapping: order -> handle for O(log n) min lookup during eviction.
+    order_to_handle: BTreeMap<u64, u64>,
+    /// Monotonically increasing sequence number for ordering.
+    next_order: u64,
     /// Maximum number of non-root entries.
     max_capacity: usize,
     /// Monotonically increasing counter; starts at 2 (1 is reserved for root).
     next_handle: u64,
+    /// Persistent open file handles keyed by handle id.  Each entry is
+    /// protected by its own mutex so that concurrent NFS RPCs to the same
+    /// file are serialised, while RPCs to different files proceed in
+    /// parallel.
+    open_files: HashMap<u64, Arc<Mutex<CryptoFsFile>>>,
+    /// Per-file locks to coordinate writes and truncation.  WRITE
+    /// operations hold a read lock, while setattr truncation holds a
+    /// write lock.  This ensures truncation waits for in-flight writes
+    /// to complete.
+    file_locks: HashMap<u64, Arc<RwLock<()>>>,
 }
 
 impl HandleState {
@@ -119,23 +135,72 @@ impl HandleState {
         HandleState {
             path_to_handle,
             handle_to_path,
-            insertion_order: VecDeque::new(),
+            handle_order: HashMap::new(),
+            order_to_handle: BTreeMap::new(),
+            next_order: 0,
             max_capacity,
             next_handle: 2,
+            open_files: HashMap::new(),
+            file_locks: HashMap::new(),
         }
     }
 
     /// Evict the oldest non-root entry if at capacity.
-    fn evict_if_needed(&mut self) {
-        while self.insertion_order.len() >= self.max_capacity {
-            if let Some(old_handle) = self.insertion_order.pop_front() {
-                if let Some(old_path) = self.handle_to_path.remove(&old_handle) {
-                    self.path_to_handle.remove(&old_path);
+    ///
+    /// Also closes any cached open file handle for the evicted entry so
+    /// that the underlying `CryptoFsFile` is flushed and dropped.
+    /// Returns an error if flushing a cached handle fails, so that the
+    /// caller can propagate the failure instead of silently losing data.
+    fn evict_if_needed(&mut self) -> Result<(), nfsstat3> {
+        // Non-root entry count: subtract 1 for the root entry.
+        while self.path_to_handle.len().saturating_sub(1) >= self.max_capacity {
+            // Find the handle with the lowest order number (oldest)
+            // via O(log n) BTreeMap lookup instead of O(n) scan.
+            let (&oldest_order, &old_handle) = match self.order_to_handle.iter().next() {
+                Some(entry) => entry,
+                None => break,
+            };
+
+            self.handle_order.remove(&old_handle);
+            self.order_to_handle.remove(&oldest_order);
+
+            // Close any cached file handle before removing the path mapping.
+            if let Some(file) = self.open_files.remove(&old_handle) {
+                match file.lock() {
+                    Ok(guard) => {
+                        if let Err(e) = guard.fsync() {
+                            error!(
+                                "Failed to fsync evicted file handle {}: {:?}",
+                                old_handle, e
+                            );
+                            return Err(nfsstat3::NFS3ERR_IO);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "File mutex poisoned during eviction of handle {}, data may be lost: {}",
+                            old_handle, e
+                        );
+                        return Err(nfsstat3::NFS3ERR_IO);
+                    }
                 }
-            } else {
-                break;
+            }
+            self.file_locks.remove(&old_handle);
+            if let Some(old_path) = self.handle_to_path.remove(&old_handle) {
+                self.path_to_handle.remove(&old_path);
             }
         }
+        Ok(())
+    }
+
+    /// Returns existing handles or allocates new ones for all given paths
+    /// in a single lock acquisition.
+    fn get_or_create_batch(&mut self, paths: Vec<PathBuf>) -> Result<Vec<u64>, nfsstat3> {
+        let mut handles = Vec::with_capacity(paths.len());
+        for path in paths {
+            handles.push(self.get_or_create(path)?);
+        }
+        Ok(handles)
     }
 
     /// Returns the existing handle for `path`, or allocates a new one.
@@ -149,7 +214,7 @@ impl HandleState {
         }
 
         // Evict oldest entries if at capacity.
-        self.evict_if_needed();
+        self.evict_if_needed()?;
 
         // Saturating-add guard: after u64::MAX allocations the counter would
         // wrap back to 0 and then 1 (the root handle).  Return NFS3ERR_NOSPC
@@ -165,7 +230,10 @@ impl HandleState {
             .ok_or(nfsstat3::NFS3ERR_NOSPC)?;
         self.path_to_handle.insert(path.clone(), handle);
         self.handle_to_path.insert(handle, path);
-        self.insertion_order.push_back(handle);
+        let order = self.next_order;
+        self.next_order = self.next_order.wrapping_add(1);
+        self.handle_order.insert(handle, order);
+        self.order_to_handle.insert(order, handle);
         Ok(handle)
     }
 
@@ -179,9 +247,26 @@ impl HandleState {
     fn forget(&mut self, path: &PathBuf) {
         if let Some(handle) = self.path_to_handle.remove(path) {
             self.handle_to_path.remove(&handle);
-            // Note: we do not remove from insertion_order here because
-            // scanning a VecDeque is O(n).  Stale entries in the queue
-            // are harmlessly skipped during eviction.
+            if let Some(order) = self.handle_order.remove(&handle) {
+                self.order_to_handle.remove(&order);
+            }
+            self.file_locks.remove(&handle);
+            // Close any cached file handle for this path.
+            if let Some(file) = self.open_files.remove(&handle) {
+                match file.lock() {
+                    Ok(guard) => {
+                        if let Err(e) = guard.fsync() {
+                            error!("Failed to fsync forgotten file handle {}: {:?}", handle, e);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "File mutex poisoned during forget of handle {}, data may be lost: {}",
+                            handle, e
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -193,6 +278,9 @@ impl HandleState {
 
     /// Atomically re-keys every path that starts with `old_path` to be rooted
     /// at `new_path` instead, updating both maps in the same lock scope.
+    ///
+    /// Also closes any cached open file handles for the affected entries,
+    /// since the underlying file paths have changed.
     fn rename_prefix(&mut self, old_path: &PathBuf, new_path: PathBuf) {
         let updates: Vec<(PathBuf, PathBuf, u64)> = self
             .path_to_handle
@@ -208,6 +296,22 @@ impl HandleState {
             self.path_to_handle.remove(&old);
             self.path_to_handle.insert(new.clone(), handle);
             self.handle_to_path.insert(handle, new);
+            // Close cached file handle since the underlying path changed.
+            // Also drop the per-file lock since it's tied to the old path.
+            self.file_locks.remove(&handle);
+            if let Some(file) = self.open_files.remove(&handle) {
+                match file.lock() {
+                    Ok(guard) => {
+                        let _ = guard.fsync();
+                    }
+                    Err(e) => {
+                        warn!(
+                            "File mutex poisoned during rename of handle {}, data may be lost: {}",
+                            handle, e
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -223,7 +327,7 @@ pub struct NfsServer<FS: FileSystem> {
     conn_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
-impl<FS: FileSystem> NfsServer<FS> {
+impl<FS: FileSystem + 'static> NfsServer<FS> {
     pub fn new(crypto_fs: CryptoFs<FS>) -> Self {
         NfsServer {
             crypto_fs,
@@ -246,6 +350,13 @@ impl<FS: FileSystem> NfsServer<FS> {
             .lock()
             .map_err(|_| nfsstat3::NFS3ERR_IO)?
             .get_or_create(path)
+    }
+
+    fn get_or_create_handles_batch(&self, paths: Vec<PathBuf>) -> Result<Vec<u64>, nfsstat3> {
+        self.handles
+            .lock()
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?
+            .get_or_create_batch(paths)
     }
 
     fn get_path_from_handle(&self, handle: u64) -> Result<PathBuf, nfsstat3> {
@@ -271,9 +382,47 @@ impl<FS: FileSystem> NfsServer<FS> {
         Ok(())
     }
 
+    /// Returns the per-file RwLock for the given handle, creating one if
+    /// it does not exist yet.
+    fn get_file_lock(&self, handle: u64) -> Result<Arc<RwLock<()>>, nfsstat3> {
+        let mut state = self.handles.lock().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        let lock = state
+            .file_locks
+            .entry(handle)
+            .or_insert_with(|| Arc::new(RwLock::new(())))
+            .clone();
+        Ok(lock)
+    }
+
+    /// Closes the cached file handle for the given path, if one exists.
+    fn close_cached_file_by_path(&self, path: &PathBuf) -> Result<(), nfsstat3> {
+        let mut state = self.handles.lock().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        if let Some(&handle) = state.path_to_handle.get(path) {
+            if let Some(file) = state.open_files.remove(&handle) {
+                match file.lock() {
+                    Ok(guard) => {
+                        if let Err(e) = guard.fsync() {
+                            error!(
+                                "Failed to fsync closed file handle {} (by path): {:?}",
+                                handle, e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "File mutex poisoned during close of handle {} (by path), data may be lost: {}",
+                            handle, e
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[doc(hidden)]
-    pub fn handle_count(&self) -> usize {
-        self.handles.lock().unwrap().len()
+    pub fn handle_count(&self) -> Result<usize, nfsstat3> {
+        Ok(self.handles.lock().map_err(|_| nfsstat3::NFS3ERR_IO)?.len())
     }
 
     fn metadata_to_fattr3(metadata: Metadata, handle: u64) -> fattr3 {
@@ -381,75 +530,172 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         let path = self.get_path_from_handle(handle)?;
 
-        let crypto_fs = self.crypto_fs.clone();
-        tokio::task::spawn_blocking(move || {
-            // Handle set_size (file truncation).
-            if let set_size3::size(new_size) = sattr.size {
+        // Handle set_size (file truncation or extension).
+        if let set_size3::size(new_size) = sattr.size {
+            // Cap the truncation/extension buffer to prevent memory exhaustion
+            // from malicious or buggy clients requesting huge sizes.
+            const MAX_TRUNCATE_BUFFER_SIZE: u64 = 64 << 20; // 64 MiB
+            if new_size > MAX_TRUNCATE_BUFFER_SIZE {
+                return Err(nfsstat3::NFS3ERR_FBIG);
+            }
+
+            let file_lock = self.get_file_lock(handle)?;
+
+            let crypto_fs = self.crypto_fs.clone();
+            let path_clone = path.clone();
+            let handles_clone = Arc::clone(&self.handles);
+            let result_metadata = tokio::task::spawn_blocking(move || {
+                // Fetch metadata once and reuse it for all checks.
                 let metadata = crypto_fs
-                    .metadata(&path)
+                    .metadata(&path_clone)
                     .map_err(|e| fs_err_to_nfsstat(&e))?;
+
                 if metadata.is_dir {
                     return Err(nfsstat3::NFS3ERR_ISDIR);
                 }
 
-                // Cap the truncation buffer to prevent memory exhaustion
-                // from malicious or buggy clients requesting huge sizes.
-                const MAX_TRUNCATE_BUFFER_SIZE: u64 = 1 << 30; // 1 GiB
-                if new_size > MAX_TRUNCATE_BUFFER_SIZE {
-                    return Err(nfsstat3::NFS3ERR_FBIG);
-                }
+                if new_size < metadata.len {
+                    // Acquire exclusive (write) lock so in-flight writes
+                    // complete before we close and recreate the file.
+                    let _wguard = file_lock.write().map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
-                // Note: the remove-and-recreate strategy below is not atomic.
-                // A crash between the remove and the recreate will lose data.
-                // This is an inherent limitation of the encrypted filesystem
-                // provider, which does not support in-place truncation.
-                if new_size == 0 {
-                    // Truncate to zero: remove and recreate the file.
-                    crypto_fs.remove_file(&path).map_err(|e| {
-                        error!("Failed to remove file for truncation: {:?}", e);
-                        fs_err_to_nfsstat(&e)
-                    })?;
-                    let file = crypto_fs.create_file(&path).map_err(|e| {
-                        error!("Failed to recreate file for truncation: {:?}", e);
-                        fs_err_to_nfsstat(&e)
-                    })?;
-                    drop(file);
-                } else if new_size < metadata.len {
-                    // Truncate to a non-zero size: read the data we want to
-                    // keep, remove, recreate, and write it back.
-                    let mut file = crypto_fs
-                        .open_file(&path, *OpenOptions::new().read(true))
-                        .map_err(|e| {
-                            error!("Failed to open file for truncation read: {:?}", e);
+                    // Close the cached handle now that no writes are active.
+                    {
+                        let mut state = handles_clone.lock().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                        if let Some(file) = state.open_files.remove(&handle) {
+                            match file.lock() {
+                                Ok(guard) => {
+                                    if let Err(e) = guard.fsync() {
+                                        error!("Failed to fsync file handle {}: {:?}", handle, e);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("File mutex poisoned during close of handle {}: {}", handle, e);
+                                }
+                            }
+                        }
+                    }
+                    if new_size == 0 {
+                        // Truncate to zero: remove and recreate the file.
+                        crypto_fs.remove_file(&path_clone).map_err(|e| {
+                            error!("Failed to remove file for truncation: {:?}", e);
                             fs_err_to_nfsstat(&e)
                         })?;
-                    let mut buf = vec![0u8; new_size as usize];
-                    file.read_exact(&mut buf).map_err(|e| {
-                        error!("Failed to read file for truncation: {:?}", e);
-                        nfsstat3::NFS3ERR_IO
-                    })?;
-                    drop(file);
+                        let file = crypto_fs.create_file(&path_clone).map_err(|e| {
+                            error!("Failed to recreate file for truncation: {:?}", e);
+                            fs_err_to_nfsstat(&e)
+                        })?;
+                        drop(file);
+                    } else {
+                        // Truncate to a non-zero size: read the data we want to
+                        // keep, remove, recreate, and write it back.
+                        //
+                        // WARNING: Non-atomic truncation. If a crash occurs between remove_file and
+                        // write_all, data will be lost. This is a known limitation of the CryptoFS layer
+                        // which lacks in-place truncation support.
+                        warn!(
+                            "Non-atomic truncation to {} bytes on {:?}; data loss possible if interrupted",
+                            new_size, path_clone
+                        );
+                        let mut file = crypto_fs
+                            .open_file(&path_clone, *OpenOptions::new().read(true))
+                            .map_err(|e| {
+                                error!("Failed to open file for truncation read: {:?}", e);
+                                fs_err_to_nfsstat(&e)
+                            })?;
+                        let mut buf = vec![0u8; new_size as usize];
+                        file.read_exact(&mut buf).map_err(|e| {
+                            error!("Failed to read file for truncation: {:?}", e);
+                            nfsstat3::NFS3ERR_IO
+                        })?;
+                        drop(file);
 
-                    crypto_fs.remove_file(&path).map_err(|e| {
-                        error!("Failed to remove file for truncation: {:?}", e);
-                        fs_err_to_nfsstat(&e)
-                    })?;
-                    let mut file = crypto_fs.create_file(&path).map_err(|e| {
-                        error!("Failed to recreate file for truncation: {:?}", e);
-                        fs_err_to_nfsstat(&e)
-                    })?;
-                    file.write_all(&buf).map_err(|e| {
-                        error!("Failed to write truncated data: {:?}", e);
+                        crypto_fs.remove_file(&path_clone).map_err(|e| {
+                            error!("Failed to remove file for truncation: {:?}", e);
+                            fs_err_to_nfsstat(&e)
+                        })?;
+                        let mut file = crypto_fs.create_file(&path_clone).map_err(|e| {
+                            error!("Failed to recreate file for truncation: {:?}", e);
+                            fs_err_to_nfsstat(&e)
+                        })?;
+                        file.write_all(&buf).map_err(|e| {
+                            error!("Failed to write truncated data: {:?}", e);
+                            nfsstat3::NFS3ERR_IO
+                        })?;
+                        file.flush().map_err(|e| {
+                            error!("Failed to flush truncated file: {:?}", e);
+                            nfsstat3::NFS3ERR_IO
+                        })?;
+                        drop(file);
+                    }
+                    // Fetch fresh metadata after truncation.
+                    let fresh_metadata = crypto_fs
+                        .metadata(&path_clone)
+                        .map_err(|e| fs_err_to_nfsstat(&e))?;
+                    Ok(Some(fresh_metadata))
+                } else if new_size > metadata.len {
+                    // Acquire shared (read) lock so truncation cannot
+                    // race with this extend operation.
+                    let _rguard = file_lock.read().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+                    // Open or retrieve the persistent file handle inside
+                    // the blocking context.
+                    let file_for_extend = {
+                        let mut state = handles_clone.lock().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                        if let Some(f) = state.open_files.get(&handle) {
+                            Arc::clone(f)
+                        } else {
+                            let f = crypto_fs
+                                .open_file(&path_clone, *OpenOptions::new().read(true).write(true))
+                                .map_err(|e| {
+                                    error!("Failed to open persistent file handle: {:?}", e);
+                                    fs_err_to_nfsstat(&e)
+                                })?;
+                            let arc = Arc::new(Mutex::new(f));
+                            state.open_files.insert(handle, Arc::clone(&arc));
+                            arc
+                        }
+                    };
+
+                    let current_len = metadata.len;
+                    let mut guard = file_for_extend.lock().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                    guard.seek(SeekFrom::Start(current_len)).map_err(|e| {
+                        error!("Failed to seek for extend: {:?}", e);
                         nfsstat3::NFS3ERR_IO
                     })?;
-                    file.flush().map_err(|e| {
-                        error!("Failed to flush truncated file: {:?}", e);
+                    let zeros_needed = (new_size - current_len) as usize;
+                    // Write zeros in 64 KiB chunks to avoid large allocations.
+                    const CHUNK: usize = 64 * 1024;
+                    let mut remaining = zeros_needed;
+                    let zero_buf = vec![0u8; CHUNK.min(remaining)];
+                    while remaining > 0 {
+                        let n = remaining.min(CHUNK);
+                        guard.write_all(&zero_buf[..n]).map_err(|e| {
+                            error!("Failed to write zeros for extend: {:?}", e);
+                            nfsstat3::NFS3ERR_IO
+                        })?;
+                        remaining -= n;
+                    }
+                    guard.fsync().map_err(|e| {
+                        error!("Failed to fsync after extend: {:?}", e);
                         nfsstat3::NFS3ERR_IO
                     })?;
-                    drop(file);
+                    // Get metadata from the open file handle after extend.
+                    let fresh_metadata = CryptoFile::metadata(&*guard).map_err(|e| {
+                        error!("Failed to get metadata after extend: {:?}", e);
+                        nfsstat3::NFS3ERR_IO
+                    })?;
+                    Ok(Some(fresh_metadata))
+                } else {
+                    // new_size == metadata.len, nothing to do; reuse metadata.
+                    Ok(Some(metadata))
                 }
-                // If new_size >= metadata.len, extending is a no-op for now.
-            }
+            })
+            .await
+            .map_err(|e| {
+                error!("NFS setattr task join error: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })??;
 
             // Log unsupported attribute changes at debug level.
             if !matches!(sattr.mode, nfsserve::nfs::set_mode3::Void) {
@@ -462,6 +708,25 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
                 debug!("NFS SETATTR: ignoring gid change (not supported by encrypted FS)");
             }
 
+            if let Some(m) = result_metadata {
+                return Ok(NfsServer::<FS>::metadata_to_fattr3(m, handle));
+            }
+        }
+
+        // Log unsupported attribute changes at debug level.
+        if !matches!(sattr.mode, nfsserve::nfs::set_mode3::Void) {
+            debug!("NFS SETATTR: ignoring mode change (not supported by encrypted FS)");
+        }
+        if !matches!(sattr.uid, nfsserve::nfs::set_uid3::Void) {
+            debug!("NFS SETATTR: ignoring uid change (not supported by encrypted FS)");
+        }
+        if !matches!(sattr.gid, nfsserve::nfs::set_gid3::Void) {
+            debug!("NFS SETATTR: ignoring gid change (not supported by encrypted FS)");
+        }
+
+        // No size change requested; fetch metadata once.
+        let crypto_fs = self.crypto_fs.clone();
+        tokio::task::spawn_blocking(move || {
             let metadata = crypto_fs
                 .metadata(&path)
                 .map_err(|e| fs_err_to_nfsstat(&e))?;
@@ -515,36 +780,56 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         let path = self.get_path_from_handle(handle)?;
 
+        let file_lock = self.get_file_lock(handle)?;
         let crypto_fs = self.crypto_fs.clone();
+        let handles = Arc::clone(&self.handles);
+
         tokio::task::spawn_blocking(move || {
+            // Check if this is a directory first (directories are never cached).
             let metadata = crypto_fs
                 .metadata(&path)
                 .map_err(|e| fs_err_to_nfsstat(&e))?;
-
             if metadata.is_dir {
                 return Err(nfsstat3::NFS3ERR_ISDIR);
             }
 
-            let mut file = crypto_fs
-                .open_file(&path, *OpenOptions::new().read(true))
-                .map_err(|e| {
-                    error!("Failed to open file for read: {:?}", e);
-                    fs_err_to_nfsstat(&e)
-                })?;
+            // Open or retrieve the persistent file handle inside the blocking
+            // context, after confirming the path is not a directory.
+            let file = {
+                let mut state = handles.lock().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                if let Some(f) = state.open_files.get(&handle) {
+                    Arc::clone(f)
+                } else {
+                    let f = crypto_fs
+                        .open_file(&path, *OpenOptions::new().read(true).write(true))
+                        .map_err(|e| {
+                            error!("Failed to open persistent file handle: {:?}", e);
+                            fs_err_to_nfsstat(&e)
+                        })?;
+                    let arc = Arc::new(Mutex::new(f));
+                    state.open_files.insert(handle, Arc::clone(&arc));
+                    arc
+                }
+            };
+
+            // Acquire shared lock so reads do not proceed during truncation.
+            let _rguard = file_lock.read().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+            let mut guard = file.lock().map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
             // Get the cleartext file size
-            let file_size = file.seek(SeekFrom::End(0)).map_err(|e| {
+            let file_size = guard.seek(SeekFrom::End(0)).map_err(|e| {
                 error!("Failed to get file size: {:?}", e);
                 nfsstat3::NFS3ERR_IO
             })?;
 
-            file.seek(SeekFrom::Start(offset)).map_err(|e| {
+            guard.seek(SeekFrom::Start(offset)).map_err(|e| {
                 error!("Failed to seek: {:?}", e);
                 nfsstat3::NFS3ERR_IO
             })?;
 
             let mut buffer = vec![0u8; count as usize];
-            let bytes_read = file.read(&mut buffer).map_err(|e| {
+            let bytes_read = guard.read(&mut buffer).map_err(|e| {
                 error!("Failed to read: {:?}", e);
                 nfsstat3::NFS3ERR_IO
             })?;
@@ -571,39 +856,66 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         let path = self.get_path_from_handle(handle)?;
 
-        let crypto_fs = self.crypto_fs.clone();
+        let file_lock = self.get_file_lock(handle)?;
         let data = data.to_vec(); // Need to own data to move it
+        let crypto_fs = self.crypto_fs.clone();
+        let handles = Arc::clone(&self.handles);
 
         tokio::task::spawn_blocking(move || {
-            let mut file = crypto_fs
-                .open_file(&path, *OpenOptions::new().write(true).read(true))
-                .map_err(|e| {
-                    error!("Failed to open file for write: {:?}", e);
-                    fs_err_to_nfsstat(&e)
-                })?;
+            // Check if this is a directory first.
+            let metadata = crypto_fs
+                .metadata(&path)
+                .map_err(|e| fs_err_to_nfsstat(&e))?;
+            if metadata.is_dir {
+                return Err(nfsstat3::NFS3ERR_ISDIR);
+            }
 
-            file.seek(SeekFrom::Start(offset)).map_err(|e| {
+            // Open or retrieve the persistent file handle inside the blocking
+            // context, after confirming the path is not a directory.
+            let file = {
+                let mut state = handles.lock().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                if let Some(f) = state.open_files.get(&handle) {
+                    Arc::clone(f)
+                } else {
+                    let f = crypto_fs
+                        .open_file(&path, *OpenOptions::new().read(true).write(true))
+                        .map_err(|e| {
+                            error!("Failed to open persistent file handle: {:?}", e);
+                            fs_err_to_nfsstat(&e)
+                        })?;
+                    let arc = Arc::new(Mutex::new(f));
+                    state.open_files.insert(handle, Arc::clone(&arc));
+                    arc
+                }
+            };
+
+            // Acquire shared (read) lock so that truncation waits for us
+            // to finish before deleting and recreating the file.
+            let _rguard = file_lock.read().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+            let mut guard = file.lock().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+            guard.seek(SeekFrom::Start(offset)).map_err(|e| {
                 error!("Failed to seek: {:?}", e);
                 nfsstat3::NFS3ERR_IO
             })?;
 
-            file.write_all(&data).map_err(|e| {
+            guard.write_all(&data).map_err(|e| {
                 error!("Failed to write: {:?}", e);
                 nfsstat3::NFS3ERR_IO
             })?;
 
-            file.flush().map_err(|e| {
-                error!("Failed to flush: {:?}", e);
+            // Flush userspace buffers and fsync to persistent storage.
+            guard.fsync().map_err(|e| {
+                error!("Failed to fsync: {:?}", e);
                 nfsstat3::NFS3ERR_IO
             })?;
 
-            // Explicitly drop the file to ensure it's closed and flushed before getting metadata
-            drop(file);
-
-            // Get metadata
-            let metadata = crypto_fs
-                .metadata(&path)
-                .map_err(|e| fs_err_to_nfsstat(&e))?;
+            // Get metadata from the open file handle (avoids stale data).
+            let metadata = CryptoFile::metadata(&*guard).map_err(|e| {
+                error!("Failed to get metadata after write: {:?}", e);
+                nfsstat3::NFS3ERR_IO
+            })?;
 
             Ok(NfsServer::<FS>::metadata_to_fattr3(metadata, handle))
         })
@@ -750,6 +1062,11 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         let dir_path = self.get_path_from_handle(dir_handle)?;
 
         let file_path = dir_path.join(&name_str);
+
+        // Close any cached file handle before removing the file so that
+        // the underlying CryptoFsFile is flushed and dropped first.
+        self.close_cached_file_by_path(&file_path)?;
+
         let crypto_fs = self.crypto_fs.clone();
         let file_path_clone = file_path.clone();
 
@@ -799,6 +1116,12 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         let from_path = from_dir_path.join(&from_name_str);
         let to_path = to_dir_path.join(&to_name_str);
+
+        // Close cached file handles for both source and destination before
+        // renaming so that no stale handle outlives the rename.
+        self.close_cached_file_by_path(&from_path)?;
+        self.close_cached_file_by_path(&to_path)?;
+
         let crypto_fs = self.crypto_fs.clone();
         let from_path_clone = from_path.clone();
         let to_path_clone = to_path.clone();
@@ -859,7 +1182,8 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             nfsstat3::NFS3ERR_IO
         })??;
 
-        let mut resolved_entries: Vec<(String, fileid3, Metadata)> = Vec::new();
+        let mut valid_entries: Vec<(String, Metadata)> = Vec::new();
+        let mut entry_paths: Vec<PathBuf> = Vec::new();
         for entry in entries {
             let name = match entry.filename_string() {
                 Ok(n) => n,
@@ -868,10 +1192,17 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
                     continue;
                 }
             };
-            let entry_path = path.join(&name);
-            let fileid = self.get_or_create_handle(entry_path)? as fileid3;
-            resolved_entries.push((name, fileid, entry.metadata));
+            entry_paths.push(path.join(&name));
+            valid_entries.push((name, entry.metadata));
         }
+
+        // Batch handle creation: single lock acquisition for all entries.
+        let handles = self.get_or_create_handles_batch(entry_paths)?;
+        let mut resolved_entries: Vec<(String, fileid3, Metadata)> = valid_entries
+            .into_iter()
+            .zip(handles)
+            .map(|((name, metadata), h)| (name, h as fileid3, metadata))
+            .collect();
 
         resolved_entries.sort_by(|left, right| left.0.cmp(&right.0));
 

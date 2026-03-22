@@ -1067,6 +1067,12 @@ impl CryptoFsFile {
         self.real_len
     }
 
+    /// Flush userspace buffers and then fsync to persistent storage.
+    pub fn fsync(&mut self) -> std::io::Result<()> {
+        self.rfs_file.flush()?;
+        self.rfs_file.fsync()
+    }
+
     /// Updates metadata according to a real file.
     /// Uses `metadata()` from the underlying file handle instead of seeking
     /// to the end and back (avoids 3 extra syscalls).
@@ -1243,7 +1249,18 @@ impl CryptoFsFile {
         self.rfs_file
             .write_all(&self.write_buffer[..encrypted_len])?;
 
-        // 6. Update Cache
+        // 6. Update real_len incrementally so that subsequent chunks in a
+        //    multi-chunk write see the correct file size. Without this,
+        //    a partial failure would leave real_len stale.
+        let new_ciphertext_end = (chunk_idx * FILE_CHUNK_LENGTH as u64)
+            + FILE_HEADER_LENGTH as u64
+            + encrypted_len as u64;
+        if new_ciphertext_end > self.real_len {
+            self.real_len = new_ciphertext_end;
+            self.metadata.len = calculate_cleartext_size(self.real_len);
+        }
+
+        // 7. Update Cache
         self.chunk_cache.insert(chunk_idx, chunk_data);
 
         Ok(data.len())
@@ -1273,6 +1290,10 @@ impl Seek for CryptoFsFile {
                 self.current_pos = new_pos as u64;
             }
             SeekFrom::End(p) => {
+                // Refresh real_len from the underlying file to avoid
+                // returning a stale size on persistent handles.
+                self.refresh_metadata()
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
                 let size = self.file_size();
                 let size = i64::try_from(size).map_err(|_| {
                     std::io::Error::new(
@@ -1375,6 +1396,12 @@ impl Write for CryptoFsFile {
             return Err(FileSystemError::ReadOnly.into());
         }
         let payload_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        // Refresh real_len from the underlying file so that known_size
+        // is not stale after concurrent operations (e.g. setattr truncation).
+        self.refresh_metadata().map_err(|e| {
+            error!("Failed to refresh metadata before write: {:?}", e);
+            std::io::Error::from(e)
+        })?;
         let mut known_size = self.file_size();
 
         // If we're writing past the end of the file, fill the gap with zeros

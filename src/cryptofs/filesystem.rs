@@ -14,6 +14,15 @@ use std::os::macos::fs::MetadataExt;
 /// A File should be readable/writeable/seekable, and be able to return its metadata
 pub trait File: Seek + Read + Write + Sync + Send + Debug {
     fn metadata(&self) -> Result<Metadata, Box<dyn Error>>;
+
+    /// Synchronize file data and metadata to persistent storage.
+    ///
+    /// The default implementation is a no-op, which is appropriate for
+    /// in-memory filesystems. Real filesystem providers should override
+    /// this to call `fsync` or equivalent.
+    fn fsync(&self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The trait that defines a filesystem.

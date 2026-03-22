@@ -24,6 +24,10 @@ impl File for std::fs::File {
     fn metadata(&self) -> Result<Metadata, Box<dyn Error>> {
         Ok(Metadata::from(self.metadata()?))
     }
+
+    fn fsync(&self) -> std::io::Result<()> {
+        self.sync_all()
+    }
 }
 
 impl FileSystem for LocalFs {
@@ -72,11 +76,9 @@ impl FileSystem for LocalFs {
     fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, Box<dyn Error>> {
         Ok(Box::new(
             fs::OpenOptions::new()
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .write(true)
                 .read(true)
-                .create_new(true)
                 .open(path)?,
         ))
     }

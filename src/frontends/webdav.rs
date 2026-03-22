@@ -107,9 +107,9 @@ impl Drop for DFile {
     fn drop(&mut self) {
         // Try to flush any pending data on drop to prevent data loss.
         // Errors during drop are logged but cannot be propagated.
-        if let Ok(mut guard) = self.crypto_fs_file.lock() {
-            if let Err(e) = guard.flush() {
-                error!("WebDAV DFile drop flush error: {:?}", e);
+        if let Ok(guard) = self.crypto_fs_file.lock() {
+            if let Err(e) = guard.fsync() {
+                error!("WebDAV DFile drop fsync error: {:?}", e);
             }
         }
     }
@@ -238,8 +238,8 @@ impl DavFile for DFile {
         async move {
             tokio::task::spawn_blocking(move || {
                 debug!("WebDAV flush");
-                let mut guard = crypto_fs_file.lock().map_err(|_| FsError::GeneralFailure)?;
-                guard.flush().map_err(|e| {
+                let guard = crypto_fs_file.lock().map_err(|_| FsError::GeneralFailure)?;
+                guard.fsync().map_err(|e| {
                     error!("WebDAV flush error: {:?}", e);
                     FsError::GeneralFailure
                 })

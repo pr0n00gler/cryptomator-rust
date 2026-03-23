@@ -145,10 +145,15 @@ impl Drop for OpenFileGuard {
 /// Provides an access to an encrypted storage
 /// In a nutshell, translates all the 'virtual' paths, like '/some_folder/file.txt', to real paths,
 /// like /d/DR/RW3L6XRAPFC2UCK5QY37Q2U552IRPE/eZdOa_B9fRqncpYjZmKXfJEz81LgRUbT0yWdE0wyNTMd.c9r
-#[derive(Clone)]
+/// `Clone` is implemented manually so that the `Cryptor` (which holds
+/// master key material) is shared via `Arc` rather than duplicated.
+/// Every clone of `CryptoFs` points to the same single copy of key
+/// material, eliminating transient heap copies of the 32-byte master keys.
 pub struct CryptoFs<FS: FileSystem> {
-    /// Instance of the Cryptor - does all work with cryptography
-    cryptor: Cryptor,
+    /// Instance of the Cryptor - does all work with cryptography.
+    /// Wrapped in `Arc` so cloning `CryptoFs` shares the key material
+    /// instead of duplicating it on the heap.
+    cryptor: Arc<Cryptor>,
 
     /// path to an encrypted storage
     root_folder: PathBuf,
@@ -167,6 +172,19 @@ pub struct CryptoFs<FS: FileSystem> {
     open_file_count: Arc<AtomicUsize>,
 }
 
+impl<FS: FileSystem + Clone> Clone for CryptoFs<FS> {
+    fn clone(&self) -> Self {
+        CryptoFs {
+            cryptor: Arc::clone(&self.cryptor),
+            root_folder: self.root_folder.clone(),
+            file_system_provider: self.file_system_provider.clone(),
+            caches: Arc::clone(&self.caches),
+            config: self.config,
+            open_file_count: Arc::clone(&self.open_file_count),
+        }
+    }
+}
+
 impl<FS: 'static + FileSystem> CryptoFs<FS> {
     /// Returns a new instance of CryptoFS with the given configuration
     pub fn new(
@@ -181,7 +199,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             ));
         }
         let crypto_fs = CryptoFs {
-            cryptor,
+            cryptor: Arc::new(cryptor),
             root_folder: PathBuf::from(folder),
             file_system_provider: fs_provider,
             caches: Arc::new(CryptoFsCaches::new(5000, 16)),
@@ -623,7 +641,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
         let crypto_file = CryptoFsFile::open(
             real_path,
-            self.cryptor.clone(),
+            Arc::clone(&self.cryptor),
             &self.file_system_provider,
             options,
             self.config.chunk_cache_cap,
@@ -658,7 +676,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
         let reader = self.file_system_provider.create_file(real_path.full_path)?;
         let crypto_file = CryptoFsFile::create_file(
-            self.cryptor.clone(),
+            Arc::clone(&self.cryptor),
             reader,
             self.config.chunk_cache_cap,
             guard,
@@ -885,8 +903,10 @@ static ZEROS: [u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH] = [0u8; FILE_CHUNK_CONTENT
 /// 'Virtual' file implementation of the File trait
 #[derive(Debug)]
 pub struct CryptoFsFile {
-    /// A Cryptor instance used to encrypt/decrypt data
-    cryptor: Cryptor,
+    /// A Cryptor instance used to encrypt/decrypt data.
+    /// Wrapped in `Arc` so all open file handles share the same key
+    /// material rather than each holding a separate heap copy.
+    cryptor: Arc<Cryptor>,
 
     /// Real filesystem file instance used to perform File(Read, Write, Seek) operations
     rfs_file: Box<dyn File>,
@@ -931,7 +951,7 @@ impl CryptoFsFile {
     /// must contain the Cryptor
     fn open<P: AsRef<Path>, FS: FileSystem>(
         real_path: P,
-        cryptor: Cryptor,
+        cryptor: Arc<Cryptor>,
         real_file_system_provider: &FS,
         options: OpenOptions,
         chunk_cache_cap: usize,
@@ -970,7 +990,7 @@ impl CryptoFsFile {
     /// Read/Write implementations for the traits works with a cleartext data, so CryptoFSFile instance
     /// must contain the Cryptor
     fn create_file(
-        cryptor: Cryptor,
+        cryptor: Arc<Cryptor>,
         mut rfs_file: Box<dyn File>,
         chunk_cache_cap: usize,
         open_guard: OpenFileGuard,

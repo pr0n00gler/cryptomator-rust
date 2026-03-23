@@ -49,7 +49,6 @@ impl Default for Claims {
 /// derived impl would transitively call `MasterKey`'s field debug formatters,
 /// which — even with `Zeroizing` wrappers — would print raw key bytes via the
 /// `[u8; 32]` `Debug` impl.
-#[derive(Clone)]
 pub struct Vault {
     pub master_key: MasterKey,
     pub claims: Claims,

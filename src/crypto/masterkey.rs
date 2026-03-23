@@ -111,7 +111,7 @@ impl MasterKeyJson {
 /// `tracing` or `log` crates format a containing struct in debug mode.
 /// `Zeroizing<[u8; 32]>` delegates its `Debug` impl to the inner array,
 /// which would print all 32 raw bytes — a direct key exfiltration path.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct MasterKey {
     pub primary_master_key: Zeroizing<[u8; 32]>,
     pub hmac_master_key: Zeroizing<[u8; 32]>,

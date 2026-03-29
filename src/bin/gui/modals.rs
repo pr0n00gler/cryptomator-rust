@@ -40,17 +40,24 @@ pub struct PasswordModal {
     pub vault_id: Uuid,
     pub vault_name: String,
     pub password: Zeroizing<String>,
+    /// WebDAV provider password — only shown when the vault uses a WebDAV
+    /// filesystem provider so the user can authenticate against the remote
+    /// server on each unlock.
+    pub webdav_password: Zeroizing<String>,
+    pub needs_webdav_password: bool,
     pub confirmed: bool,
     pub cancelled: bool,
     focus_set: bool,
 }
 
 impl PasswordModal {
-    pub fn new(vault_id: Uuid, vault_name: String) -> Self {
+    pub fn new(vault_id: Uuid, vault_name: String, needs_webdav_password: bool) -> Self {
         Self {
             vault_id,
             vault_name,
             password: Zeroizing::new(String::new()),
+            webdav_password: Zeroizing::new(String::new()),
+            needs_webdav_password,
             confirmed: false,
             cancelled: false,
             focus_set: false,
@@ -87,6 +94,16 @@ impl Modal for PasswordModal {
                 if !self.focus_set {
                     response.request_focus();
                     self.focus_set = true;
+                }
+
+                if self.needs_webdav_password {
+                    ui.add_space(8.0);
+                    ui.label("WebDAV server password:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut *self.webdav_password)
+                            .password(true)
+                            .desired_width(300.0),
+                    );
                 }
 
                 // Enter key confirms

@@ -1,6 +1,8 @@
 use eframe::egui;
 use uuid::Uuid;
 
+use cryptomator::crypto::DEFAULT_VAULT_FILENAME;
+
 use crate::storage::{
     AppStorage, FsProviderConfig, IdleLockConfig, MountingConfig, VaultEntry, VolumeType,
 };
@@ -66,7 +68,7 @@ impl VaultSettingsState {
                 String::new(),
                 String::new(),
             ),
-            FsProviderConfig::WebDav { url, username } => (
+            FsProviderConfig::WebDav { url, username, .. } => (
                 ProviderChoice::WebDav,
                 String::new(),
                 url.clone(),
@@ -74,23 +76,26 @@ impl VaultSettingsState {
             ),
         };
 
-        let (volume_choice, webdav_host, webdav_port, webdav_auth_user) =
+        let (volume_choice, webdav_host, webdav_port, webdav_auth_user, webdav_auth_pass) =
             match &entry.mounting.volume_type {
                 VolumeType::Nfs => (
                     VolumeChoice::Nfs,
                     "127.0.0.1".to_owned(),
                     "4919".to_owned(),
                     String::new(),
+                    String::new(),
                 ),
                 VolumeType::WebDav {
                     host,
                     port,
                     auth_user,
+                    auth_password,
                 } => (
                     VolumeChoice::WebDav,
                     host.clone(),
                     port.to_string(),
                     auth_user.clone().unwrap_or_default(),
+                    auth_password.clone().unwrap_or_default(),
                 ),
             };
 
@@ -115,7 +120,7 @@ impl VaultSettingsState {
             webdav_host,
             webdav_port,
             webdav_auth_user,
-            webdav_auth_pass: String::new(),
+            webdav_auth_pass,
         }
     }
 
@@ -132,7 +137,7 @@ impl VaultSettingsState {
                 None
             };
 
-            entry.provider = match self.provider {
+            let provider = match self.provider {
                 ProviderChoice::Local => FsProviderConfig::Local {
                     base_path: self.local_base_path.clone(),
                 },
@@ -145,19 +150,34 @@ impl VaultSettingsState {
                     },
                 },
             };
+            let (storage_path, vault_file_path) = remap_storage_paths(entry, &provider);
+            entry.storage_path = storage_path;
+            entry.vault_file_path = vault_file_path;
+            entry.provider = provider;
 
             entry.mounting = MountingConfig {
                 volume_type: match self.volume_choice {
                     VolumeChoice::Nfs => VolumeType::Nfs,
-                    VolumeChoice::WebDav => VolumeType::WebDav {
-                        host: self.webdav_host.clone(),
-                        port: self.webdav_port.parse().unwrap_or(4919),
-                        auth_user: if self.webdav_auth_user.is_empty() {
-                            None
-                        } else {
-                            Some(self.webdav_auth_user.clone())
-                        },
-                    },
+                    VolumeChoice::WebDav => {
+                        let existing_auth_password = match &entry.mounting.volume_type {
+                            VolumeType::WebDav { auth_password, .. } => auth_password.clone(),
+                            _ => None,
+                        };
+                        VolumeType::WebDav {
+                            host: self.webdav_host.clone(),
+                            port: self.webdav_port.parse().unwrap_or(4919),
+                            auth_user: if self.webdav_auth_user.is_empty() {
+                                None
+                            } else {
+                                Some(self.webdav_auth_user.clone())
+                            },
+                            auth_password: if self.webdav_auth_pass.is_empty() {
+                                existing_auth_password
+                            } else {
+                                Some(self.webdav_auth_pass.clone())
+                            },
+                        }
+                    }
                 },
                 mount_point: if self.mount_point.is_empty() {
                     None
@@ -317,5 +337,112 @@ fn draw_mounting_tab(state: &mut VaultSettingsState, ui: &mut egui::Ui) {
             labeled_text_field(ui, "User:", &mut state.webdav_auth_user, "");
             labeled_password_field(ui, "Password:", &mut state.webdav_auth_pass);
         });
+    }
+}
+
+fn remap_storage_paths(entry: &VaultEntry, provider: &FsProviderConfig) -> (String, String) {
+    let current_root = provider_root(&entry.provider);
+    let new_root = provider_root(provider);
+    let storage_path = remap_path_prefix(&entry.storage_path, current_root, new_root)
+        .unwrap_or_else(|| new_root.to_owned());
+    let vault_file_path =
+        remap_path_prefix(&entry.vault_file_path, &entry.storage_path, &storage_path)
+            .unwrap_or_else(|| {
+                format!(
+                    "{}/{}",
+                    storage_path.trim_end_matches('/'),
+                    DEFAULT_VAULT_FILENAME
+                )
+            });
+    (storage_path, vault_file_path)
+}
+
+fn provider_root(provider: &FsProviderConfig) -> &str {
+    match provider {
+        FsProviderConfig::Local { base_path } => base_path,
+        FsProviderConfig::WebDav { url, .. } => url,
+    }
+}
+
+fn remap_path_prefix(path: &str, old_prefix: &str, new_prefix: &str) -> Option<String> {
+    let old_trimmed = old_prefix.trim_end_matches('/');
+    let new_trimmed = new_prefix.trim_end_matches('/');
+
+    if path == old_prefix || path == old_trimmed {
+        return Some(new_trimmed.to_owned());
+    }
+
+    let suffix = path
+        .strip_prefix(old_prefix)
+        .or_else(|| path.strip_prefix(old_trimmed))?;
+    let suffix = suffix.trim_start_matches('/');
+
+    if suffix.is_empty() {
+        Some(new_trimmed.to_owned())
+    } else {
+        Some(format!("{new_trimmed}/{suffix}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{provider_root, remap_storage_paths};
+    use crate::storage::{FsProviderConfig, MountingConfig, VaultEntry, VolumeType};
+    use cryptomator::crypto::DEFAULT_VAULT_FILENAME;
+    use uuid::Uuid;
+
+    #[test]
+    fn remaps_local_storage_and_vault_paths() {
+        let entry = VaultEntry {
+            id: Uuid::nil(),
+            name: "Vault".into(),
+            storage_path: "/old/location/Vault".into(),
+            vault_file_path: "/old/location/Vault/masterkey.cryptomator".into(),
+            provider: FsProviderConfig::Local {
+                base_path: "/old/location/Vault".into(),
+            },
+            mounting: MountingConfig::default(),
+            idle_lock: None,
+        };
+        let new_provider = FsProviderConfig::Local {
+            base_path: "/new/location/Vault".into(),
+        };
+
+        let (storage_path, vault_file_path) = remap_storage_paths(&entry, &new_provider);
+
+        assert_eq!(storage_path, "/new/location/Vault");
+        assert_eq!(vault_file_path, "/new/location/Vault/masterkey.cryptomator");
+    }
+
+    #[test]
+    fn remaps_webdav_storage_using_provider_prefix() {
+        let entry = VaultEntry {
+            id: Uuid::nil(),
+            name: "Vault".into(),
+            storage_path: "https://old.example/dav/Vault".into(),
+            vault_file_path: "https://old.example/dav/Vault/vault.cryptomator".into(),
+            provider: FsProviderConfig::WebDav {
+                url: "https://old.example/dav".into(),
+                username: Some("alice".into()),
+            },
+            mounting: MountingConfig {
+                volume_type: VolumeType::Nfs,
+                mount_point: None,
+            },
+            idle_lock: None,
+        };
+        let new_provider = FsProviderConfig::WebDav {
+            url: "https://new.example/dav".into(),
+            username: Some("alice".into()),
+        };
+
+        let (storage_path, vault_file_path) = remap_storage_paths(&entry, &new_provider);
+
+        assert_eq!(provider_root(&new_provider), "https://new.example/dav");
+        assert_eq!(storage_path, "https://new.example/dav/Vault");
+        assert_eq!(
+            vault_file_path,
+            format!("https://new.example/dav/Vault/{DEFAULT_VAULT_FILENAME}")
+        );
     }
 }

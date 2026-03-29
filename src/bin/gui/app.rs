@@ -159,12 +159,16 @@ impl CryptomatorApp {
         match action {
             VaultViewAction::None => {}
             VaultViewAction::Unlock(id) => {
-                let name = self
-                    .storage
-                    .find_vault(id)
-                    .map(|v| v.name.clone())
-                    .unwrap_or_default();
-                self.active_modal = Some(ActiveModal::Password(PasswordModal::new(id, name)));
+                let entry = self.storage.find_vault(id);
+                let name = entry.map(|v| v.name.clone()).unwrap_or_default();
+                let needs_webdav = entry
+                    .map(|v| matches!(v.provider, crate::storage::FsProviderConfig::WebDav { .. }))
+                    .unwrap_or(false);
+                self.active_modal = Some(ActiveModal::Password(PasswordModal::new(
+                    id,
+                    name,
+                    needs_webdav,
+                )));
             }
             VaultViewAction::Lock(id) => {
                 if let Some(rt) = self.vault_runtimes.get_mut(&id) {
@@ -191,11 +195,20 @@ impl CryptomatorApp {
                         if pm.confirmed {
                             let vault_id = pm.vault_id;
                             let password = Zeroizing::new(String::from(pm.password.as_str()));
+                            let webdav_password = if pm.webdav_password.is_empty() {
+                                None
+                            } else {
+                                Some(Zeroizing::new(String::from(pm.webdav_password.as_str())))
+                            };
                             // Start unlock
                             if let Some(entry) = self.storage.find_vault(vault_id) {
                                 let entry = entry.clone();
                                 let rt = self.get_or_create_runtime(vault_id);
-                                rt.run_mount(&entry, &password);
+                                rt.run_mount(
+                                    &entry,
+                                    &password,
+                                    webdav_password.as_deref().map(|s| s.as_str()),
+                                );
                             }
                         }
                         true

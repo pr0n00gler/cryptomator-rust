@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -167,7 +168,12 @@ impl VaultRuntime {
     // -- Actions --------------------------------------------------------------
 
     /// Mount the vault using NFS (simple mount mode).
-    pub fn run_mount(&mut self, entry: &VaultEntry, password: &str) {
+    pub fn run_mount(
+        &mut self,
+        entry: &VaultEntry,
+        password: &str,
+        webdav_provider_password: Option<&str>,
+    ) {
         let vault_path = resolved_vault_path(entry);
         let full_storage_path = full_storage_path(entry);
         let mount_folder = match &entry.mounting.mount_point {
@@ -186,6 +192,8 @@ impl VaultRuntime {
         }
 
         let password = Zeroizing::new(password.to_owned());
+        let webdav_provider_password =
+            webdav_provider_password.map(|p| Zeroizing::new(p.to_owned()));
         let tx = self.log_tx.clone();
         let busy = self.busy.clone();
         let provider = entry.provider.clone();
@@ -217,9 +225,9 @@ impl VaultRuntime {
                 ),
                 FsProviderConfig::WebDav { url, username } => {
                     let user = username.as_deref();
-                    // WebDav provider password is not stored; we don't support it in mount yet.
+                    let pass = webdav_provider_password.as_deref().map(|z| z.as_str());
                     do_mount(
-                        WebDavFs::new(url, user, None),
+                        WebDavFs::new(url, user, pass),
                         &vault_path,
                         &full_storage_path,
                         password.as_str(),
@@ -435,11 +443,13 @@ fn do_mount<FS: FileSystem + 'static>(
             host,
             port,
             auth_user,
+            auth_password,
         } => do_webdav_mount(
             crypto_fs,
             host,
             *port,
             auth_user.as_deref(),
+            auth_password.as_deref(),
             tx,
             shutdown_rx,
         ),
@@ -572,32 +582,81 @@ fn do_webdav_mount<FS: FileSystem + 'static>(
     host: &str,
     port: u16,
     auth_user: Option<&str>,
+    auth_password: Option<&str>,
     tx: &mpsc::Sender<LogMsg>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
     let listen_address = format!("{host}:{port}");
+    let socket_addr: SocketAddr = listen_address
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid WebDAV listen address '{listen_address}': {e}"))?;
 
-    // NOTE: The WebDAV auth password is not persisted for security reasons and must
-    // be re-entered on each unlock. Currently hardcoded to empty string since the
-    // settings UI does not thread the password through to the mount flow. This is a
-    // known limitation -- see settings_window.rs `webdav_auth_pass` field.
-    let auth = auth_user.map(|user| WebDavAuth::new(user, ""));
+    let auth = auth_user.map(|user| WebDavAuth::new(user, auth_password.unwrap_or("")));
+
+    // Fail before updating UI state if the address is already in use.
+    //
+    // NOTE: This is a TOCTOU check -- the port could become unavailable between
+    // this probe and the actual bind inside `mount_webdav`. The check exists
+    // only to give a friendlier early error in the common case; the real bind
+    // inside the server will still fail safely if the port is taken.
+    std::net::TcpListener::bind(socket_addr)
+        .map_err(|e| anyhow::anyhow!("Failed to bind WebDAV server on {listen_address}: {e}"))?;
 
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| anyhow::anyhow!("Failed to create tokio runtime: {e}"))?;
 
-    let _ = tx.send(LogMsg::ServerRunning(format!(
-        "Vault unlocked. WebDAV server listening on {listen_address}"
-    )));
+    rt.block_on(async move {
+        let mut webdav_handle = tokio::spawn(mount_webdav(listen_address.clone(), crypto_fs, auth));
+        let mut ready = false;
 
-    rt.block_on(async {
-        tokio::select! {
-            _ = mount_webdav(listen_address, crypto_fs, auth) => {}
-            _ = shutdown_rx => {}
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+            if tokio::net::TcpStream::connect(socket_addr).await.is_ok() {
+                ready = true;
+                break;
+            }
+
+            if webdav_handle.is_finished() {
+                match webdav_handle.await {
+                    Ok(()) => {
+                        return Err(anyhow::anyhow!(
+                            "WebDAV server exited before accepting connections"
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("WebDAV server task failed: {e}"));
+                    }
+                }
+            }
         }
-    });
 
-    Ok(())
+        if !ready {
+            webdav_handle.abort();
+            let _ = webdav_handle.await;
+            return Err(anyhow::anyhow!(
+                "Timed out waiting for the WebDAV server to start"
+            ));
+        }
+
+        let _ = tx.send(LogMsg::ServerRunning(format!(
+            "Vault unlocked. WebDAV server listening on {listen_address}"
+        )));
+
+        tokio::select! {
+            result = &mut webdav_handle => {
+                match result {
+                    Ok(()) => Err(anyhow::anyhow!("WebDAV server stopped unexpectedly")),
+                    Err(e) => Err(anyhow::anyhow!("WebDAV server task failed: {e}")),
+                }
+            }
+            _ = shutdown_rx => {
+                webdav_handle.abort();
+                let _ = webdav_handle.await;
+                Ok(())
+            }
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------

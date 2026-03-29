@@ -50,6 +50,8 @@ pub enum VolumeType {
         host: String,
         port: u16,
         auth_user: Option<String>,
+        #[serde(skip, default)]
+        auth_password: Option<String>,
     },
 }
 
@@ -198,5 +200,47 @@ impl AppStorage {
 
     pub fn find_vault_mut(&mut self, id: Uuid) -> Option<&mut VaultEntry> {
         self.vaults.iter_mut().find(|v| v.id == id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppStorage, FsProviderConfig, MountingConfig, VaultEntry, VolumeType};
+    use uuid::Uuid;
+
+    #[test]
+    fn skips_transient_webdav_auth_password_during_serialization() {
+        let storage = AppStorage {
+            vaults: vec![VaultEntry {
+                id: Uuid::nil(),
+                name: "Vault".into(),
+                storage_path: "https://example.test/dav/Vault".into(),
+                vault_file_path: "https://example.test/dav/Vault/vault.cryptomator".into(),
+                provider: FsProviderConfig::WebDav {
+                    url: "https://example.test/dav".into(),
+                    username: Some("alice".into()),
+                },
+                mounting: MountingConfig {
+                    volume_type: VolumeType::WebDav {
+                        host: "127.0.0.1".into(),
+                        port: 4919,
+                        auth_user: Some("bob".into()),
+                        auth_password: Some("mount-secret".into()),
+                    },
+                    mount_point: Some("/tmp/vault".into()),
+                },
+                idle_lock: None,
+            }],
+        };
+
+        let json = serde_json::to_string(&storage).unwrap();
+
+        assert!(!json.contains("mount-secret"));
+
+        let decoded: AppStorage = serde_json::from_str(&json).unwrap();
+        match &decoded.vaults[0].mounting.volume_type {
+            VolumeType::WebDav { auth_password, .. } => assert_eq!(auth_password, &None),
+            VolumeType::Nfs => panic!("expected webdav volume"),
+        }
     }
 }

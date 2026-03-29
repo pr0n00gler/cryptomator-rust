@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::mpsc;
 
 use eframe::egui;
 use uuid::Uuid;
@@ -7,7 +6,7 @@ use zeroize::Zeroizing;
 
 use crate::create_flow::CreateVaultModal;
 use crate::modals::{ConfirmModal, Modal, ModalResult, PasswordModal, SuccessModal};
-use crate::open_flow::{self, OpenResult};
+use crate::open_flow::OpenVaultModal;
 use crate::settings_window::{self, SettingsAction, VaultSettingsState};
 use crate::sidebar::{self, SidebarAction};
 use crate::storage::AppStorage;
@@ -25,6 +24,7 @@ enum ActiveModal {
     Success(SuccessModal),
     Confirm(ConfirmModal),
     Create(Box<CreateVaultModal>),
+    Open(Box<OpenVaultModal>),
 }
 
 // ---------------------------------------------------------------------------
@@ -40,9 +40,6 @@ pub struct CryptomatorApp {
     settings_window: Option<VaultSettingsState>,
 
     log: LogBuffer,
-
-    // File picker result channel
-    file_picker_rx: Option<mpsc::Receiver<OpenResult>>,
 }
 
 impl CryptomatorApp {
@@ -54,7 +51,6 @@ impl CryptomatorApp {
             active_modal: None,
             settings_window: None,
             log: LogBuffer::new(),
-            file_picker_rx: None,
         }
     }
 
@@ -102,23 +98,6 @@ impl CryptomatorApp {
         }
     }
 
-    /// Check if file picker has returned a result.
-    fn poll_file_picker(&mut self) {
-        if let Some(ref rx) = self.file_picker_rx {
-            if let Ok(result) = rx.try_recv() {
-                match result {
-                    OpenResult::Picked(entry) => {
-                        let id = entry.id;
-                        self.storage.add_vault(*entry);
-                        self.selected_vault_id = Some(id);
-                    }
-                    OpenResult::Cancelled => {}
-                }
-                self.file_picker_rx = None;
-            }
-        }
-    }
-
     fn handle_sidebar_action(&mut self, action: SidebarAction) {
         match action {
             SidebarAction::None => {}
@@ -129,9 +108,7 @@ impl CryptomatorApp {
                 self.active_modal = Some(ActiveModal::Create(Box::new(CreateVaultModal::new())));
             }
             SidebarAction::OpenExistingVault => {
-                if self.file_picker_rx.is_none() {
-                    self.file_picker_rx = Some(open_flow::open_existing_vault());
-                }
+                self.active_modal = Some(ActiveModal::Open(Box::new(OpenVaultModal::new())));
             }
             SidebarAction::RemoveVault(id) => {
                 let name = self
@@ -270,6 +247,20 @@ impl CryptomatorApp {
                     }
                 }
             }
+            ActiveModal::Open(om) => {
+                let result = om.show(ctx);
+                match result {
+                    ModalResult::Closed => {
+                        if let Some(entry) = om.opened_entry.take() {
+                            let id = entry.id;
+                            self.storage.add_vault(entry);
+                            self.selected_vault_id = Some(id);
+                        }
+                        true
+                    }
+                    ModalResult::Open => false,
+                }
+            }
         };
 
         if should_close {
@@ -315,8 +306,6 @@ impl eframe::App for CryptomatorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Drain all background threads and check timers.
         self.drain_all_runtimes();
-        self.poll_file_picker();
-
         // Determine repaint schedule
         let any_busy = self.vault_runtimes.values().any(|r| r.is_busy());
         let any_unlocked = self
@@ -324,7 +313,7 @@ impl eframe::App for CryptomatorApp {
             .values()
             .any(|r| r.status == VaultStatus::Unlocked);
 
-        if any_busy || self.file_picker_rx.is_some() {
+        if any_busy {
             ctx.request_repaint();
         } else if any_unlocked {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));

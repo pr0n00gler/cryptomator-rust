@@ -45,6 +45,7 @@ pub struct VaultSettingsState {
     provider: ProviderChoice,
     local_base_path: String,
     webdav_url: String,
+    webdav_vault_path: String,
     webdav_username: String,
 
     // Mounting
@@ -61,20 +62,26 @@ pub struct VaultSettingsState {
 
 impl VaultSettingsState {
     pub fn from_entry(entry: &VaultEntry) -> Self {
-        let (provider, local_base_path, webdav_url, webdav_username) = match &entry.provider {
-            FsProviderConfig::Local { base_path } => (
-                ProviderChoice::Local,
-                base_path.clone(),
-                String::new(),
-                String::new(),
-            ),
-            FsProviderConfig::WebDav { url, username, .. } => (
-                ProviderChoice::WebDav,
-                String::new(),
-                url.clone(),
-                username.clone().unwrap_or_default(),
-            ),
-        };
+        let (provider, local_base_path, webdav_url, webdav_vault_path, webdav_username) =
+            match &entry.provider {
+                FsProviderConfig::Local { base_path } => (
+                    ProviderChoice::Local,
+                    base_path.clone(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ),
+                FsProviderConfig::WebDav { url, username, .. } => {
+                    let vault_path = strip_url_prefix(&entry.storage_path, url);
+                    (
+                        ProviderChoice::WebDav,
+                        String::new(),
+                        url.clone(),
+                        vault_path,
+                        username.clone().unwrap_or_default(),
+                    )
+                }
+            };
 
         let (volume_choice, webdav_host, webdav_port, webdav_auth_user, webdav_auth_pass) =
             match &entry.mounting.volume_type {
@@ -114,6 +121,7 @@ impl VaultSettingsState {
             provider,
             local_base_path,
             webdav_url,
+            webdav_vault_path,
             webdav_username,
             volume_choice,
             mount_point: entry.mounting.mount_point.clone().unwrap_or_default(),
@@ -150,9 +158,28 @@ impl VaultSettingsState {
                     },
                 },
             };
-            let (storage_path, vault_file_path) = remap_storage_paths(entry, &provider);
-            entry.storage_path = storage_path;
-            entry.vault_file_path = vault_file_path;
+            match self.provider {
+                ProviderChoice::Local => {
+                    let (storage_path, vault_file_path) = remap_storage_paths(entry, &provider);
+                    entry.storage_path = storage_path;
+                    entry.vault_file_path = vault_file_path;
+                }
+                ProviderChoice::WebDav => {
+                    let base_url = self.webdav_url.trim().trim_end_matches('/');
+                    let vault_path = self
+                        .webdav_vault_path
+                        .trim()
+                        .trim_start_matches('/')
+                        .trim_end_matches('/');
+                    entry.storage_path = if vault_path.is_empty() {
+                        base_url.to_owned()
+                    } else {
+                        format!("{base_url}/{vault_path}")
+                    };
+                    entry.vault_file_path =
+                        format!("{}/{DEFAULT_VAULT_FILENAME}", entry.storage_path);
+                }
+            }
             entry.provider = provider;
 
             entry.mounting = MountingConfig {
@@ -293,6 +320,12 @@ fn draw_filesystem_tab(state: &mut VaultSettingsState, ui: &mut egui::Ui) {
         }
         ProviderChoice::WebDav => {
             labeled_text_field(ui, "URL:", &mut state.webdav_url, "https://example.com/dav");
+            labeled_text_field(
+                ui,
+                "Vault path:",
+                &mut state.webdav_vault_path,
+                "/path/to/MyVault",
+            );
             labeled_text_field(ui, "Username:", &mut state.webdav_username, "");
         }
     }
@@ -362,6 +395,15 @@ fn provider_root(provider: &FsProviderConfig) -> &str {
         FsProviderConfig::Local { base_path } => base_path,
         FsProviderConfig::WebDav { url, .. } => url,
     }
+}
+
+fn strip_url_prefix(storage_path: &str, url: &str) -> String {
+    let url_trimmed = url.trim_end_matches('/');
+    storage_path
+        .strip_prefix(url_trimmed)
+        .unwrap_or(storage_path)
+        .trim_start_matches('/')
+        .to_owned()
 }
 
 fn remap_path_prefix(path: &str, old_prefix: &str, new_prefix: &str) -> Option<String> {

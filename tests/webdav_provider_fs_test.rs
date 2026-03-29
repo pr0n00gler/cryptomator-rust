@@ -3,6 +3,7 @@ use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem, OpenOptions};
 use cryptomator::frontends::mount::mount_webdav;
 use cryptomator::providers::{LocalFs, MemoryFs, WebDavFs};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::net::TcpListener;
 
 const PATH_TO_VAULT: &str = "tests/test_storage/vault.cryptomator";
 const DEFAULT_PASSWORD: &str = "12345678";
@@ -71,6 +72,25 @@ where
     std::thread::spawn(f).join().expect("test thread panicked")
 }
 
+fn spawn_static_response_server(
+    responses: Vec<&'static str>,
+) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = std::thread::spawn(move || {
+        for response in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 4096];
+            let _ = stream.read(&mut buf);
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+
+    (format!("http://{addr}"), handle)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_webdav_exists() {
     let (base_url, _handle) = setup_test_server().await;
@@ -109,6 +129,42 @@ async fn test_webdav_create_and_read_file() {
             assert_eq!(buf, "hello webdav");
         }
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webdav_create_file_rejects_failed_put() {
+    let (base_url, handle) = spawn_static_response_server(vec![
+        "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    ]);
+
+    run_blocking(move || {
+        let fs = WebDavFs::new(&base_url, None, None);
+        let err = fs.create_file("/rejected.txt").unwrap_err().to_string();
+        assert!(err.contains("PUT"));
+        assert!(err.contains("403"));
+    });
+
+    handle.join().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webdav_open_truncate_rejects_failed_put() {
+    let (base_url, handle) = spawn_static_response_server(vec![
+        "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nLast-Modified: Sat, 01 Jan 2022 00:00:00 GMT\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 507 Insufficient Storage\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    ]);
+
+    run_blocking(move || {
+        let fs = WebDavFs::new(&base_url, None, None);
+        let mut opts = OpenOptions::new();
+        opts.write(true).truncate(true);
+
+        let err = fs.open_file("/truncate.txt", opts).unwrap_err().to_string();
+        assert!(err.contains("PUT"));
+        assert!(err.contains("507"));
+    });
+
+    handle.join().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

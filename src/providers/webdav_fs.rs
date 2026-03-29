@@ -91,6 +91,17 @@ impl WebDavFs {
         Ok(resp.text()?)
     }
 
+    fn put_empty_checked(&self, url: &str) -> Result<(), Box<dyn Error>> {
+        let resp = self.client.put(url).body(Vec::new()).send()?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        Err(format!("PUT {url} failed with status {status}: {body}").into())
+    }
+
     fn parse_multistatus(xml: &str) -> Vec<PropfindEntry> {
         parse_multistatus_xml(xml)
     }
@@ -626,7 +637,7 @@ impl FileSystem for WebDavFs {
             if self.exists(&path) {
                 return Err("file already exists".into());
             }
-            self.client.put(&url).body(Vec::new()).send()?;
+            self.put_empty_checked(&url)?;
             return Ok(Box::new(WebDavFile {
                 url,
                 client: self.client.clone(),
@@ -674,7 +685,7 @@ impl FileSystem for WebDavFs {
             (content_length, meta)
         } else {
             if !file_exists {
-                self.client.put(&url).body(Vec::new()).send()?;
+                self.put_empty_checked(&url)?;
             }
             (0, empty_meta)
         };
@@ -684,7 +695,7 @@ impl FileSystem for WebDavFs {
         // When truncating an existing file, upload an empty body immediately
         // so the server-side content is cleared.
         let content_length = if options.truncate && file_exists {
-            self.client.put(&url).body(Vec::new()).send()?;
+            self.put_empty_checked(&url)?;
             0
         } else {
             content_length
@@ -702,7 +713,7 @@ impl FileSystem for WebDavFs {
 
     fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, Box<dyn Error>> {
         let url = self.url_for(&path);
-        self.client.put(&url).body(Vec::new()).send()?;
+        self.put_empty_checked(&url)?;
 
         let now = SystemTime::now();
         let meta = Metadata {

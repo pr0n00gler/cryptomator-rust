@@ -244,29 +244,42 @@ impl HandleState {
             .ok_or(nfsstat3::NFS3ERR_STALE)
     }
 
-    fn forget(&mut self, path: &PathBuf) {
-        if let Some(handle) = self.path_to_handle.remove(path) {
-            self.handle_to_path.remove(&handle);
-            if let Some(order) = self.handle_order.remove(&handle) {
-                self.order_to_handle.remove(&order);
-            }
-            self.file_locks.remove(&handle);
-            // Close any cached file handle for this path.
-            if let Some(file) = self.open_files.remove(&handle) {
-                match file.lock() {
-                    Ok(guard) => {
-                        if let Err(e) = guard.fsync() {
-                            error!("Failed to fsync forgotten file handle {}: {:?}", handle, e);
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            "File mutex poisoned during forget of handle {}, data may be lost: {}",
-                            handle, e
-                        );
+    fn forget_handle(&mut self, handle: u64) {
+        if let Some(path) = self.handle_to_path.remove(&handle) {
+            self.path_to_handle.remove(&path);
+        }
+        if let Some(order) = self.handle_order.remove(&handle) {
+            self.order_to_handle.remove(&order);
+        }
+        self.file_locks.remove(&handle);
+        // Close any cached file handle for this path.
+        if let Some(file) = self.open_files.remove(&handle) {
+            match file.lock() {
+                Ok(guard) => {
+                    if let Err(e) = guard.fsync() {
+                        error!("Failed to fsync forgotten file handle {}: {:?}", handle, e);
                     }
                 }
+                Err(e) => {
+                    warn!(
+                        "File mutex poisoned during forget of handle {}, data may be lost: {}",
+                        handle, e
+                    );
+                }
             }
+        }
+    }
+
+    fn forget_prefix(&mut self, path_prefix: &PathBuf) {
+        let handles: Vec<u64> = self
+            .path_to_handle
+            .iter()
+            .filter(|(path, _)| path.starts_with(path_prefix))
+            .map(|(_, &handle)| handle)
+            .collect();
+
+        for handle in handles {
+            self.forget_handle(handle);
         }
     }
 
@@ -366,11 +379,11 @@ impl<FS: FileSystem + 'static> NfsServer<FS> {
             .get_path(handle)
     }
 
-    fn forget_path(&self, path: &PathBuf) -> Result<(), nfsstat3> {
+    fn forget_subtree(&self, path: &PathBuf) -> Result<(), nfsstat3> {
         self.handles
             .lock()
             .map_err(|_| nfsstat3::NFS3ERR_IO)?
-            .forget(path);
+            .forget_prefix(path);
         Ok(())
     }
 
@@ -1093,7 +1106,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             nfsstat3::NFS3ERR_IO
         })??;
 
-        self.forget_path(&file_path)?;
+        self.forget_subtree(&file_path)?;
         Ok(())
     }
 
@@ -1147,6 +1160,7 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
             nfsstat3::NFS3ERR_IO
         })??;
 
+        self.forget_subtree(&to_path)?;
         self.update_path(&from_path, to_path)?;
         Ok(())
     }

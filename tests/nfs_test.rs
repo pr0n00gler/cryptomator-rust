@@ -947,6 +947,40 @@ async fn test_nfs_remove_directory() {
 }
 
 #[tokio::test]
+async fn test_nfs_remove_directory_invalidates_descendant_handles() {
+    let nfs = setup_nfs_server();
+    let root = nfs.root_dir();
+
+    let dirname: nfsstring = b"dir_remove_stale".to_vec().into();
+    let child: nfsstring = b"stale_child.txt".to_vec().into();
+
+    let (dir_handle, _) = nfs.mkdir(root, &dirname).await.unwrap();
+    let (child_handle, _) = nfs
+        .create(dir_handle, &child, sattr3::default())
+        .await
+        .unwrap();
+    nfs.write(child_handle, 0, b"old data").await.unwrap();
+
+    nfs.remove(root, &dirname).await.unwrap();
+
+    let (recreated_dir_handle, _) = nfs.mkdir(root, &dirname).await.unwrap();
+    let (replacement_handle, _) = nfs
+        .create(recreated_dir_handle, &child, sattr3::default())
+        .await
+        .unwrap();
+    assert_ne!(
+        child_handle, replacement_handle,
+        "recreated child should not reuse the removed child's handle"
+    );
+
+    let stale = nfs.getattr(child_handle).await;
+    assert!(
+        matches!(stale, Err(nfsstat3::NFS3ERR_STALE)),
+        "removed child handle should be stale after directory recreation, got {stale:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_nfs_directory_nlink_is_two() {
     let nfs = setup_nfs_server();
     let root = nfs.root_dir();
@@ -1489,6 +1523,12 @@ async fn test_nfs_rename_to_existing_file() {
         let new_handle = nfs.lookup(root, &name_b).await.unwrap();
         let (read_data, _) = nfs.read(new_handle, 0, 100).await.unwrap();
         assert_eq!(&read_data, b"source data");
+
+        let stale = nfs.getattr(hb).await;
+        assert!(
+            matches!(stale, Err(nfsstat3::NFS3ERR_STALE)),
+            "old destination handle should become stale after overwrite rename, got {stale:?}"
+        );
     }
     // If result is Err, the implementation disallows overwriting -- also acceptable.
 }

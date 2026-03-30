@@ -1175,7 +1175,10 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         // Issue 2: short-circuit when the client asks for zero entries.
         if max_entries == 0 {
-            return Ok(ReadDirResult { entries: vec![], end: false });
+            return Ok(ReadDirResult {
+                entries: vec![],
+                end: false,
+            });
         }
 
         let crypto_fs = self.crypto_fs.clone();
@@ -1199,13 +1202,11 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
                         None
                     }
                 })
-                .filter_map(|entry| {
-                    match entry.filename_string() {
-                        Ok(name) => Some((name, entry.metadata)),
-                        Err(e) => {
-                            warn!("Skipping directory entry with invalid filename: {:?}", e);
-                            None
-                        }
+                .filter_map(|entry| match entry.filename_string() {
+                    Ok(name) => Some((name, entry.metadata)),
+                    Err(e) => {
+                        warn!("Skipping directory entry with invalid filename: {:?}", e);
+                        None
                     }
                 })
                 .collect();

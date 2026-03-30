@@ -8,7 +8,7 @@ use nfsserve::nfs::{
 use nfsserve::vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::UNIX_EPOCH;
 use tracing::{debug, error, warn};
@@ -17,6 +17,11 @@ use tracing::{debug, error, warn};
 /// evicting the least-recently-created entries.  The root handle (1)
 /// is never evicted.
 const DEFAULT_MAX_HANDLES: usize = 10_000;
+
+/// Hard limit on the number of directory entries returned in a single
+/// READDIR response.  Prevents malicious or buggy clients from asking
+/// for millions of entries at once and forcing unbounded allocations.
+const MAX_READDIR_ENTRIES_PER_CALL: usize = 4_096;
 
 /// Maximum number of concurrent NFS connections.
 ///
@@ -193,16 +198,6 @@ impl HandleState {
         Ok(())
     }
 
-    /// Returns existing handles or allocates new ones for all given paths
-    /// in a single lock acquisition.
-    fn get_or_create_batch(&mut self, paths: Vec<PathBuf>) -> Result<Vec<u64>, nfsstat3> {
-        let mut handles = Vec::with_capacity(paths.len());
-        for path in paths {
-            handles.push(self.get_or_create(path)?);
-        }
-        Ok(handles)
-    }
-
     /// Returns the existing handle for `path`, or allocates a new one.
     ///
     /// Because both the lookup and the insertion happen inside a single
@@ -235,6 +230,13 @@ impl HandleState {
         self.handle_order.insert(handle, order);
         self.order_to_handle.insert(order, handle);
         Ok(handle)
+    }
+
+    /// Returns the handle for `path` if one already exists, without
+    /// allocating a new handle.  Used for read-only lookups (e.g. skipped
+    /// entries during NFS pagination).
+    fn get(&self, path: &Path) -> Option<u64> {
+        self.path_to_handle.get(path).copied()
     }
 
     fn get_path(&self, handle: u64) -> Result<PathBuf, nfsstat3> {
@@ -363,13 +365,6 @@ impl<FS: FileSystem + 'static> NfsServer<FS> {
             .lock()
             .map_err(|_| nfsstat3::NFS3ERR_IO)?
             .get_or_create(path)
-    }
-
-    fn get_or_create_handles_batch(&self, paths: Vec<PathBuf>) -> Result<Vec<u64>, nfsstat3> {
-        self.handles
-            .lock()
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?
-            .get_or_create_batch(paths)
     }
 
     fn get_path_from_handle(&self, handle: u64) -> Result<PathBuf, nfsstat3> {
@@ -1178,89 +1173,95 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
 
         let path = self.get_path_from_handle(handle)?;
 
-        let crypto_fs = self.crypto_fs.clone();
-        let path_clone = path.clone();
+        // Issue 2: short-circuit when the client asks for zero entries.
+        if max_entries == 0 {
+            return Ok(ReadDirResult { entries: vec![], end: false });
+        }
 
-        let entries = tokio::task::spawn_blocking(move || {
-            crypto_fs
-                .read_dir(&path_clone)
-                .map_err(|e| {
-                    error!("Failed to read directory: {:?}", e);
-                    fs_err_to_nfsstat(&e)
+        let crypto_fs = self.crypto_fs.clone();
+        let handles = Arc::clone(&self.handles);
+
+        let entry_limit = max_entries.min(MAX_READDIR_ENTRIES_PER_CALL);
+
+        tokio::task::spawn_blocking(move || -> Result<ReadDirResult, nfsstat3> {
+            let entries_iter = crypto_fs.read_dir(&path).map_err(|e| {
+                error!("Failed to read directory: {:?}", e);
+                fs_err_to_nfsstat(&e)
+            })?;
+
+            // Issue 1: Collect and sort entries alphabetically so that NFS
+            // pagination cookies yield deterministic results across calls.
+            let mut all_entries: Vec<_> = entries_iter
+                .filter_map(|entry| match entry {
+                    Ok(e) => Some(e),
+                    Err(e) => {
+                        warn!("Skipping directory entry with error: {:?}", e);
+                        None
+                    }
                 })
-                .map(|iter| iter.collect::<Vec<_>>())
+                .filter_map(|entry| {
+                    match entry.filename_string() {
+                        Ok(name) => Some((name, entry.metadata)),
+                        Err(e) => {
+                            warn!("Skipping directory entry with invalid filename: {:?}", e);
+                            None
+                        }
+                    }
+                })
+                .collect();
+            all_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+            let mut collected = Vec::with_capacity(entry_limit);
+            let mut start_seen = cookie == 0;
+            let mut has_more = false;
+
+            for (name, metadata) in all_entries {
+                let full_path = path.join(&name);
+
+                if !start_seen {
+                    // Issue 5: For entries before the cookie, use a read-only
+                    // lookup to avoid permanently allocating handles for entries
+                    // the client already saw.
+                    let existing_handle = {
+                        let state = handles.lock().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                        state.get(&full_path)
+                    };
+                    if let Some(h) = existing_handle {
+                        if h == cookie {
+                            start_seen = true;
+                        }
+                    }
+                    continue;
+                }
+
+                if collected.len() >= entry_limit {
+                    has_more = true;
+                    break;
+                }
+
+                let handle_id = {
+                    let mut state = handles.lock().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                    state.get_or_create(full_path)?
+                };
+
+                collected.push(DirEntry {
+                    fileid: handle_id as fileid3,
+                    name: nfsstring::from(name.into_bytes()),
+                    attr: NfsServer::<FS>::metadata_to_fattr3(metadata, handle_id),
+                });
+            }
+
+            let end = if !start_seen { true } else { !has_more };
+            Ok(ReadDirResult {
+                entries: collected,
+                end,
+            })
         })
         .await
         .map_err(|e| {
             error!("NFS readdir task join error: {:?}", e);
             nfsstat3::NFS3ERR_IO
-        })??;
-
-        let mut valid_entries: Vec<(String, Metadata)> = Vec::new();
-        let mut entry_paths: Vec<PathBuf> = Vec::new();
-        for entry in entries {
-            let name = match entry.filename_string() {
-                Ok(n) => n,
-                Err(e) => {
-                    warn!("Skipping directory entry with invalid filename: {:?}", e);
-                    continue;
-                }
-            };
-            entry_paths.push(path.join(&name));
-            valid_entries.push((name, entry.metadata));
-        }
-
-        // Batch handle creation: single lock acquisition for all entries.
-        let handles = self.get_or_create_handles_batch(entry_paths)?;
-        let mut resolved_entries: Vec<(String, fileid3, Metadata)> = valid_entries
-            .into_iter()
-            .zip(handles)
-            .map(|((name, metadata), h)| (name, h as fileid3, metadata))
-            .collect();
-
-        resolved_entries.sort_by(|left, right| left.0.cmp(&right.0));
-
-        let mut dirlist_with_meta = Vec::new();
-        let mut found_start = cookie == 0;
-        let mut has_more = false;
-
-        for (name, fileid, metadata) in resolved_entries {
-            if !found_start {
-                if fileid == cookie {
-                    found_start = true;
-                }
-                continue;
-            }
-
-            if dirlist_with_meta.len() >= max_entries {
-                has_more = true;
-                break;
-            }
-
-            dirlist_with_meta.push(DirEntry {
-                fileid,
-                name: nfsstring::from(name.into_bytes()),
-                attr: NfsServer::<FS>::metadata_to_fattr3(metadata, fileid),
-            });
-        }
-
-        // Signal EOF when either:
-        //   (a) we filled max_entries and there are no more entries after them
-        //       (`has_more` is false), or
-        //   (b) the cookie fileid was not found in the current listing.
-        //
-        // Case (b) occurs when the file that the client last saw (identified
-        // by `cookie`) was deleted between two READDIR calls.  Without this
-        // guard the loop above exhausts all entries with `found_start` still
-        // false, returns an empty page with `end: false`, and the NFS client
-        // retries indefinitely -- a liveness failure.  Returning `end: true`
-        // here tells the client to treat the listing as complete, which is the
-        // least-surprising recovery for a stale cursor.
-        let end = !has_more || !found_start;
-        Ok(ReadDirResult {
-            entries: dirlist_with_meta,
-            end,
-        })
+        })?
     }
 
     async fn readlink(&self, _handle: u64) -> Result<nfsstring, nfsstat3> {

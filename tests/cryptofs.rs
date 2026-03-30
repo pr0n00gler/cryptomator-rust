@@ -976,7 +976,11 @@ fn test_internal_ops_respect_open_file_limit() {
     // With all user-facing slots taken, internal operations like `read_dir`
     // and `metadata` should still succeed because they do NOT consume
     // user-facing FD budget.
-    let entries: Vec<_> = crypto_fs.read_dir("/parent").unwrap().collect();
+    let entries: Vec<_> = crypto_fs
+        .read_dir("/parent")
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(entries.len(), 1, "should have one file in /parent");
     assert_eq!(entries[0].file_name, "child.dat");
 

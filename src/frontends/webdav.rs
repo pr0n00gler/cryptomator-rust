@@ -350,8 +350,8 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
                 // The return type is Result<FsStream...>.
 
                 let collected_entries: Vec<Box<dyn DavDirEntry>> = entries
-                    .map(|e| Box::new(e) as Box<dyn DavDirEntry>)
-                    .collect();
+                    .map(|entry_res| entry_res.map(|e| Box::new(e) as Box<dyn DavDirEntry>))
+                    .collect::<Result<_, FileSystemError>>()?;
 
                 Ok(collected_entries)
             })

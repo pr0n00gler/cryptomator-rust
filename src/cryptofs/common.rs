@@ -40,8 +40,15 @@ pub fn last_path_component<S: AsRef<Path>>(path: S) -> Result<PathBuf, FileSyste
     })
 }
 
-/// Returns a parent of a path
-/// The opposite of the 'last_path_component'
+/// Returns the parent directory of a path.
+///
+/// Behaves like [`std::path::Path::parent`]: returns an empty path (`""`) when
+/// the input has only a single component (i.e. a bare filename with no
+/// directory prefix).  Callers that subsequently call `.join(filename)` on the
+/// result will therefore produce a correct sibling path such as
+/// `"masterkey.cryptomator"` rather than the original path with the filename
+/// appended to it.
+///
 /// ```
 /// use cryptomator::cryptofs::parent_path;
 /// let parent = parent_path("/a/b/c/d");
@@ -49,6 +56,10 @@ pub fn last_path_component<S: AsRef<Path>>(path: S) -> Result<PathBuf, FileSyste
 /// assert_eq!("/a/b/c", parent.to_str().unwrap_or_default());
 /// #[cfg(windows)]
 /// assert_eq!("\\a\\b\\c", parent.to_str().unwrap_or_default());
+///
+/// // Single-component path: parent is the empty (root-relative) path.
+/// let parent = parent_path("vault.cryptomator");
+/// assert_eq!("", parent.to_str().unwrap_or_default());
 /// ```
 pub fn parent_path<S: AsRef<Path>>(path: S) -> PathBuf {
     let components = Path::new(path.as_ref())
@@ -56,9 +67,10 @@ pub fn parent_path<S: AsRef<Path>>(path: S) -> PathBuf {
         .collect::<Vec<Component>>();
     let mut dir_path = PathBuf::new(); //path without filename
 
-    // return the same path if there are no parents
+    // A single-component path has no meaningful parent directory.  Return an
+    // empty PathBuf so that `parent_path("file.txt").join("sibling.txt")`
+    // correctly produces `"sibling.txt"` and not `"file.txt/sibling.txt"`.
     if components.len() < 2 {
-        dir_path.push(path);
         return dir_path;
     }
     for (i, c) in components.iter().enumerate() {

@@ -25,6 +25,7 @@ evaluation purposes.
 * Full support of the original Cryptomator vaults of vault format 8.
 * Works with local vaults
 * Unlocked content can be accessed via an embedded WebDav or NFS server;
+* Experimental S3-compatible storage provider (library use)
 * Unix support
 * Read-only mode for safe vault access
 
@@ -75,6 +76,36 @@ Now you can mount it:
   mount_nfs -o nolocks,vers=3,tcp,rsize=131072,actimeo=120,port=11111,mountport=11111 tmp
 ```
 
+### Using S3 storage
+
+The CLI can use an S3-compatible backend when you pass `--filesystem-provider s3`.
+S3 configuration is loaded from environment variables (or a `.env` file in the
+working directory).
+
+Environment variables:
+
+* `S3_BUCKET` (required) -- name of the S3 bucket
+* `S3_REGION` (required) -- AWS region name (e.g. `us-east-1`)
+* `S3_PREFIX` (optional) -- key prefix inside the bucket
+* `S3_ENDPOINT` (optional) -- custom endpoint URL for S3-compatible services
+* `S3_FORCE_PATH_STYLE` (optional, `true`/`false`) -- use path-style addressing
+* `S3_VALIDATE_BUCKET` (optional, `true`/`false`) -- verify bucket access on startup
+* `S3_ACCESS_KEY` / `S3_SECRET_KEY` (optional; must be provided together)
+* `S3_SESSION_TOKEN` (optional) -- for temporary credentials
+* `S3_REQUEST_TIMEOUT_SECONDS` (optional, integer > 0) -- per-request timeout
+
+Command examples:
+
+```shell
+S3_BUCKET=my-bucket S3_REGION=us-east-1 S3_ACCESS_KEY=AKIA... S3_SECRET_KEY=... \
+  cryptomator --filesystem-provider s3 --storage-path vaults/demo create
+```
+
+```shell
+# Or use a .env file in the current directory
+cryptomator --filesystem-provider s3 --storage-path vaults/demo unlock
+```
+
 ### Unlock a vault in read-only mode
 
 To unlock a vault in read-only mode (preventing any modifications):
@@ -96,3 +127,19 @@ cryptomator --help
 ```shell
 make test
 ```
+
+### S3 Integration Tests
+
+S3 filesystem integration tests are gated by environment variables. Set these to enable the
+roundtrip test against your S3-compatible endpoint:
+
+> ⚠️ Do not commit these environment variables to source control, as they may contain secrets.
+
+* `S3_TEST_ENDPOINT`
+* `S3_TEST_BUCKET`
+* `S3_TEST_ACCESS_KEY`
+* `S3_TEST_SECRET_KEY`
+* `S3_TEST_REGION` (optional, defaults to `us-east-1`)
+* `S3_TEST_PREFIX` (optional)
+* `S3_TEST_PATH_STYLE` (optional: `true`/`1`)
+* `S3_TEST_SESSION_TOKEN` (optional)

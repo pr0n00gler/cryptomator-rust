@@ -53,6 +53,16 @@ urlencoding = "2.1"
 eframe = { version = "0.31", optional = true }
 rfd = { version = "0.15", optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = [
+    "NSStatusBar", "NSStatusItem", "NSStatusBarButton",
+    "NSMenu", "NSMenuItem", "NSImage",
+    "NSButton", "NSControl", "NSResponder", "NSView",
+    "NSApplication",
+] }
+objc2-foundation = { version = "0.2", features = ["NSString"] }
+
 [[bin]]
 name = "cryptomator-gui"
 path = "src/bin/gui/main.rs"

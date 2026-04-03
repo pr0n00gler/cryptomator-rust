@@ -40,6 +40,15 @@ pub struct CryptomatorApp {
     settings_window: Option<VaultSettingsState>,
 
     log: LogBuffer,
+
+    #[cfg(target_os = "macos")]
+    menu_bar: Option<crate::menu_bar::MenuBarHandle>,
+    /// Monotonically increasing counter that is bumped whenever vault state
+    /// changes in a way that affects the menu bar (status transitions,
+    /// vault add/remove, lock/unlock).
+    #[cfg(target_os = "macos")]
+    state_generation: u64,
+    should_quit: bool,
 }
 
 impl CryptomatorApp {
@@ -51,6 +60,11 @@ impl CryptomatorApp {
             active_modal: None,
             settings_window: None,
             log: LogBuffer::new(),
+            #[cfg(target_os = "macos")]
+            menu_bar: Some(crate::menu_bar::setup_menu_bar()),
+            #[cfg(target_os = "macos")]
+            state_generation: 0,
+            should_quit: false,
         }
     }
 
@@ -60,11 +74,19 @@ impl CryptomatorApp {
             .or_insert_with(|| VaultRuntime::new(vault_id))
     }
 
+    /// Bump the menu bar state generation so that the next frame syncs changes.
+    #[cfg(target_os = "macos")]
+    fn bump_menu_generation(&mut self) {
+        self.state_generation = self.state_generation.wrapping_add(1);
+    }
+
     /// Drain all vault runtime log channels into the global log.
     fn drain_all_runtimes(&mut self) {
         let ids: Vec<Uuid> = self.vault_runtimes.keys().copied().collect();
         for id in ids {
             if let Some(rt) = self.vault_runtimes.get_mut(&id) {
+                #[cfg(target_os = "macos")]
+                let status_before = rt.status;
                 let entries = rt.drain_log_channel();
                 for (level, msg) in entries {
                     let vault_name = self
@@ -93,6 +115,72 @@ impl CryptomatorApp {
                                 .unwrap_or("?")
                         ),
                     );
+                }
+
+                #[cfg(target_os = "macos")]
+                if rt.status != status_before {
+                    self.bump_menu_generation();
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn update_menu_bar(&mut self) {
+        if let Some(ref mut handle) = self.menu_bar {
+            if handle.last_synced_generation != self.state_generation {
+                crate::menu_bar::update_state(handle, &self.storage.vaults, &self.vault_runtimes);
+                handle.last_synced_generation = self.state_generation;
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn drain_menu_actions(&mut self, ctx: &egui::Context) {
+        use crate::menu_bar::MenuAction;
+
+        // Collect all pending actions first to avoid borrow conflict
+        let actions: Vec<MenuAction> = match self.menu_bar.as_ref() {
+            Some(h) => h.action_rx.try_iter().collect(),
+            None => return,
+        };
+
+        for action in actions {
+            match action {
+                MenuAction::ShowWindow => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                MenuAction::AddNewVault => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.handle_sidebar_action(SidebarAction::CreateNewVault);
+                }
+                MenuAction::LockVault(id) => {
+                    self.handle_vault_view_action(VaultViewAction::Lock(id));
+                }
+                MenuAction::UnlockVault(id) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.selected_vault_id = Some(id);
+                    self.handle_vault_view_action(VaultViewAction::Unlock(id));
+                }
+                MenuAction::RevealVault(id) => {
+                    if let Some(rt) = self.vault_runtimes.get(&id) {
+                        if let Some(ref path) = rt.active_mount_folder {
+                            reveal_in_file_manager(path);
+                        }
+                    }
+                }
+                MenuAction::OpenSettings(id) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.selected_vault_id = Some(id);
+                    self.handle_sidebar_action(SidebarAction::OpenSettings(id));
+                }
+                MenuAction::Quit => {
+                    self.should_quit = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
         }
@@ -150,6 +238,8 @@ impl CryptomatorApp {
             VaultViewAction::Lock(id) => {
                 if let Some(rt) = self.vault_runtimes.get_mut(&id) {
                     rt.run_lock();
+                    #[cfg(target_os = "macos")]
+                    self.bump_menu_generation();
                 }
             }
             VaultViewAction::RevealDrive(path) => {
@@ -186,6 +276,8 @@ impl CryptomatorApp {
                                     &password,
                                     webdav_password.as_deref().map(|s| s.as_str()),
                                 );
+                                #[cfg(target_os = "macos")]
+                                self.bump_menu_generation();
                             }
                         }
                         true
@@ -224,6 +316,8 @@ impl CryptomatorApp {
                             if self.selected_vault_id == Some(vault_id) {
                                 self.selected_vault_id = None;
                             }
+                            #[cfg(target_os = "macos")]
+                            self.bump_menu_generation();
                         }
                         true
                     }
@@ -238,6 +332,8 @@ impl CryptomatorApp {
                             let id = entry.id;
                             self.storage.add_vault(entry);
                             self.selected_vault_id = Some(id);
+                            #[cfg(target_os = "macos")]
+                            self.bump_menu_generation();
                         }
                         true
                     }
@@ -255,6 +351,8 @@ impl CryptomatorApp {
                             let id = entry.id;
                             self.storage.add_vault(entry);
                             self.selected_vault_id = Some(id);
+                            #[cfg(target_os = "macos")]
+                            self.bump_menu_generation();
                         }
                         true
                     }
@@ -304,8 +402,29 @@ impl CryptomatorApp {
 
 impl eframe::App for CryptomatorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // macOS: intercept window close to hide instead of quit (menu bar keeps app alive)
+        #[cfg(target_os = "macos")]
+        {
+            if ctx.input(|i| i.viewport().close_requested()) {
+                if self.should_quit {
+                    // Let the close proceed — user chose Quit from menu bar
+                } else {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+            }
+        }
+
         // Drain all background threads and check timers.
         self.drain_all_runtimes();
+
+        // Update menu bar state and drain actions
+        #[cfg(target_os = "macos")]
+        {
+            self.update_menu_bar();
+            self.drain_menu_actions(ctx);
+        }
+
         // Determine repaint schedule
         let any_busy = self.vault_runtimes.values().any(|r| r.is_busy());
         let any_unlocked = self
@@ -317,6 +436,11 @@ impl eframe::App for CryptomatorApp {
             ctx.request_repaint();
         } else if any_unlocked {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
+        // When hidden with menu bar, still repaint periodically for runtime draining
+        #[cfg(target_os = "macos")]
+        if self.menu_bar.is_some() && !any_busy && !any_unlocked {
+            ctx.request_repaint_after(std::time::Duration::from_secs(5));
         }
 
         let modal_active = self.active_modal.is_some();

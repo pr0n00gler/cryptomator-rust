@@ -2,6 +2,8 @@
 
 mod app;
 mod create_flow;
+#[cfg(target_os = "macos")]
+mod menu_bar;
 mod modals;
 mod open_flow;
 mod settings_window;

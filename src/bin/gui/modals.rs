@@ -23,7 +23,7 @@ pub trait Modal {
 pub fn draw_modal_overlay(ctx: &egui::Context) {
     egui::Area::new(egui::Id::new("modal_overlay"))
         .fixed_pos(egui::pos2(0.0, 0.0))
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Middle)
         .interactable(false)
         .show(ctx, |ui| {
             let screen = ctx.screen_rect();

@@ -6,9 +6,10 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, NSObject, Sel};
 use objc2::{ClassType, msg_send, msg_send_id, sel};
 use objc2_app_kit::{
-    NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSApplication, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
+    NSVariableStatusItemLength,
 };
-use objc2_foundation::{MainThreadMarker, NSInteger, NSString};
+use objc2_foundation::{CGFloat, MainThreadMarker, NSInteger, NSSize, NSString};
 use uuid::Uuid;
 
 use crate::widgets::format_bytes_per_sec;
@@ -343,6 +344,42 @@ fn add_section_header(menu: &NSMenu, mtm: MainThreadMarker, title: &str) {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/// Set the macOS dock / application icon to the same SF Symbol used by the
+/// menu bar (status item) widget so the app icon and the top-bar widget
+/// share a single visual identity.
+pub fn set_app_icon() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let mtm = match MainThreadMarker::new() {
+        Some(mtm) => mtm,
+        None => {
+            DONE.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
+    unsafe {
+        let symbol_name = NSString::from_str("lock.shield");
+        let accessibility = NSString::from_str("Cryptomator");
+        let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &symbol_name,
+            Some(&accessibility),
+        ) else {
+            return;
+        };
+        // Render full-color (not template) at dock-icon resolution.
+        image.setTemplate(false);
+        image.setSize(NSSize {
+            width: 512.0 as CGFloat,
+            height: 512.0 as CGFloat,
+        });
+        let app = NSApplication::sharedApplication(mtm);
+        app.setApplicationIconImage(Some(&image));
+    }
+}
 
 pub fn setup_menu_bar() -> MenuBarHandle {
     let mtm = MainThreadMarker::new().expect("must be called from the main thread");

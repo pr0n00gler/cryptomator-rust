@@ -7,14 +7,10 @@ clippy:
 test:
 	cargo test
 
-build: clippy test
+build-cli:
 	cargo build --release
 
-run:
-	cargo run
-
-gui: clippy test
+build-gui:
 	cargo build --release --features gui --bin cryptomator-gui
 
-run-gui:
-	cargo run --features gui --bin cryptomator-gui
+build: clippy test build-cli build-gui

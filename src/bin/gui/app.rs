@@ -415,6 +415,11 @@ impl eframe::App for CryptomatorApp {
             }
         }
 
+        // Override eframe's default dock icon with our SF Symbol icon.
+        // (Must run after eframe sets its own icon during startup.)
+        #[cfg(target_os = "macos")]
+        crate::menu_bar::set_app_icon();
+
         // Drain all background threads and check timers.
         self.drain_all_runtimes();
 

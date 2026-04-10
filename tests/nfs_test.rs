@@ -2266,6 +2266,42 @@ async fn test_nfs_readdir_limits_handle_growth() {
 }
 
 #[tokio::test]
+async fn test_nfs_readdir_keeps_active_directory_handle_alive_across_eviction() {
+    let mem_fs = MemoryFs::new();
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = Cryptor::new(vault);
+    let crypto_fs =
+        CryptoFs::new(VFS_STORAGE_PATH, cryptor, mem_fs, CryptoFsConfig::default()).unwrap();
+
+    let dir_path = "/paged_dir";
+    crypto_fs.create_dir(dir_path).unwrap();
+    for i in 0..4 {
+        let file_path = format!("{dir_path}/page_{i:03}.dat");
+        let file = crypto_fs.create_file(&file_path).unwrap();
+        drop(file);
+    }
+
+    // Capacity 3 means the second readdir page must evict an older child handle.
+    // The directory handle itself must stay alive while the client keeps using it.
+    let nfs = NfsServer::with_handle_capacity(crypto_fs, 3);
+    let root = nfs.root_dir();
+    let dir_name: nfsstring = b"paged_dir".to_vec().into();
+    let dir_handle = nfs.lookup(root, &dir_name).await.unwrap();
+
+    let page1 = nfs.readdir(dir_handle, 0, 2).await.unwrap();
+    assert_eq!(page1.entries.len(), 2);
+    assert!(!page1.end);
+
+    let cookie = page1.entries.last().unwrap().fileid;
+    let page2 = nfs.readdir(dir_handle, cookie, 2).await.unwrap();
+    assert_eq!(page2.entries.len(), 2);
+    assert!(page2.end);
+
+    let attr = nfs.getattr(dir_handle).await.unwrap();
+    assert!(matches!(attr.ftype, ftype3::NF3DIR));
+}
+
+#[tokio::test]
 async fn test_nfs_readdir_cookie_after_deletion() {
     let nfs = setup_nfs_server();
     let root = nfs.root_dir();

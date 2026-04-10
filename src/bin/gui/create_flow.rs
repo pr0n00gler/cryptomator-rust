@@ -131,7 +131,7 @@ impl CreateVaultModal {
                 } else {
                     Some(self.webdav_user.clone())
                 };
-                let storage_path = format!("{}/{}", url.trim_end_matches('/'), vault_name);
+                let storage_path = vault_name.clone();
                 let config = FsProviderConfig::WebDav {
                     url: url.clone(),
                     username: user,
@@ -405,5 +405,42 @@ impl CreateVaultModal {
             ui.add_space(4.0);
             ui.label(egui::RichText::new(err).color(egui::Color32::from_rgb(255, 100, 100)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use cryptomator::crypto::DEFAULT_VAULT_FILENAME;
+    use cryptomator::cryptofs::parent_path;
+    use cryptomator::operations::DEFAULT_STORAGE_SUB_FOLDER;
+
+    /// Mirrors the path construction in `start_create` for the WebDAV case.
+    /// storage_path = vault_name (no URL prefix).
+    #[test]
+    fn webdav_create_paths_are_relative_to_base_url() {
+        let vault_name = "MyVault";
+        let storage_path = vault_name.to_owned();
+
+        let vault_path = Path::new(&storage_path).join(DEFAULT_VAULT_FILENAME);
+        let full_storage_path = Path::new(&storage_path).join(DEFAULT_STORAGE_SUB_FOLDER);
+
+        assert_eq!(vault_path.to_str().unwrap(), "MyVault/vault.cryptomator");
+        assert_eq!(full_storage_path.to_str().unwrap(), "MyVault/d");
+        assert!(!storage_path.contains("://"));
+    }
+
+    #[test]
+    fn webdav_create_vault_path_has_valid_parent() {
+        let vault_name = "MyVault";
+        let storage_path = vault_name.to_owned();
+        let vault_path = Path::new(&storage_path).join(DEFAULT_VAULT_FILENAME);
+
+        let parent = parent_path(&vault_path);
+        let masterkey = parent.join("masterkey.cryptomator");
+
+        assert_eq!(parent.to_str().unwrap(), "MyVault");
+        assert_eq!(masterkey.to_str().unwrap(), "MyVault/masterkey.cryptomator");
     }
 }

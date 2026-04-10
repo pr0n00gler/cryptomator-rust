@@ -86,12 +86,8 @@ impl OpenVaultModal {
                     .trim_start_matches('/')
                     .trim_end_matches('/');
 
-                let storage_path = if vault_path.is_empty() {
-                    base_url.to_owned()
-                } else {
-                    format!("{base_url}/{vault_path}")
-                };
-                let vault_file_path = format!("{storage_path}/{DEFAULT_VAULT_FILENAME}");
+                let storage_path = vault_path.to_owned();
+                let vault_file_path = format!("{vault_path}/{DEFAULT_VAULT_FILENAME}");
 
                 let name = vault_path
                     .rsplit('/')
@@ -223,6 +219,103 @@ impl Modal for OpenVaultModal {
 fn path_to_string(p: &Path) -> String {
     p.to_str()
         .map_or_else(|| p.to_string_lossy().into_owned(), str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cryptomator::cryptofs::parent_path;
+
+    fn make_webdav_modal(url: &str, vault_path: &str, username: &str) -> OpenVaultModal {
+        OpenVaultModal {
+            provider: ProviderChoice::WebDav,
+            local_file_path: String::new(),
+            webdav_url: url.to_owned(),
+            webdav_vault_path: vault_path.to_owned(),
+            webdav_username: username.to_owned(),
+            opened_entry: None,
+            closed: false,
+            error_msg: None,
+        }
+    }
+
+    #[test]
+    fn webdav_entry_stores_relative_storage_path() {
+        let modal = make_webdav_modal("https://example.com/dav", "Vault", "alice");
+        let entry = modal.build_entry();
+
+        assert_eq!(entry.storage_path, "Vault");
+        assert!(!entry.storage_path.contains("example.com"));
+        assert!(!entry.storage_path.starts_with("https://"));
+    }
+
+    #[test]
+    fn webdav_entry_stores_relative_vault_file_path() {
+        let modal = make_webdav_modal("https://example.com/dav", "Vault", "");
+        let entry = modal.build_entry();
+
+        assert_eq!(entry.vault_file_path, "Vault/vault.cryptomator");
+        assert!(!entry.vault_file_path.contains("example.com"));
+    }
+
+    #[test]
+    fn webdav_entry_nested_vault_path() {
+        let modal = make_webdav_modal("https://example.com/dav", "deep/path/MyVault", "");
+        let entry = modal.build_entry();
+
+        assert_eq!(entry.storage_path, "deep/path/MyVault");
+        assert_eq!(entry.vault_file_path, "deep/path/MyVault/vault.cryptomator");
+        assert_eq!(entry.name, "MyVault");
+    }
+
+    #[test]
+    fn webdav_entry_strips_leading_trailing_slashes_from_vault_path() {
+        let modal = make_webdav_modal("https://example.com/dav", "/Vault/", "");
+        let entry = modal.build_entry();
+
+        assert_eq!(entry.storage_path, "Vault");
+        assert_eq!(entry.vault_file_path, "Vault/vault.cryptomator");
+    }
+
+    #[test]
+    fn webdav_entry_empty_vault_path_has_valid_parent() {
+        let modal = make_webdav_modal("https://example.com/dav", "", "");
+        let entry = modal.build_entry();
+
+        // vault_file_path must have ≥ 2 path components so parent_path
+        // returns the directory, not the file itself.
+        let parent = parent_path(&entry.vault_file_path);
+        let masterkey = parent.join("masterkey.cryptomator");
+        let masterkey_str = masterkey.to_string_lossy();
+
+        assert!(
+            !masterkey_str.contains("vault.cryptomator"),
+            "masterkey path must not contain vault.cryptomator as a directory: {masterkey_str}"
+        );
+    }
+
+    #[test]
+    fn webdav_entry_vault_file_path_parent_is_storage_root() {
+        let modal = make_webdav_modal("https://example.com:8080/dav", "MyVault", "");
+        let entry = modal.build_entry();
+
+        let parent = parent_path(&entry.vault_file_path);
+        assert_eq!(parent.to_string_lossy(), entry.storage_path);
+    }
+
+    #[test]
+    fn webdav_entry_preserves_provider_url() {
+        let modal = make_webdav_modal("https://example.com:8080/dav", "Vault", "alice");
+        let entry = modal.build_entry();
+
+        match &entry.provider {
+            FsProviderConfig::WebDav { url, username } => {
+                assert_eq!(url, "https://example.com:8080/dav");
+                assert_eq!(username.as_deref(), Some("alice"));
+            }
+            _ => panic!("expected WebDav provider"),
+        }
+    }
 }
 
 fn vault_entry_from_path(file_path: &Path) -> VaultEntry {

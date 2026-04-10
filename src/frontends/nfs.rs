@@ -14,7 +14,7 @@ use std::time::UNIX_EPOCH;
 use tracing::{debug, error, warn};
 
 /// Maximum number of file handles the NFS server will track before
-/// evicting the least-recently-created entries.  The root handle (1)
+/// evicting the least-recently-used entries. The root handle (1)
 /// is never evicted.
 const DEFAULT_MAX_HANDLES: usize = 10_000;
 
@@ -99,16 +99,16 @@ fn secs_to_u32(secs: u64) -> u32 {
 /// single `Mutex`.
 ///
 /// The handle map is bounded: once `max_capacity` non-root entries exist,
-/// the oldest entry (by insertion order) is evicted from both maps.
+/// the least-recently-used entry is evicted from both maps.
 struct HandleState {
     path_to_handle: HashMap<PathBuf, u64>,
     handle_to_path: HashMap<u64, PathBuf>,
-    /// Tracks the insertion order of each handle for LRU eviction.
-    /// Maps handle -> insertion sequence number.
+    /// Tracks the last-access order of each handle for LRU eviction.
+    /// Maps handle -> access sequence number.
     handle_order: HashMap<u64, u64>,
     /// Reverse mapping: order -> handle for O(log n) min lookup during eviction.
     order_to_handle: BTreeMap<u64, u64>,
-    /// Monotonically increasing sequence number for ordering.
+    /// Monotonically increasing sequence number for access ordering.
     next_order: u64,
     /// Maximum number of non-root entries.
     max_capacity: usize,
@@ -150,7 +150,7 @@ impl HandleState {
         }
     }
 
-    /// Evict the oldest non-root entry if at capacity.
+    /// Evict the least-recently-used non-root entry if at capacity.
     ///
     /// Also closes any cached open file handle for the evicted entry so
     /// that the underlying `CryptoFsFile` is flushed and dropped.
@@ -159,7 +159,7 @@ impl HandleState {
     fn evict_if_needed(&mut self) -> Result<(), nfsstat3> {
         // Non-root entry count: subtract 1 for the root entry.
         while self.path_to_handle.len().saturating_sub(1) >= self.max_capacity {
-            // Find the handle with the lowest order number (oldest)
+            // Find the handle with the lowest order number (least recently used)
             // via O(log n) BTreeMap lookup instead of O(n) scan.
             let (&oldest_order, &old_handle) = match self.order_to_handle.iter().next() {
                 Some(entry) => entry,
@@ -198,6 +198,16 @@ impl HandleState {
         Ok(())
     }
 
+    fn touch(&mut self, handle: u64) {
+        if let Some(old_order) = self.handle_order.remove(&handle) {
+            self.order_to_handle.remove(&old_order);
+            let order = self.next_order;
+            self.next_order = self.next_order.wrapping_add(1);
+            self.handle_order.insert(handle, order);
+            self.order_to_handle.insert(order, handle);
+        }
+    }
+
     /// Returns the existing handle for `path`, or allocates a new one.
     ///
     /// Because both the lookup and the insertion happen inside a single
@@ -205,10 +215,11 @@ impl HandleState {
     /// allocate a second handle for the same path.
     fn get_or_create(&mut self, path: PathBuf) -> Result<u64, nfsstat3> {
         if let Some(&handle) = self.path_to_handle.get(&path) {
+            self.touch(handle);
             return Ok(handle);
         }
 
-        // Evict oldest entries if at capacity.
+        // Evict least-recently-used entries if at capacity.
         self.evict_if_needed()?;
 
         // Saturating-add guard: after u64::MAX allocations the counter would
@@ -239,11 +250,14 @@ impl HandleState {
         self.path_to_handle.get(path).copied()
     }
 
-    fn get_path(&self, handle: u64) -> Result<PathBuf, nfsstat3> {
-        self.handle_to_path
+    fn get_path_and_touch(&mut self, handle: u64) -> Result<PathBuf, nfsstat3> {
+        let path = self
+            .handle_to_path
             .get(&handle)
             .cloned()
-            .ok_or(nfsstat3::NFS3ERR_STALE)
+            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        self.touch(handle);
+        Ok(path)
     }
 
     fn forget_handle(&mut self, handle: u64) {
@@ -371,7 +385,7 @@ impl<FS: FileSystem + 'static> NfsServer<FS> {
         self.handles
             .lock()
             .map_err(|_| nfsstat3::NFS3ERR_IO)?
-            .get_path(handle)
+            .get_path_and_touch(handle)
     }
 
     fn forget_subtree(&self, path: &PathBuf) -> Result<(), nfsstat3> {

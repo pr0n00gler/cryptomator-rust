@@ -165,19 +165,13 @@ impl VaultSettingsState {
                     entry.vault_file_path = vault_file_path;
                 }
                 ProviderChoice::WebDav => {
-                    let base_url = self.webdav_url.trim().trim_end_matches('/');
                     let vault_path = self
                         .webdav_vault_path
                         .trim()
                         .trim_start_matches('/')
                         .trim_end_matches('/');
-                    entry.storage_path = if vault_path.is_empty() {
-                        base_url.to_owned()
-                    } else {
-                        format!("{base_url}/{vault_path}")
-                    };
-                    entry.vault_file_path =
-                        format!("{}/{DEFAULT_VAULT_FILENAME}", entry.storage_path);
+                    entry.storage_path = vault_path.to_owned();
+                    entry.vault_file_path = format!("{vault_path}/{DEFAULT_VAULT_FILENAME}");
                 }
             }
             entry.provider = provider;
@@ -428,7 +422,7 @@ fn remap_path_prefix(path: &str, old_prefix: &str, new_prefix: &str) -> Option<S
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_root, remap_storage_paths};
+    use super::remap_storage_paths;
     use crate::storage::{FsProviderConfig, MountingConfig, VaultEntry, VolumeType};
     use cryptomator::crypto::DEFAULT_VAULT_FILENAME;
     use uuid::Uuid;
@@ -457,12 +451,36 @@ mod tests {
     }
 
     #[test]
-    fn remaps_webdav_storage_using_provider_prefix() {
+    fn strip_url_prefix_with_relative_path_returns_as_is() {
+        // After the fix, storage_path no longer starts with the URL.
+        // strip_url_prefix should return the relative path unchanged.
+        assert_eq!(
+            super::strip_url_prefix("Vault", "https://example.com/dav"),
+            "Vault"
+        );
+        assert_eq!(
+            super::strip_url_prefix("deep/path/Vault", "https://example.com/dav"),
+            "deep/path/Vault"
+        );
+        assert_eq!(super::strip_url_prefix("", "https://example.com/dav"), "");
+    }
+
+    #[test]
+    fn strip_url_prefix_with_legacy_full_url() {
+        // Existing vaults may still have the old full-URL format.
+        assert_eq!(
+            super::strip_url_prefix("https://example.com/dav/Vault", "https://example.com/dav"),
+            "Vault"
+        );
+    }
+
+    #[test]
+    fn remaps_local_from_webdav_entry_falls_back_to_new_root() {
         let entry = VaultEntry {
             id: Uuid::nil(),
             name: "Vault".into(),
-            storage_path: "https://old.example/dav/Vault".into(),
-            vault_file_path: "https://old.example/dav/Vault/vault.cryptomator".into(),
+            storage_path: "Vault".into(),
+            vault_file_path: "Vault/vault.cryptomator".into(),
             provider: FsProviderConfig::WebDav {
                 url: "https://old.example/dav".into(),
                 username: Some("alice".into()),
@@ -473,18 +491,16 @@ mod tests {
             },
             idle_lock: None,
         };
-        let new_provider = FsProviderConfig::WebDav {
-            url: "https://new.example/dav".into(),
-            username: Some("alice".into()),
+        let new_provider = FsProviderConfig::Local {
+            base_path: "/new/location/Vault".into(),
         };
 
         let (storage_path, vault_file_path) = remap_storage_paths(&entry, &new_provider);
 
-        assert_eq!(provider_root(&new_provider), "https://new.example/dav");
-        assert_eq!(storage_path, "https://new.example/dav/Vault");
+        assert_eq!(storage_path, "/new/location/Vault");
         assert_eq!(
             vault_file_path,
-            format!("https://new.example/dav/Vault/{DEFAULT_VAULT_FILENAME}")
+            format!("/new/location/Vault/{DEFAULT_VAULT_FILENAME}")
         );
     }
 }

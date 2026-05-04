@@ -998,3 +998,37 @@ fn test_internal_ops_respect_open_file_limit() {
         .open_file("/parent/child.dat", OpenOptions::new())
         .expect("should succeed after releasing handles");
 }
+
+#[test]
+fn test_read_dir_keeps_compatibility_but_fallible_variant_reports_corruption() {
+    let mem_fs = MemoryFs::new();
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+    let crypto_fs = CryptoFs::new(
+        VFS_STORAGE_PATH,
+        cryptor,
+        mem_fs.clone(),
+        CryptoFsConfig::default(),
+    )
+    .unwrap();
+
+    let mut file = crypto_fs.create_file("/good.txt").unwrap();
+    file.write_all(b"ok").unwrap();
+    drop(file);
+
+    let root = crypto_fs.real_path_from_dir_id(b"").unwrap();
+    let mut broken = mem_fs.create_file(root.join("broken.c9r")).unwrap();
+    broken.write_all(b"broken").unwrap();
+    drop(broken);
+
+    let entries: Vec<_> = crypto_fs.read_dir("/").unwrap().collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].file_name, "good.txt");
+
+    let mut fallible_entries = crypto_fs.read_dir_fallible("/").unwrap();
+    let results: Vec<_> = (&mut fallible_entries).collect();
+    assert!(
+        results.iter().any(Result::is_err),
+        "expected read_dir_fallible to surface the corrupt entry"
+    );
+}

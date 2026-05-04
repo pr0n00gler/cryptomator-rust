@@ -25,6 +25,7 @@ evaluation purposes.
 * Full support of the original Cryptomator vaults of vault format 8.
 * Works with local vaults
 * Unlocked content can be accessed via an embedded WebDav or NFS server;
+* The GUI uses mount points for NFS mounts only; WebDAV unlocks expose a server directly.
 * Unix support
 * Read-only mode for safe vault access
 

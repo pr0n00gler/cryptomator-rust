@@ -1,0 +1,382 @@
+use std::path::Path;
+
+use eframe::egui;
+use uuid::Uuid;
+
+use cryptomator::crypto::{DEFAULT_MASTER_KEY_FILE, DEFAULT_VAULT_FILENAME};
+
+use crate::modals::{Modal, ModalResult, draw_modal_overlay};
+use crate::storage::{FsProviderConfig, MountingConfig, VaultEntry};
+use crate::widgets::labeled_text_field;
+
+// ---------------------------------------------------------------------------
+// Provider choice
+// ---------------------------------------------------------------------------
+
+#[derive(PartialEq)]
+enum ProviderChoice {
+    Local,
+    WebDav,
+}
+
+// ---------------------------------------------------------------------------
+// Open Vault Modal
+// ---------------------------------------------------------------------------
+
+pub struct OpenVaultModal {
+    provider: ProviderChoice,
+    local_file_path: String,
+    webdav_url: String,
+    webdav_vault_path: String,
+    webdav_username: String,
+    pub opened_entry: Option<VaultEntry>,
+    pub closed: bool,
+    error_msg: Option<String>,
+}
+
+impl OpenVaultModal {
+    pub fn new() -> Self {
+        Self {
+            provider: ProviderChoice::Local,
+            local_file_path: String::new(),
+            webdav_url: String::new(),
+            webdav_vault_path: String::new(),
+            webdav_username: String::new(),
+            opened_entry: None,
+            closed: false,
+            error_msg: None,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        match self.provider {
+            ProviderChoice::Local => {
+                if self.local_file_path.trim().is_empty() {
+                    return Err("Please select a vault file.".into());
+                }
+                let path = Path::new(self.local_file_path.trim());
+                if !path.exists() {
+                    return Err("File does not exist.".into());
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("cryptomator") {
+                    return Err("File must have a .cryptomator extension.".into());
+                }
+                match path.file_name().and_then(|name| name.to_str()) {
+                    Some(DEFAULT_VAULT_FILENAME) => {}
+                    Some(DEFAULT_MASTER_KEY_FILE) => {
+                        let normalized = normalize_local_vault_file_path(path);
+                        if !normalized.exists() {
+                            return Err(format!(
+                                "Selected {DEFAULT_MASTER_KEY_FILE} has no sibling {DEFAULT_VAULT_FILENAME}."
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "Please select {DEFAULT_VAULT_FILENAME} or {DEFAULT_MASTER_KEY_FILE}."
+                        ));
+                    }
+                }
+            }
+            ProviderChoice::WebDav => {
+                let url = self.webdav_url.trim();
+                if url.is_empty() {
+                    return Err("WebDAV URL is required.".into());
+                }
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    return Err("WebDAV URL must start with http:// or https://.".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn build_entry(&self) -> VaultEntry {
+        match self.provider {
+            ProviderChoice::Local => vault_entry_from_path(Path::new(&self.local_file_path)),
+            ProviderChoice::WebDav => {
+                let base_url = self.webdav_url.trim().trim_end_matches('/');
+                let vault_path = self
+                    .webdav_vault_path
+                    .trim()
+                    .trim_start_matches('/')
+                    .trim_end_matches('/');
+
+                let storage_path = vault_path.to_owned();
+                let vault_file_path = format!("{vault_path}/{DEFAULT_VAULT_FILENAME}");
+
+                let name = vault_path
+                    .rsplit('/')
+                    .next()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Vault")
+                    .to_owned();
+
+                let username = if self.webdav_username.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.webdav_username.trim().to_owned())
+                };
+
+                VaultEntry {
+                    id: Uuid::new_v4(),
+                    name,
+                    storage_path,
+                    vault_file_path,
+                    provider: FsProviderConfig::WebDav {
+                        url: base_url.to_owned(),
+                        username,
+                    },
+                    mounting: MountingConfig::default(),
+                    idle_lock: None,
+                }
+            }
+        }
+    }
+
+    fn draw_form(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        ui.label("Location:");
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.provider, ProviderChoice::Local, "Local");
+            ui.selectable_value(&mut self.provider, ProviderChoice::WebDav, "WebDAV");
+        });
+
+        ui.add_space(4.0);
+        match self.provider {
+            ProviderChoice::Local => {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.local_file_path)
+                            .hint_text("masterkey.cryptomator")
+                            .desired_width(300.0),
+                    );
+                    if ui.button("Browse...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Select masterkey.cryptomator or vault.cryptomator")
+                            .add_filter("Cryptomator Vault", &["cryptomator"])
+                            .pick_file()
+                        {
+                            self.local_file_path = path_to_string(&path);
+                        }
+                    }
+                });
+            }
+            ProviderChoice::WebDav => {
+                labeled_text_field(ui, "URL:", &mut self.webdav_url, "https://example.com/dav");
+                labeled_text_field(
+                    ui,
+                    "Vault path:",
+                    &mut self.webdav_vault_path,
+                    "/path/to/MyVault",
+                );
+                labeled_text_field(ui, "Username:", &mut self.webdav_username, "");
+            }
+        }
+
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").clicked() {
+                self.closed = true;
+            }
+            if ui
+                .button(egui::RichText::new("Open Vault").strong())
+                .clicked()
+            {
+                match self.validate() {
+                    Ok(()) => {
+                        self.error_msg = None;
+                        self.opened_entry = Some(self.build_entry());
+                        self.closed = true;
+                    }
+                    Err(e) => self.error_msg = Some(e),
+                }
+            }
+        });
+
+        if let Some(err) = &self.error_msg {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(err).color(egui::Color32::from_rgb(255, 100, 100)));
+        }
+    }
+}
+
+impl Modal for OpenVaultModal {
+    fn show(&mut self, ctx: &egui::Context) -> ModalResult {
+        draw_modal_overlay(ctx);
+
+        let mut open = true;
+        egui::Window::new("Open Existing Vault")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                self.draw_form(ui);
+            });
+
+        if !open {
+            self.closed = true;
+        }
+
+        if self.closed {
+            ModalResult::Closed
+        } else {
+            ModalResult::Open
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn path_to_string(p: &Path) -> String {
+    p.to_str()
+        .map_or_else(|| p.to_string_lossy().into_owned(), str::to_owned)
+}
+
+fn normalize_local_vault_file_path(file_path: &Path) -> std::path::PathBuf {
+    match file_path.file_name().and_then(|name| name.to_str()) {
+        Some(DEFAULT_MASTER_KEY_FILE) => file_path.with_file_name(DEFAULT_VAULT_FILENAME),
+        _ => file_path.to_path_buf(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cryptomator::cryptofs::parent_path;
+
+    fn make_webdav_modal(url: &str, vault_path: &str, username: &str) -> OpenVaultModal {
+        OpenVaultModal {
+            provider: ProviderChoice::WebDav,
+            local_file_path: String::new(),
+            webdav_url: url.to_owned(),
+            webdav_vault_path: vault_path.to_owned(),
+            webdav_username: username.to_owned(),
+            opened_entry: None,
+            closed: false,
+            error_msg: None,
+        }
+    }
+
+    #[test]
+    fn webdav_entry_stores_relative_storage_path() {
+        let modal = make_webdav_modal("https://example.com/dav", "Vault", "alice");
+        let entry = modal.build_entry();
+
+        assert_eq!(entry.storage_path, "Vault");
+        assert!(!entry.storage_path.contains("example.com"));
+        assert!(!entry.storage_path.starts_with("https://"));
+    }
+
+    #[test]
+    fn webdav_entry_stores_relative_vault_file_path() {
+        let modal = make_webdav_modal("https://example.com/dav", "Vault", "");
+        let entry = modal.build_entry();
+
+        assert_eq!(entry.vault_file_path, "Vault/vault.cryptomator");
+        assert!(!entry.vault_file_path.contains("example.com"));
+    }
+
+    #[test]
+    fn webdav_entry_nested_vault_path() {
+        let modal = make_webdav_modal("https://example.com/dav", "deep/path/MyVault", "");
+        let entry = modal.build_entry();
+
+        assert_eq!(entry.storage_path, "deep/path/MyVault");
+        assert_eq!(entry.vault_file_path, "deep/path/MyVault/vault.cryptomator");
+        assert_eq!(entry.name, "MyVault");
+    }
+
+    #[test]
+    fn webdav_entry_strips_leading_trailing_slashes_from_vault_path() {
+        let modal = make_webdav_modal("https://example.com/dav", "/Vault/", "");
+        let entry = modal.build_entry();
+
+        assert_eq!(entry.storage_path, "Vault");
+        assert_eq!(entry.vault_file_path, "Vault/vault.cryptomator");
+    }
+
+    #[test]
+    fn webdav_entry_empty_vault_path_has_valid_parent() {
+        let modal = make_webdav_modal("https://example.com/dav", "", "");
+        let entry = modal.build_entry();
+
+        // vault_file_path must have ≥ 2 path components so parent_path
+        // returns the directory, not the file itself.
+        let parent = parent_path(&entry.vault_file_path);
+        let masterkey = parent.join("masterkey.cryptomator");
+        let masterkey_str = masterkey.to_string_lossy();
+
+        assert!(
+            !masterkey_str.contains("vault.cryptomator"),
+            "masterkey path must not contain vault.cryptomator as a directory: {masterkey_str}"
+        );
+    }
+
+    #[test]
+    fn webdav_entry_vault_file_path_parent_is_storage_root() {
+        let modal = make_webdav_modal("https://example.com:8080/dav", "MyVault", "");
+        let entry = modal.build_entry();
+
+        let parent = parent_path(&entry.vault_file_path);
+        assert_eq!(parent.to_string_lossy(), entry.storage_path);
+    }
+
+    #[test]
+    fn webdav_entry_preserves_provider_url() {
+        let modal = make_webdav_modal("https://example.com:8080/dav", "Vault", "alice");
+        let entry = modal.build_entry();
+
+        match &entry.provider {
+            FsProviderConfig::WebDav { url, username } => {
+                assert_eq!(url, "https://example.com:8080/dav");
+                assert_eq!(username.as_deref(), Some("alice"));
+            }
+            _ => panic!("expected WebDav provider"),
+        }
+    }
+
+    #[test]
+    fn local_masterkey_path_is_normalized_to_vault_file() {
+        let normalized =
+            normalize_local_vault_file_path(Path::new("/tmp/MyVault/masterkey.cryptomator"));
+        assert_eq!(normalized, Path::new("/tmp/MyVault/vault.cryptomator"));
+    }
+
+    #[test]
+    fn local_vault_path_is_preserved() {
+        let normalized =
+            normalize_local_vault_file_path(Path::new("/tmp/MyVault/vault.cryptomator"));
+        assert_eq!(normalized, Path::new("/tmp/MyVault/vault.cryptomator"));
+    }
+}
+
+fn vault_entry_from_path(file_path: &Path) -> VaultEntry {
+    let file_path = normalize_local_vault_file_path(file_path);
+    let parent = file_path.parent().unwrap_or(file_path.as_path());
+    let vault_root = path_to_string(parent);
+
+    let name = parent
+        .file_name()
+        .map(|n| {
+            n.to_str()
+                .map_or_else(|| n.to_string_lossy().into_owned(), str::to_owned)
+        })
+        .unwrap_or_else(|| "Vault".to_string());
+
+    VaultEntry {
+        id: Uuid::new_v4(),
+        name,
+        storage_path: vault_root.clone(),
+        vault_file_path: path_to_string(&file_path),
+        provider: FsProviderConfig::Local {
+            base_path: vault_root,
+        },
+        mounting: MountingConfig::default(),
+        idle_lock: None,
+    }
+}

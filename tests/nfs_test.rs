@@ -1,5 +1,5 @@
 use cryptomator::crypto::{Cryptor, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, Vault};
-use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig};
+use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem};
 use cryptomator::frontends::nfs::NfsServer;
 use cryptomator::providers::{LocalFs, MemoryFs};
 use nfsserve::nfs::{
@@ -610,6 +610,32 @@ async fn test_nfs_read_directory_error() {
 }
 
 #[tokio::test]
+async fn test_nfs_readdir_reports_corrupt_entry_error() {
+    let mem_fs = MemoryFs::new();
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = Cryptor::new(vault);
+    let crypto_fs = CryptoFs::new(
+        VFS_STORAGE_PATH,
+        cryptor,
+        mem_fs.clone(),
+        CryptoFsConfig::default(),
+    )
+    .unwrap();
+
+    let _good = crypto_fs.create_file("/good.txt").unwrap();
+    let root = crypto_fs.real_path_from_dir_id(b"").unwrap();
+    let _broken = mem_fs.create_file(root.join("broken.c9r")).unwrap();
+
+    let nfs = NfsServer::new(crypto_fs);
+    let result = nfs.readdir(nfs.root_dir(), 0, 100).await;
+
+    assert!(
+        matches!(result, Err(nfsstat3::NFS3ERR_IO)),
+        "expected corrupt entry to surface as NFS3ERR_IO, got {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_nfs_lookup_nonexistent() {
     let nfs = setup_nfs_server();
     let root_handle = nfs.root_dir();
@@ -944,6 +970,40 @@ async fn test_nfs_remove_directory() {
     // Verify it's gone
     let lookup = nfs.lookup(root, &dirname).await;
     assert!(matches!(lookup, Err(nfsstat3::NFS3ERR_NOENT)));
+}
+
+#[tokio::test]
+async fn test_nfs_remove_directory_invalidates_descendant_handles() {
+    let nfs = setup_nfs_server();
+    let root = nfs.root_dir();
+
+    let dirname: nfsstring = b"dir_remove_stale".to_vec().into();
+    let child: nfsstring = b"stale_child.txt".to_vec().into();
+
+    let (dir_handle, _) = nfs.mkdir(root, &dirname).await.unwrap();
+    let (child_handle, _) = nfs
+        .create(dir_handle, &child, sattr3::default())
+        .await
+        .unwrap();
+    nfs.write(child_handle, 0, b"old data").await.unwrap();
+
+    nfs.remove(root, &dirname).await.unwrap();
+
+    let (recreated_dir_handle, _) = nfs.mkdir(root, &dirname).await.unwrap();
+    let (replacement_handle, _) = nfs
+        .create(recreated_dir_handle, &child, sattr3::default())
+        .await
+        .unwrap();
+    assert_ne!(
+        child_handle, replacement_handle,
+        "recreated child should not reuse the removed child's handle"
+    );
+
+    let stale = nfs.getattr(child_handle).await;
+    assert!(
+        matches!(stale, Err(nfsstat3::NFS3ERR_STALE)),
+        "removed child handle should be stale after directory recreation, got {stale:?}"
+    );
 }
 
 #[tokio::test]
@@ -1489,6 +1549,12 @@ async fn test_nfs_rename_to_existing_file() {
         let new_handle = nfs.lookup(root, &name_b).await.unwrap();
         let (read_data, _) = nfs.read(new_handle, 0, 100).await.unwrap();
         assert_eq!(&read_data, b"source data");
+
+        let stale = nfs.getattr(hb).await;
+        assert!(
+            matches!(stale, Err(nfsstat3::NFS3ERR_STALE)),
+            "old destination handle should become stale after overwrite rename, got {stale:?}"
+        );
     }
     // If result is Err, the implementation disallows overwriting -- also acceptable.
 }
@@ -2185,6 +2251,83 @@ async fn test_nfs_readdir_with_zero_max() {
 }
 
 #[tokio::test]
+async fn test_nfs_readdir_limits_handle_growth() {
+    let mem_fs = MemoryFs::new();
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = Cryptor::new(vault);
+    let crypto_fs =
+        CryptoFs::new(VFS_STORAGE_PATH, cryptor, mem_fs, CryptoFsConfig::default()).unwrap();
+
+    let dir_path = "/handle_probe";
+    crypto_fs.create_dir(dir_path).unwrap();
+    for i in 0..40 {
+        let file_path = format!("{dir_path}/hp_{i:03}.dat");
+        let file = crypto_fs.create_file(&file_path).unwrap();
+        drop(file);
+    }
+
+    let nfs = NfsServer::new(crypto_fs);
+    let root = nfs.root_dir();
+    let dir_name: nfsstring = b"handle_probe".to_vec().into();
+    let dir_handle = nfs.lookup(root, &dir_name).await.unwrap();
+
+    let before = nfs.handle_count().unwrap();
+    assert!(
+        before == 1,
+        "only the directory handle should exist before readdir, got {before}"
+    );
+
+    let page = nfs.readdir(dir_handle, 0, 5).await.unwrap();
+    assert_eq!(page.entries.len(), 5);
+    assert!(
+        !page.end,
+        "directory with 40 files should require pagination"
+    );
+
+    let after = nfs.handle_count().unwrap();
+    assert!(
+        after <= 6,
+        "handle map should only grow with page size, got {after}"
+    );
+}
+
+#[tokio::test]
+async fn test_nfs_readdir_keeps_active_directory_handle_alive_across_eviction() {
+    let mem_fs = MemoryFs::new();
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = Cryptor::new(vault);
+    let crypto_fs =
+        CryptoFs::new(VFS_STORAGE_PATH, cryptor, mem_fs, CryptoFsConfig::default()).unwrap();
+
+    let dir_path = "/paged_dir";
+    crypto_fs.create_dir(dir_path).unwrap();
+    for i in 0..4 {
+        let file_path = format!("{dir_path}/page_{i:03}.dat");
+        let file = crypto_fs.create_file(&file_path).unwrap();
+        drop(file);
+    }
+
+    // Capacity 3 means the second readdir page must evict an older child handle.
+    // The directory handle itself must stay alive while the client keeps using it.
+    let nfs = NfsServer::with_handle_capacity(crypto_fs, 3);
+    let root = nfs.root_dir();
+    let dir_name: nfsstring = b"paged_dir".to_vec().into();
+    let dir_handle = nfs.lookup(root, &dir_name).await.unwrap();
+
+    let page1 = nfs.readdir(dir_handle, 0, 2).await.unwrap();
+    assert_eq!(page1.entries.len(), 2);
+    assert!(!page1.end);
+
+    let cookie = page1.entries.last().unwrap().fileid;
+    let page2 = nfs.readdir(dir_handle, cookie, 2).await.unwrap();
+    assert_eq!(page2.entries.len(), 2);
+    assert!(page2.end);
+
+    let attr = nfs.getattr(dir_handle).await.unwrap();
+    assert!(matches!(attr.ftype, ftype3::NF3DIR));
+}
+
+#[tokio::test]
 async fn test_nfs_readdir_cookie_after_deletion() {
     let nfs = setup_nfs_server();
     let root = nfs.root_dir();
@@ -2679,5 +2822,63 @@ async fn test_nfs_truncate_then_rewrite() {
         &read_data[..new_data.len()],
         new_data,
         "newly written data after truncation must be correct"
+    );
+}
+
+/// Paginate through a directory with a small page size and verify that
+/// every entry is returned exactly once (no duplicates, no omissions).
+#[tokio::test]
+async fn test_nfs_readdir_pagination_completeness() {
+    let nfs = setup_nfs_server();
+    let root = nfs.root_dir();
+
+    let dir_name: nfsstring = b"pag_complete".to_vec().into();
+    let (dh, _) = nfs.mkdir(root, &dir_name).await.unwrap();
+
+    let n = 15;
+    let mut expected_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for i in 0..n {
+        let fname = format!("pfile_{i:03}.txt");
+        let nfs_name: nfsstring = fname.clone().into_bytes().into();
+        nfs.create(dh, &nfs_name, sattr3::default()).await.unwrap();
+        expected_names.insert(fname);
+    }
+
+    let page_size = 3;
+    let mut collected_names: Vec<String> = Vec::new();
+    let mut cookie: u64 = 0;
+
+    loop {
+        let page = nfs.readdir(dh, cookie, page_size).await.unwrap();
+
+        for entry in &page.entries {
+            let name = String::from_utf8_lossy(&entry.name).to_string();
+            collected_names.push(name);
+        }
+
+        if page.end {
+            break;
+        }
+
+        // Use the last entry's fileid as the cookie for the next page.
+        cookie = page.entries.last().unwrap().fileid;
+    }
+
+    // Verify no duplicates.
+    let unique: std::collections::BTreeSet<String> = collected_names.iter().cloned().collect();
+    assert_eq!(
+        unique.len(),
+        collected_names.len(),
+        "pagination must not produce duplicate entries; duplicates: {:?}",
+        collected_names
+            .iter()
+            .filter(|n| collected_names.iter().filter(|m| m == n).count() > 1)
+            .collect::<Vec<_>>()
+    );
+
+    // Verify all expected entries were returned.
+    assert_eq!(
+        unique, expected_names,
+        "pagination must return all entries without omissions"
     );
 }

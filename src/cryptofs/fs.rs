@@ -16,7 +16,7 @@ use std::ffi::OsString;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::{error, warn};
 use zeroize::Zeroizing;
@@ -142,13 +142,53 @@ impl Drop for OpenFileGuard {
     }
 }
 
+/// Shared I/O statistics counters.
+/// All fields are atomically updated and can be read from any thread.
+///
+/// Counters track **cleartext** bytes — i.e. the bytes seen by callers of
+/// `Read::read` / `Write::write`, after decryption and before encryption
+/// respectively.
+#[derive(Debug, Clone)]
+pub struct IoStats {
+    bytes_read: Arc<AtomicU64>,
+    bytes_written: Arc<AtomicU64>,
+}
+
+impl IoStats {
+    pub fn new() -> Self {
+        Self {
+            bytes_read: Arc::new(AtomicU64::new(0)),
+            bytes_written: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Returns the total cleartext bytes read since this counter was created.
+    pub fn bytes_read(&self) -> u64 {
+        self.bytes_read.load(Ordering::Relaxed)
+    }
+
+    /// Returns the total cleartext bytes written since this counter was created.
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_written.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for IoStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Provides an access to an encrypted storage
 /// In a nutshell, translates all the 'virtual' paths, like '/some_folder/file.txt', to real paths,
 /// like /d/DR/RW3L6XRAPFC2UCK5QY37Q2U552IRPE/eZdOa_B9fRqncpYjZmKXfJEz81LgRUbT0yWdE0wyNTMd.c9r
 #[derive(Clone)]
 pub struct CryptoFs<FS: FileSystem> {
-    /// Instance of the Cryptor - does all work with cryptography
-    cryptor: Cryptor,
+    /// Instance of the Cryptor - does all work with cryptography.
+    /// Wrapped in `Arc` so that cloning `CryptoFs` (e.g. for
+    /// `VirtualDirIter` or `spawn_blocking`) is cheap and does not
+    /// deep-copy `MasterKey` material.
+    cryptor: Arc<Cryptor>,
 
     /// path to an encrypted storage
     root_folder: PathBuf,
@@ -165,6 +205,9 @@ pub struct CryptoFs<FS: FileSystem> {
     /// us share the counter with the `OpenFileGuard` RAII wrapper without
     /// paying for a `Mutex`.
     open_file_count: Arc<AtomicUsize>,
+
+    /// Shared I/O throughput counters.
+    io_stats: IoStats,
 }
 
 impl<FS: 'static + FileSystem> CryptoFs<FS> {
@@ -181,11 +224,12 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             ));
         }
         let crypto_fs = CryptoFs {
-            cryptor,
+            cryptor: Arc::new(cryptor),
             root_folder: PathBuf::from(folder),
             file_system_provider: fs_provider,
             caches: Arc::new(CryptoFsCaches::new(5000, 16)),
             open_file_count: Arc::new(AtomicUsize::new(0)),
+            io_stats: IoStats::new(),
             config,
         };
         let root = crypto_fs.real_path_from_dir_id(b"")?;
@@ -198,6 +242,11 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     /// Returns the number of currently open `CryptoFsFile` handles.
     pub fn open_file_count(&self) -> usize {
         self.open_file_count.load(Ordering::Relaxed)
+    }
+
+    /// Returns a reference to the shared I/O statistics counters.
+    pub fn io_stats(&self) -> &IoStats {
+        &self.io_stats
     }
 
     /// Attempts to acquire a slot in the open-file limit.
@@ -501,20 +550,46 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         Ok(())
     }
 
-    /// Returns an iterator of DirEntries for the given path
+    /// Returns an iterator of DirEntries for the given path.
+    ///
+    /// This compatibility API skips per-entry decoding/path errors and logs a
+    /// warning so existing callers can continue iterating plain `DirEntry`
+    /// values. Use [`CryptoFs::read_dir_fallible`] when the caller must
+    /// surface corrupted entries instead of skipping them.
     pub fn read_dir<P: AsRef<Path>>(
         &self,
         path: P,
     ) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError> {
+        Ok(Box::new(self.read_dir_fallible(path)?.filter_map(
+            |entry| match entry {
+                Ok(entry) => Some(entry),
+                Err(err) => {
+                    warn!("Skipping unreadable directory entry: {:?}", err);
+                    None
+                }
+            },
+        )))
+    }
+
+    /// Returns a lazy iterator over directory entries for the given path.
+    ///
+    /// Each item is resolved on demand and may fail if an individual backing
+    /// entry is corrupt or unreadable. Callers that need to propagate these
+    /// failures, such as network frontends, should use this API.
+    pub fn read_dir_fallible<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Result<Box<dyn Iterator<Item = Result<DirEntry, FileSystemError>>>, FileSystemError> {
         let dir_id = self.dir_id_from_path(&path)?;
         let real_path = self.real_path_from_dir_id(dir_id.as_slice())?;
         let virtual_parent_path = path.as_ref().to_path_buf();
-        let dir_entries: Result<Vec<DirEntry>, FileSystemError> = self
-            .file_system_provider
-            .read_dir(real_path)?
-            .map(|de| self.virtual_dir_entry_from_real(de, dir_id.as_slice(), &virtual_parent_path))
-            .collect();
-        Ok(Box::new(dir_entries?.into_iter()))
+        let inner_iter = self.file_system_provider.read_dir(real_path)?;
+        Ok(Box::new(VirtualDirIter {
+            crypto_fs: self.clone(),
+            dir_id,
+            virtual_parent_path,
+            inner: inner_iter,
+        }))
     }
 
     /// Creates the directory at this path
@@ -623,11 +698,12 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
         let crypto_file = CryptoFsFile::open(
             real_path,
-            self.cryptor.clone(),
+            Arc::clone(&self.cryptor),
             &self.file_system_provider,
             options,
             self.config.chunk_cache_cap,
             self.is_read_only(),
+            self.io_stats.clone(),
             guard,
         )?;
         Ok(crypto_file)
@@ -658,9 +734,10 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
         let reader = self.file_system_provider.create_file(real_path.full_path)?;
         let crypto_file = CryptoFsFile::create_file(
-            self.cryptor.clone(),
+            Arc::clone(&self.cryptor),
             reader,
             self.config.chunk_cache_cap,
+            self.io_stats.clone(),
             guard,
         )?;
         Ok(crypto_file)
@@ -702,9 +779,13 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
             return Err(FileSystemError::ReadOnly);
         }
         let real_dir_path = self.filepath_to_real_path(&path)?;
-        let dir_entries = self.read_dir(&path)?;
+        // Collect entries eagerly so the directory file descriptor is closed
+        // before we recurse into children (avoids one open FD per recursion level).
+        let dir_entries: Vec<_> = self
+            .read_dir_fallible(&path)?
+            .collect::<Result<Vec<_>, _>>()?;
 
-        for entry in dir_entries {
+        for entry in &dir_entries {
             let mut full_path = path.as_ref().to_path_buf();
             full_path.push(&entry.file_name);
 
@@ -757,7 +838,11 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         if self.is_read_only() {
             return Err(FileSystemError::ReadOnly);
         }
-        let src_dir_entries = self.read_dir(&_src)?;
+        // Collect entries eagerly so the directory file descriptor is closed
+        // before we recurse into children (avoids one open FD per recursion level).
+        let src_dir_entries: Vec<_> = self
+            .read_dir_fallible(&_src)?
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut dst_path = _dest.as_ref();
         let mut dst_path_builder = PathBuf::new();
@@ -771,7 +856,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
 
         let src_root = _src.as_ref();
-        for entry in src_dir_entries {
+        for entry in &src_dir_entries {
             let dst_full_path = dst_path.join(&entry.file_name);
             let src_full_path = src_root.join(&entry.file_name);
 
@@ -817,7 +902,11 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         if self.is_read_only() {
             return Err(FileSystemError::ReadOnly);
         }
-        let src_dir_entries = self.read_dir(&_src)?;
+        // Collect entries eagerly so the directory file descriptor is closed
+        // before we recurse into children (avoids one open FD per recursion level).
+        let src_dir_entries: Vec<_> = self
+            .read_dir_fallible(&_src)?
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut dst_path = _dest.as_ref();
         let mut dst_path_builder = PathBuf::new();
@@ -831,7 +920,7 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
 
         let src_root = _src.as_ref();
-        for entry in src_dir_entries {
+        for entry in &src_dir_entries {
             let dst_full_path = dst_path.join(&entry.file_name);
             let src_full_path = src_root.join(&entry.file_name);
 
@@ -879,14 +968,40 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
     }
 }
 
+struct VirtualDirIter<FS: FileSystem + 'static> {
+    crypto_fs: CryptoFs<FS>,
+    dir_id: Vec<u8>,
+    virtual_parent_path: PathBuf,
+    inner: Box<dyn Iterator<Item = DirEntry>>,
+}
+
+impl<FS: FileSystem + 'static> Iterator for VirtualDirIter<FS> {
+    type Item = Result<DirEntry, FileSystemError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|entry| {
+            self.crypto_fs.virtual_dir_entry_from_real(
+                entry,
+                &self.dir_id,
+                &self.virtual_parent_path,
+            )
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
 /// Buffer for filling gaps with zeros
 static ZEROS: [u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH] = [0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH];
 
 /// 'Virtual' file implementation of the File trait
 #[derive(Debug)]
 pub struct CryptoFsFile {
-    /// A Cryptor instance used to encrypt/decrypt data
-    cryptor: Cryptor,
+    /// A Cryptor instance used to encrypt/decrypt data.
+    /// Shared via `Arc` to avoid deep-copying `MasterKey` material.
+    cryptor: Arc<Cryptor>,
 
     /// Real filesystem file instance used to perform File(Read, Write, Seek) operations
     rfs_file: Box<dyn File>,
@@ -918,6 +1033,9 @@ pub struct CryptoFsFile {
     /// If true, write operations are blocked
     read_only: bool,
 
+    /// Shared I/O throughput counters from the parent `CryptoFs`.
+    io_stats: IoStats,
+
     /// RAII guard that decrements the open-file counter in the parent
     /// `CryptoFs` when this file handle is dropped.  Held last so that the
     /// underlying file is closed before the slot is returned to the pool.
@@ -929,13 +1047,15 @@ impl CryptoFsFile {
     /// function call) for reading/writing.
     /// Read/Write implementations for the traits works with a cleartext data, so CryptoFSFile instance
     /// must contain the Cryptor
+    #[allow(clippy::too_many_arguments)]
     fn open<P: AsRef<Path>, FS: FileSystem>(
         real_path: P,
-        cryptor: Cryptor,
+        cryptor: Arc<Cryptor>,
         real_file_system_provider: &FS,
         options: OpenOptions,
         chunk_cache_cap: usize,
         read_only: bool,
+        io_stats: IoStats,
         open_guard: OpenFileGuard,
     ) -> Result<CryptoFsFile, FileSystemError> {
         let mut reader = real_file_system_provider.open_file(real_path, options)?;
@@ -961,6 +1081,7 @@ impl CryptoFsFile {
             decrypt_buffer: Zeroizing::new(vec![0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH]),
             write_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_LENGTH)),
             read_only,
+            io_stats,
             _open_guard: open_guard,
         })
     }
@@ -970,9 +1091,10 @@ impl CryptoFsFile {
     /// Read/Write implementations for the traits works with a cleartext data, so CryptoFSFile instance
     /// must contain the Cryptor
     fn create_file(
-        cryptor: Cryptor,
+        cryptor: Arc<Cryptor>,
         mut rfs_file: Box<dyn File>,
         chunk_cache_cap: usize,
+        io_stats: IoStats,
         open_guard: OpenFileGuard,
     ) -> Result<CryptoFsFile, FileSystemError> {
         let header = cryptor.create_file_header();
@@ -996,6 +1118,7 @@ impl CryptoFsFile {
             decrypt_buffer: Zeroizing::new(vec![0u8; FILE_CHUNK_CONTENT_PAYLOAD_LENGTH]),
             write_buffer: Zeroizing::new(Vec::with_capacity(FILE_CHUNK_LENGTH)),
             read_only: false,
+            io_stats,
             _open_guard: open_guard,
         })
     }
@@ -1326,6 +1449,10 @@ impl Read for CryptoFsFile {
                 self.current_pos += zero_len as u64;
             }
         }
+        // Relaxed: approximate counter read periodically by the UI.
+        self.io_stats
+            .bytes_read
+            .fetch_add(n as u64, Ordering::Relaxed);
         Ok(n)
     }
 }
@@ -1385,6 +1512,10 @@ impl Write for CryptoFsFile {
             return Err(e.into());
         }
 
+        // Relaxed: approximate counter read periodically by the UI.
+        self.io_stats
+            .bytes_written
+            .fetch_add(n as u64, Ordering::Relaxed);
         Ok(n)
     }
 

@@ -200,11 +200,7 @@ impl VaultSettingsState {
                         }
                     }
                 },
-                mount_point: if self.mount_point.is_empty() {
-                    None
-                } else {
-                    Some(self.mount_point.clone())
-                },
+                mount_point: persisted_mount_point(self.volume_choice, &self.mount_point),
             };
         }
         storage.save();
@@ -327,32 +323,33 @@ fn draw_filesystem_tab(state: &mut VaultSettingsState, ui: &mut egui::Ui) {
 
 fn draw_mounting_tab(state: &mut VaultSettingsState, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
-        ui.label("Mount point:");
-        ui.add(
-            egui::TextEdit::singleline(&mut state.mount_point)
-                .hint_text("/Volumes/MyVault")
-                .desired_width(280.0),
-        );
-        // Known limitation: pick_folder() may briefly block the UI on macOS.
-        if ui.button("Browse...").clicked() {
-            if let Some(path) = rfd::FileDialog::new()
-                .set_title("Choose mount point")
-                .pick_folder()
-            {
-                state.mount_point = path.to_string_lossy().to_string();
-            }
-        }
-    });
-
-    ui.add_space(8.0);
-
-    ui.horizontal(|ui| {
         ui.label("Volume type:");
         ui.selectable_value(&mut state.volume_choice, VolumeChoice::Nfs, "NFS");
         ui.selectable_value(&mut state.volume_choice, VolumeChoice::WebDav, "WebDAV");
     });
 
-    if state.volume_choice == VolumeChoice::WebDav {
+    ui.add_space(8.0);
+
+    if state.volume_choice == VolumeChoice::Nfs {
+        ui.horizontal(|ui| {
+            ui.label("Mount point:");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.mount_point)
+                    .hint_text("/Volumes/MyVault")
+                    .desired_width(280.0),
+            );
+            // Known limitation: pick_folder() may briefly block the UI on macOS.
+            if ui.button("Browse...").clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Choose mount point")
+                    .pick_folder()
+                {
+                    state.mount_point = path.to_string_lossy().to_string();
+                }
+            }
+        });
+    } else {
+        ui.label("Mount point is only used for NFS mounts.");
         ui.add_space(8.0);
         ui.group(|ui| {
             ui.label("WebDAV Server Options");
@@ -420,9 +417,17 @@ fn remap_path_prefix(path: &str, old_prefix: &str, new_prefix: &str) -> Option<S
     }
 }
 
+fn persisted_mount_point(volume_choice: VolumeChoice, mount_point: &str) -> Option<String> {
+    if volume_choice == VolumeChoice::Nfs && !mount_point.is_empty() {
+        Some(mount_point.to_owned())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::remap_storage_paths;
+    use super::{VolumeChoice, persisted_mount_point, remap_storage_paths};
     use crate::storage::{FsProviderConfig, MountingConfig, VaultEntry, VolumeType};
     use cryptomator::crypto::DEFAULT_VAULT_FILENAME;
     use uuid::Uuid;
@@ -502,5 +507,18 @@ mod tests {
             vault_file_path,
             format!("/new/location/Vault/{DEFAULT_VAULT_FILENAME}")
         );
+    }
+
+    #[test]
+    fn persisted_mount_point_is_nfs_only() {
+        assert_eq!(
+            persisted_mount_point(VolumeChoice::Nfs, "/tmp/Vault"),
+            Some("/tmp/Vault".into())
+        );
+        assert_eq!(
+            persisted_mount_point(VolumeChoice::WebDav, "/tmp/Vault"),
+            None
+        );
+        assert_eq!(persisted_mount_point(VolumeChoice::Nfs, ""), None);
     }
 }

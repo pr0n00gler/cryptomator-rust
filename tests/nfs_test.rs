@@ -1,5 +1,5 @@
 use cryptomator::crypto::{Cryptor, FILE_CHUNK_CONTENT_PAYLOAD_LENGTH, Vault};
-use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig};
+use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem};
 use cryptomator::frontends::nfs::NfsServer;
 use cryptomator::providers::{LocalFs, MemoryFs};
 use nfsserve::nfs::{
@@ -607,6 +607,32 @@ async fn test_nfs_read_directory_error() {
 
     let result = nfs.read(root_handle, 0, 100).await;
     assert!(matches!(result, Err(nfsstat3::NFS3ERR_ISDIR)));
+}
+
+#[tokio::test]
+async fn test_nfs_readdir_reports_corrupt_entry_error() {
+    let mem_fs = MemoryFs::new();
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = Cryptor::new(vault);
+    let crypto_fs = CryptoFs::new(
+        VFS_STORAGE_PATH,
+        cryptor,
+        mem_fs.clone(),
+        CryptoFsConfig::default(),
+    )
+    .unwrap();
+
+    let _good = crypto_fs.create_file("/good.txt").unwrap();
+    let root = crypto_fs.real_path_from_dir_id(b"").unwrap();
+    let _broken = mem_fs.create_file(root.join("broken.c9r")).unwrap();
+
+    let nfs = NfsServer::new(crypto_fs);
+    let result = nfs.readdir(nfs.root_dir(), 0, 100).await;
+
+    assert!(
+        matches!(result, Err(nfsstat3::NFS3ERR_IO)),
+        "expected corrupt entry to surface as NFS3ERR_IO, got {result:?}"
+    );
 }
 
 #[tokio::test]

@@ -1201,29 +1201,25 @@ impl<FS: 'static + FileSystem> NFSFileSystem for NfsServer<FS> {
         let entry_limit = max_entries.min(MAX_READDIR_ENTRIES_PER_CALL);
 
         tokio::task::spawn_blocking(move || -> Result<ReadDirResult, nfsstat3> {
-            let entries_iter = crypto_fs.read_dir(&path).map_err(|e| {
+            let entries_iter = crypto_fs.read_dir_fallible(&path).map_err(|e| {
                 error!("Failed to read directory: {:?}", e);
                 fs_err_to_nfsstat(&e)
             })?;
 
             // Issue 1: Collect and sort entries alphabetically so that NFS
             // pagination cookies yield deterministic results across calls.
-            let mut all_entries: Vec<_> = entries_iter
-                .filter_map(|entry| match entry {
-                    Ok(e) => Some(e),
-                    Err(e) => {
-                        warn!("Skipping directory entry with error: {:?}", e);
-                        None
-                    }
-                })
-                .filter_map(|entry| match entry.filename_string() {
-                    Ok(name) => Some((name, entry.metadata)),
-                    Err(e) => {
-                        warn!("Skipping directory entry with invalid filename: {:?}", e);
-                        None
-                    }
-                })
-                .collect();
+            let mut all_entries = Vec::new();
+            for entry in entries_iter {
+                let entry = entry.map_err(|e| {
+                    error!("Failed to decode directory entry: {:?}", e);
+                    fs_err_to_nfsstat(&e)
+                })?;
+                let name = entry.filename_string().map_err(|e| {
+                    error!("Failed to decode directory entry filename: {:?}", e);
+                    nfsstat3::NFS3ERR_IO
+                })?;
+                all_entries.push((name, entry.metadata));
+            }
             all_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
 
             let mut collected = Vec::with_capacity(entry_limit);

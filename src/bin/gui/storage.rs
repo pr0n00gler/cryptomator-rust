@@ -18,7 +18,8 @@ pub struct VaultEntry {
     pub name: String,
     /// Path to the vault root (parent of `d/`).
     pub storage_path: String,
-    /// Path to `vault.cryptomator` (or `masterkey.cryptomator`).
+    /// Path to `vault.cryptomator`.
+    /// Legacy `masterkey.cryptomator` selections are normalized on open.
     pub vault_file_path: String,
     pub provider: FsProviderConfig,
     pub mounting: MountingConfig,
@@ -40,6 +41,7 @@ pub enum FsProviderConfig {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MountingConfig {
     pub volume_type: VolumeType,
+    /// Mount folder used for NFS mounts only.
     pub mount_point: Option<String>,
 }
 

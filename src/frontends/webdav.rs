@@ -342,7 +342,7 @@ impl<FS: FileSystem> DavFileSystem for WebDav<FS> {
         async move {
             tokio::task::spawn_blocking(move || {
                 debug!("WebDAV read_dir: {:?}", path_buf);
-                let entries = crypto_fs.read_dir(&path_buf)?;
+                let entries = crypto_fs.read_dir_fallible(&path_buf)?;
                 // We must collect entires here inside blocking block?
                 // entries is Iterator. map creates lazy iterator.
                 // We need to collect to Vec to return it safely out of closure.

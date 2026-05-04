@@ -3,7 +3,7 @@ use std::path::Path;
 use eframe::egui;
 use uuid::Uuid;
 
-use cryptomator::crypto::DEFAULT_VAULT_FILENAME;
+use cryptomator::crypto::{DEFAULT_MASTER_KEY_FILE, DEFAULT_VAULT_FILENAME};
 
 use crate::modals::{Modal, ModalResult, draw_modal_overlay};
 use crate::storage::{FsProviderConfig, MountingConfig, VaultEntry};
@@ -60,6 +60,22 @@ impl OpenVaultModal {
                 }
                 if path.extension().and_then(|e| e.to_str()) != Some("cryptomator") {
                     return Err("File must have a .cryptomator extension.".into());
+                }
+                match path.file_name().and_then(|name| name.to_str()) {
+                    Some(DEFAULT_VAULT_FILENAME) => {}
+                    Some(DEFAULT_MASTER_KEY_FILE) => {
+                        let normalized = normalize_local_vault_file_path(path);
+                        if !normalized.exists() {
+                            return Err(format!(
+                                "Selected {DEFAULT_MASTER_KEY_FILE} has no sibling {DEFAULT_VAULT_FILENAME}."
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "Please select {DEFAULT_VAULT_FILENAME} or {DEFAULT_MASTER_KEY_FILE}."
+                        ));
+                    }
                 }
             }
             ProviderChoice::WebDav => {
@@ -221,6 +237,13 @@ fn path_to_string(p: &Path) -> String {
         .map_or_else(|| p.to_string_lossy().into_owned(), str::to_owned)
 }
 
+fn normalize_local_vault_file_path(file_path: &Path) -> std::path::PathBuf {
+    match file_path.file_name().and_then(|name| name.to_str()) {
+        Some(DEFAULT_MASTER_KEY_FILE) => file_path.with_file_name(DEFAULT_VAULT_FILENAME),
+        _ => file_path.to_path_buf(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,10 +339,25 @@ mod tests {
             _ => panic!("expected WebDav provider"),
         }
     }
+
+    #[test]
+    fn local_masterkey_path_is_normalized_to_vault_file() {
+        let normalized =
+            normalize_local_vault_file_path(Path::new("/tmp/MyVault/masterkey.cryptomator"));
+        assert_eq!(normalized, Path::new("/tmp/MyVault/vault.cryptomator"));
+    }
+
+    #[test]
+    fn local_vault_path_is_preserved() {
+        let normalized =
+            normalize_local_vault_file_path(Path::new("/tmp/MyVault/vault.cryptomator"));
+        assert_eq!(normalized, Path::new("/tmp/MyVault/vault.cryptomator"));
+    }
 }
 
 fn vault_entry_from_path(file_path: &Path) -> VaultEntry {
-    let parent = file_path.parent().unwrap_or(file_path);
+    let file_path = normalize_local_vault_file_path(file_path);
+    let parent = file_path.parent().unwrap_or(file_path.as_path());
     let vault_root = path_to_string(parent);
 
     let name = parent
@@ -334,7 +372,7 @@ fn vault_entry_from_path(file_path: &Path) -> VaultEntry {
         id: Uuid::new_v4(),
         name,
         storage_path: vault_root.clone(),
-        vault_file_path: path_to_string(file_path),
+        vault_file_path: path_to_string(&file_path),
         provider: FsProviderConfig::Local {
             base_path: vault_root,
         },

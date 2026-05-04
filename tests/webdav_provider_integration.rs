@@ -411,11 +411,7 @@ async fn test_read_dir() {
         drop(f);
         fs.create_dir("/listdir/child").unwrap();
 
-        let entries: Vec<_> = fs
-            .read_dir("/listdir")
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let entries: Vec<_> = fs.read_dir("/listdir").unwrap().collect();
         assert_eq!(entries.len(), 3);
 
         let mut names: Vec<String> = entries
@@ -432,11 +428,7 @@ async fn test_read_dir() {
 async fn test_read_dir_root() {
     with_crypto_fs(|fs| {
         // Initially root should be empty
-        let entries: Vec<_> = fs
-            .read_dir("/")
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let entries: Vec<_> = fs.read_dir("/").unwrap().collect();
         assert!(entries.is_empty());
 
         // Add some items
@@ -445,11 +437,7 @@ async fn test_read_dir_root() {
         drop(f);
         fs.create_dir("/root_dir").unwrap();
 
-        let entries: Vec<_> = fs
-            .read_dir("/")
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let entries: Vec<_> = fs.read_dir("/").unwrap().collect();
         assert_eq!(entries.len(), 2);
     })
     .await;
@@ -815,11 +803,7 @@ async fn test_multiple_files_in_same_dir() {
         }
 
         // Verify directory listing
-        let entries: Vec<_> = fs
-            .read_dir("/")
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let entries: Vec<_> = fs.read_dir("/").unwrap().collect();
         assert_eq!(entries.len(), files.len());
     })
     .await;
@@ -956,25 +940,13 @@ async fn test_multiple_files_in_nested_dirs_with_operations() {
         drop(f);
 
         // Verify listings
-        let src_entries: Vec<_> = fs
-            .read_dir("/project/src")
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let src_entries: Vec<_> = fs.read_dir("/project/src").unwrap().collect();
         assert_eq!(src_entries.len(), 2);
 
-        let doc_entries: Vec<_> = fs
-            .read_dir("/project/docs")
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let doc_entries: Vec<_> = fs.read_dir("/project/docs").unwrap().collect();
         assert_eq!(doc_entries.len(), 1);
 
-        let project_entries: Vec<_> = fs
-            .read_dir("/project")
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let project_entries: Vec<_> = fs.read_dir("/project").unwrap().collect();
         assert_eq!(project_entries.len(), 2); // src and docs
 
         // Copy a file across dirs
@@ -1003,11 +975,7 @@ async fn test_multiple_files_in_nested_dirs_with_operations() {
         assert!(!fs.exists("/project/docs/readme.txt"));
 
         // Final listing of docs: main_backup.rs and lib.rs
-        let doc_entries: Vec<_> = fs
-            .read_dir("/project/docs")
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let doc_entries: Vec<_> = fs.read_dir("/project/docs").unwrap().collect();
         assert_eq!(doc_entries.len(), 2);
     })
     .await;
@@ -1174,11 +1142,7 @@ async fn test_read_dir_entry_metadata() {
 
         fs.create_dir("/entries/subdir").unwrap();
 
-        let entries: Vec<_> = fs
-            .read_dir("/entries")
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let entries: Vec<_> = fs.read_dir("/entries").unwrap().collect();
         assert_eq!(entries.len(), 2);
 
         for entry in &entries {

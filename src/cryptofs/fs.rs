@@ -550,8 +550,33 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         Ok(())
     }
 
-    /// Returns an iterator of DirEntries for the given path
+    /// Returns an iterator of DirEntries for the given path.
+    ///
+    /// This compatibility API skips per-entry decoding/path errors and logs a
+    /// warning so existing callers can continue iterating plain `DirEntry`
+    /// values. Use [`CryptoFs::read_dir_fallible`] when the caller must
+    /// surface corrupted entries instead of skipping them.
     pub fn read_dir<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Result<Box<dyn Iterator<Item = DirEntry>>, FileSystemError> {
+        Ok(Box::new(self.read_dir_fallible(path)?.filter_map(
+            |entry| match entry {
+                Ok(entry) => Some(entry),
+                Err(err) => {
+                    warn!("Skipping unreadable directory entry: {:?}", err);
+                    None
+                }
+            },
+        )))
+    }
+
+    /// Returns a lazy iterator over directory entries for the given path.
+    ///
+    /// Each item is resolved on demand and may fail if an individual backing
+    /// entry is corrupt or unreadable. Callers that need to propagate these
+    /// failures, such as network frontends, should use this API.
+    pub fn read_dir_fallible<P: AsRef<Path>>(
         &self,
         path: P,
     ) -> Result<Box<dyn Iterator<Item = Result<DirEntry, FileSystemError>>>, FileSystemError> {
@@ -756,7 +781,9 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         let real_dir_path = self.filepath_to_real_path(&path)?;
         // Collect entries eagerly so the directory file descriptor is closed
         // before we recurse into children (avoids one open FD per recursion level).
-        let dir_entries: Vec<_> = self.read_dir(&path)?.collect::<Result<Vec<_>, _>>()?;
+        let dir_entries: Vec<_> = self
+            .read_dir_fallible(&path)?
+            .collect::<Result<Vec<_>, _>>()?;
 
         for entry in &dir_entries {
             let mut full_path = path.as_ref().to_path_buf();
@@ -813,7 +840,9 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
         // Collect entries eagerly so the directory file descriptor is closed
         // before we recurse into children (avoids one open FD per recursion level).
-        let src_dir_entries: Vec<_> = self.read_dir(&_src)?.collect::<Result<Vec<_>, _>>()?;
+        let src_dir_entries: Vec<_> = self
+            .read_dir_fallible(&_src)?
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut dst_path = _dest.as_ref();
         let mut dst_path_builder = PathBuf::new();
@@ -875,7 +904,9 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         }
         // Collect entries eagerly so the directory file descriptor is closed
         // before we recurse into children (avoids one open FD per recursion level).
-        let src_dir_entries: Vec<_> = self.read_dir(&_src)?.collect::<Result<Vec<_>, _>>()?;
+        let src_dir_entries: Vec<_> = self
+            .read_dir_fallible(&_src)?
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut dst_path = _dest.as_ref();
         let mut dst_path_builder = PathBuf::new();

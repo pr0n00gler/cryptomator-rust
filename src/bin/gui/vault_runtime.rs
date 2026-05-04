@@ -7,7 +7,7 @@ use std::time::Instant;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use cryptomator::crypto::{Cryptor, DEFAULT_VAULT_FILENAME, Vault};
+use cryptomator::crypto::{Cryptor, DEFAULT_MASTER_KEY_FILE, DEFAULT_VAULT_FILENAME, Vault};
 use cryptomator::cryptofs::{CryptoFs, CryptoFsConfig, FileSystem, IoStats};
 use cryptomator::frontends::auth::WebDavAuth;
 use cryptomator::frontends::mount::{mount_nfs, mount_webdav};
@@ -41,6 +41,7 @@ pub struct VaultRuntime {
     pub log_rx: mpsc::Receiver<LogMsg>,
     pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     pub io_stats: Option<IoStats>,
+    /// Active NFS mount folder, if this vault is currently mounted via NFS.
     pub active_mount_folder: Option<String>,
     pub busy: Arc<Mutex<bool>>,
     pub last_activity: Instant,
@@ -176,20 +177,27 @@ impl VaultRuntime {
     ) {
         let vault_path = resolved_vault_path(entry);
         let full_storage_path = full_storage_path(entry);
-        let mount_folder = match &entry.mounting.mount_point {
-            Some(f) => f.clone(),
-            None => {
-                let _ = self
-                    .log_tx
-                    .send(LogMsg::Error("Mount point not configured.".into()));
-                return;
-            }
-        };
+        let mount_folder = match &entry.mounting.volume_type {
+            VolumeType::Nfs => {
+                let mount_folder = match &entry.mounting.mount_point {
+                    Some(folder) => folder.clone(),
+                    None => {
+                        let _ = self
+                            .log_tx
+                            .send(LogMsg::Error("Mount point not configured.".into()));
+                        return;
+                    }
+                };
 
-        if let Err(msg) = validate_mount_folder(&mount_folder) {
-            let _ = self.log_tx.send(LogMsg::Error(msg));
-            return;
-        }
+                if let Err(msg) = validate_mount_folder(&mount_folder) {
+                    let _ = self.log_tx.send(LogMsg::Error(msg));
+                    return;
+                }
+
+                Some(mount_folder)
+            }
+            VolumeType::WebDav { .. } => None,
+        };
 
         let password = Zeroizing::new(password.to_owned());
         let webdav_provider_password =
@@ -203,7 +211,7 @@ impl VaultRuntime {
 
         // Set state AFTER all validation checks to avoid orphaned state on early return.
         self.shutdown_tx = Some(shutdown_tx);
-        self.active_mount_folder = Some(mount_folder.clone());
+        self.active_mount_folder = mount_folder.clone();
         self.status = VaultStatus::Unlocking;
 
         self.set_busy(true);
@@ -218,7 +226,7 @@ impl VaultRuntime {
                     &vault_path,
                     &full_storage_path,
                     password.as_str(),
-                    &mount_folder,
+                    mount_folder.as_deref(),
                     &volume_type,
                     &tx,
                     shutdown_rx,
@@ -231,7 +239,7 @@ impl VaultRuntime {
                         &vault_path,
                         &full_storage_path,
                         password.as_str(),
-                        &mount_folder,
+                        mount_folder.as_deref(),
                         &volume_type,
                         &tx,
                         shutdown_rx,
@@ -327,7 +335,14 @@ fn resolved_vault_path(entry: &VaultEntry) -> PathBuf {
     if entry.vault_file_path.is_empty() {
         Path::new(&entry.storage_path).join(DEFAULT_VAULT_FILENAME)
     } else {
-        PathBuf::from(&entry.vault_file_path)
+        normalize_vault_manifest_path(Path::new(&entry.vault_file_path))
+    }
+}
+
+fn normalize_vault_manifest_path(path: &Path) -> PathBuf {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some(DEFAULT_MASTER_KEY_FILE) => path.with_file_name(DEFAULT_VAULT_FILENAME),
+        _ => path.to_path_buf(),
     }
 }
 
@@ -413,7 +428,7 @@ fn do_mount<FS: FileSystem + 'static>(
     vault_path: &Path,
     full_storage_path: &Path,
     password: &str,
-    mount_folder: &str,
+    mount_folder: Option<&str>,
     volume_type: &VolumeType,
     tx: &mpsc::Sender<LogMsg>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -438,7 +453,12 @@ fn do_mount<FS: FileSystem + 'static>(
     let _ = tx.send(LogMsg::Stats(crypto_fs.io_stats().clone()));
 
     match volume_type {
-        VolumeType::Nfs => do_nfs_mount(crypto_fs, mount_folder, tx, shutdown_rx),
+        VolumeType::Nfs => do_nfs_mount(
+            crypto_fs,
+            mount_folder.ok_or_else(|| anyhow::anyhow!("Mount point not configured."))?,
+            tx,
+            shutdown_rx,
+        ),
         VolumeType::WebDav {
             host,
             port,
@@ -681,5 +701,46 @@ pub fn reveal_in_file_manager(path: &str) {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolved_vault_path;
+    use crate::storage::{FsProviderConfig, MountingConfig, VaultEntry};
+    use std::path::Path;
+    use uuid::Uuid;
+
+    fn entry_with_vault_file_path(vault_file_path: &str) -> VaultEntry {
+        VaultEntry {
+            id: Uuid::nil(),
+            name: "Vault".into(),
+            storage_path: "/tmp/Vault".into(),
+            vault_file_path: vault_file_path.into(),
+            provider: FsProviderConfig::Local {
+                base_path: "/tmp/Vault".into(),
+            },
+            mounting: MountingConfig::default(),
+            idle_lock: None,
+        }
+    }
+
+    #[test]
+    fn resolved_vault_path_normalizes_legacy_masterkey_selection() {
+        let entry = entry_with_vault_file_path("/tmp/Vault/masterkey.cryptomator");
+        assert_eq!(
+            resolved_vault_path(&entry),
+            Path::new("/tmp/Vault/vault.cryptomator")
+        );
+    }
+
+    #[test]
+    fn resolved_vault_path_defaults_to_vault_file_name() {
+        let mut entry = entry_with_vault_file_path("");
+        entry.storage_path = "/tmp/Vault".into();
+        assert_eq!(
+            resolved_vault_path(&entry),
+            Path::new("/tmp/Vault/vault.cryptomator")
+        );
     }
 }

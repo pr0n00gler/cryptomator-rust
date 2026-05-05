@@ -421,7 +421,7 @@ async fn start_webdav_server() -> std::net::SocketAddr {
     drop(listener);
 
     tokio::spawn(async move {
-        mount_webdav(addr.to_string(), crypto_fs, None).await;
+        let _ = mount_webdav(addr.to_string(), crypto_fs, None).await;
     });
 
     // Give the server a moment to bind.

@@ -18,6 +18,9 @@ pub enum MasterKeyError {
     #[error("Scrypt invalid params error")]
     ScryptInvalidParams(scrypt::errors::InvalidParams),
 
+    #[error("Invalid scrypt cost parameter: {0}")]
+    InvalidScryptCost(u64),
+
     #[error("Scrypt invalid output length")]
     ScryptInvalidOutputLengthError(scrypt::errors::InvalidOutputLen),
 
@@ -32,6 +35,9 @@ pub enum MasterKeyError {
 
     #[error("JWT error")]
     JWTError(jwt::Error),
+
+    #[error("Unexpected JWT key id: {0}")]
+    UnexpectedKeyId(String),
 
     #[error("String decoding error")]
     FromUTF8Error(FromUtf8Error),

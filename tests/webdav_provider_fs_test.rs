@@ -4,6 +4,7 @@ use cryptomator::frontends::mount::mount_webdav;
 use cryptomator::providers::{LocalFs, MemoryFs, WebDavFs};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::TcpListener;
+use std::sync::{Arc, Mutex};
 
 const PATH_TO_VAULT: &str = "tests/test_storage/vault.cryptomator";
 const DEFAULT_PASSWORD: &str = "12345678";
@@ -48,7 +49,7 @@ async fn setup_test_server() -> (String, tokio::task::JoinHandle<()>) {
     let listen_addr = addr.to_string();
 
     let handle = tokio::spawn(async move {
-        mount_webdav(listen_addr, crypto_fs, None).await;
+        let _ = mount_webdav(listen_addr, crypto_fs, None).await;
     });
 
     // Wait for the server to be ready by polling TCP connectivity.
@@ -91,12 +92,72 @@ fn spawn_static_response_server(
     (format!("http://{addr}"), handle)
 }
 
+fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+    let mut request = Vec::new();
+    let mut buf = [0_u8; 4096];
+
+    let header_end = loop {
+        let n = stream.read(&mut buf).unwrap_or(0);
+        if n == 0 {
+            break request.len();
+        }
+        request.extend_from_slice(&buf[..n]);
+        if let Some(pos) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            break pos + 4;
+        }
+    };
+
+    let headers = String::from_utf8_lossy(&request[..header_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+
+    while request.len().saturating_sub(header_end) < content_length {
+        let n = stream.read(&mut buf).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        request.extend_from_slice(&buf[..n]);
+    }
+
+    String::from_utf8_lossy(&request).into_owned()
+}
+
+fn spawn_recording_response_server(
+    responses: Vec<&'static str>,
+) -> (String, std::thread::JoinHandle<()>, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let requests_for_thread = Arc::clone(&requests);
+
+    let handle = std::thread::spawn(move || {
+        for response in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            requests_for_thread.lock().unwrap().push(request);
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+
+    (format!("http://{addr}"), handle, requests)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_webdav_exists() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         assert!(fs.exists("/"));
     });
 }
@@ -106,7 +167,7 @@ async fn test_webdav_create_and_read_file() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_create_and_read.txt";
 
         let _ = fs.remove_file(path);
@@ -138,7 +199,7 @@ async fn test_webdav_create_file_rejects_failed_put() {
     ]);
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let err = fs.create_file("/rejected.txt").unwrap_err().to_string();
         assert!(err.contains("PUT"));
         assert!(err.contains("403"));
@@ -155,7 +216,7 @@ async fn test_webdav_open_truncate_rejects_failed_put() {
     ]);
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let mut opts = OpenOptions::new();
         opts.write(true).truncate(true);
 
@@ -168,11 +229,76 @@ async fn test_webdav_open_truncate_rejects_failed_put() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webdav_refreshes_etag_after_put_without_etag() {
+    let (base_url, handle, requests) = spawn_recording_response_server(vec![
+        "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nold",
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nETag: \"v2\"\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\none",
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nETag: \"v3\"\r\nConnection: close\r\n\r\n",
+    ]);
+
+    run_blocking(move || {
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
+        let mut opts = OpenOptions::new();
+        opts.write(true);
+        let mut file = fs.open_file("/etag-refresh.txt", opts).unwrap();
+
+        file.write_all(b"one").unwrap();
+        file.flush().unwrap();
+        file.write_all(b"two").unwrap();
+        file.flush().unwrap();
+    });
+
+    handle.join().unwrap();
+    let requests = requests.lock().unwrap();
+    let puts: Vec<String> = requests
+        .iter()
+        .filter(|request| request.starts_with("PUT "))
+        .map(|request| request.to_ascii_lowercase())
+        .collect();
+    assert_eq!(puts.len(), 2);
+    assert!(puts[0].contains("if-match: \"v1\""));
+    assert!(puts[1].contains("if-match: \"v2\""));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webdav_preserves_empty_put_etag_for_first_flush() {
+    let (base_url, handle, requests) = spawn_recording_response_server(vec![
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 201 Created\r\nContent-Length: 0\r\nETag: \"empty-v1\"\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nETag: \"data-v2\"\r\nConnection: close\r\n\r\n",
+    ]);
+
+    run_blocking(move || {
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
+        let mut opts = OpenOptions::new();
+        opts.write(true).create(true);
+        let mut file = fs.open_file("/new-with-etag.txt", opts).unwrap();
+
+        file.write_all(b"abc").unwrap();
+        file.flush().unwrap();
+    });
+
+    handle.join().unwrap();
+    let requests = requests.lock().unwrap();
+    let puts: Vec<String> = requests
+        .iter()
+        .filter(|request| request.starts_with("PUT "))
+        .map(|request| request.to_ascii_lowercase())
+        .collect();
+    assert_eq!(puts.len(), 2);
+    assert!(!puts[0].contains("if-match:"));
+    assert!(puts[1].contains("if-match: \"empty-v1\""));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_webdav_create_dir() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_create_dir_webdav";
 
         let _ = fs.remove_dir(path);
@@ -188,7 +314,7 @@ async fn test_webdav_read_dir() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let dir = "/test_read_dir_webdav";
         let file = "/test_read_dir_webdav/child.txt";
 
@@ -217,7 +343,7 @@ async fn test_webdav_remove_file() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_remove_file_webdav.txt";
 
         {
@@ -239,7 +365,7 @@ async fn test_webdav_remove_dir() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_remove_dir_webdav";
 
         let _ = fs.remove_dir(path);
@@ -255,7 +381,7 @@ async fn test_webdav_copy_file() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let src = "/test_copy_src_webdav.txt";
         let dest = "/test_copy_dest_webdav.txt";
 
@@ -294,7 +420,7 @@ async fn test_webdav_move_file() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let src = "/test_move_src_webdav.txt";
         let dest = "/test_move_dest_webdav.txt";
 
@@ -325,7 +451,7 @@ async fn test_webdav_metadata() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_metadata_webdav.txt";
 
         let _ = fs.remove_file(path);
@@ -355,7 +481,7 @@ async fn test_webdav_metadata_directory() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_metadata_dir_webdav";
 
         let _ = fs.remove_dir(path);
@@ -377,7 +503,7 @@ async fn test_webdav_metadata_root() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
 
         let meta = fs.metadata("/").expect("failed to get metadata for root");
         assert!(meta.is_dir, "expected root to be a directory");
@@ -391,7 +517,7 @@ async fn test_webdav_metadata_nested_directory() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let parent = "/d";
         let child = "/d/AB";
         let nested = "/d/AB/CDEFGHIJK";
@@ -439,7 +565,7 @@ async fn test_webdav_range_read_partial() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_range_read_partial.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -486,7 +612,7 @@ async fn test_webdav_seek_end_returns_file_size() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_seek_end_size.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -511,7 +637,7 @@ async fn test_webdav_write_at_offset() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_write_at_offset.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -555,7 +681,7 @@ async fn test_webdav_read_pending_writes_before_flush() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_read_pending.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -573,6 +699,27 @@ async fn test_webdav_read_pending_writes_before_flush() {
     });
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webdav_fsync_persists_before_drop() {
+    let (base_url, _handle) = setup_test_server().await;
+
+    run_blocking(move || {
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
+        let path = "/test_fsync_persists.dat";
+        let _ = fs.remove_file(path);
+        let _guard = CleanupFile { fs: &fs, path };
+
+        let mut writer = fs.create_file(path).unwrap();
+        writer.write_all(b"durable").unwrap();
+        writer.fsync().unwrap();
+
+        let mut reader = fs.open_file(path, OpenOptions::new()).unwrap();
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data).unwrap();
+        assert_eq!(data, b"durable");
+    });
+}
+
 /// Write a large file (>64KB) to exercise multi-chunk behavior,
 /// then read back specific ranges.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -580,7 +727,7 @@ async fn test_webdav_large_file_range_read() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_large_range.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -621,7 +768,7 @@ async fn test_webdav_multiple_writes_single_flush() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_multi_write.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -658,7 +805,7 @@ async fn test_webdav_read_overlaps_pending_and_server_data() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_overlay.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -695,7 +842,7 @@ async fn test_webdav_read_past_eof() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_eof.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -721,7 +868,7 @@ async fn test_webdav_metadata_reflects_pending_writes() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_meta_pending.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -751,7 +898,7 @@ async fn test_webdav_double_flush_read_modify_write() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_double_flush.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -793,7 +940,7 @@ async fn test_webdav_json_round_trip_via_buffered_read() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_json_roundtrip.json";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -838,7 +985,7 @@ async fn test_webdav_write_seek_back_shorter_overwrite() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_shorter_overwrite.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -865,7 +1012,7 @@ async fn test_webdav_overlapping_write_later_write_wins() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_later_write_wins.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -893,7 +1040,7 @@ async fn test_webdav_write_partial_overlap_at_end() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_partial_overlap_end.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -922,7 +1069,7 @@ async fn test_webdav_write_completely_enclosed_by_later_write() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_enclosed_write.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -950,7 +1097,7 @@ async fn test_webdav_write_split_by_inner_write() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_split_write.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };
@@ -979,7 +1126,7 @@ async fn test_webdav_sequential_chunk_reads() {
     let (base_url, _handle) = setup_test_server().await;
 
     run_blocking(move || {
-        let fs = WebDavFs::new(&base_url, None, None);
+        let fs = WebDavFs::new(&base_url, None, None).expect("failed to create WebDAV provider");
         let path = "/test_chunk_reads.dat";
         let _ = fs.remove_file(path);
         let _guard = CleanupFile { fs: &fs, path };

@@ -36,7 +36,18 @@ impl<F: rsfs::File> VirtualFile<F> {
 
 impl<F: rsfs::File + Send + Sync> File for VirtualFile<F> {
     fn metadata(&self) -> Result<Metadata, Box<dyn Error>> {
-        Ok(metadata_from_rsfs(self.f.metadata()?))
+        let mut metadata = metadata_from_rsfs(self.f.metadata()?);
+        let mut clone = self.f.try_clone()?;
+        metadata.len = clone.seek(SeekFrom::End(0))?;
+        Ok(metadata)
+    }
+
+    fn fsync(&mut self) -> std::io::Result<()> {
+        self.flush()
+    }
+
+    fn set_len(&mut self, len: u64) -> std::io::Result<()> {
+        self.f.set_len(len)
     }
 }
 
@@ -97,12 +108,11 @@ impl FileSystem for MemoryFs {
         &self,
         path: P,
     ) -> Result<Box<dyn Iterator<Item = DirEntry>>, Box<dyn Error>> {
-        Ok(Box::new(
-            self.fs
-                .read_dir(path)
-                .unwrap()
-                .map(|e| dir_entry_from_rsfs(e.unwrap())),
-        ))
+        let mut entries = Vec::new();
+        for entry in self.fs.read_dir(path)? {
+            entries.push(dir_entry_from_rsfs(entry?));
+        }
+        Ok(Box::new(entries.into_iter()))
     }
 
     fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn Error>> {
@@ -144,9 +154,17 @@ impl FileSystem for MemoryFs {
     }
 
     fn exists<P: AsRef<Path>>(&self, path: P) -> bool {
-        let last_element = last_path_component(&path).unwrap();
-        let mut entries = self.fs.read_dir(parent_path(&path)).unwrap();
-        entries.any(|de| de.unwrap().file_name() == *last_element)
+        let last_element = match last_path_component(&path) {
+            Ok(last_element) => last_element,
+            Err(_) => return false,
+        };
+        let Ok(mut entries) = self.fs.read_dir(parent_path(&path)) else {
+            return false;
+        };
+        entries.any(|de| {
+            de.map(|entry| entry.file_name() == *last_element)
+                .unwrap_or(false)
+        })
     }
 
     fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn Error>> {
@@ -163,20 +181,21 @@ impl FileSystem for MemoryFs {
     }
 
     fn move_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), Box<dyn Error>> {
-        self.copy_file(&_src, &_dest)?;
-        self.remove_file(_src)
+        Ok(self.fs.rename(_src, _dest)?)
     }
 
     fn move_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), Box<dyn Error>> {
-        // well, there is no call of this method from CryptoFS at this moment and i'm too lazy to
-        // implement the method for no reason.
-        //TODO: implement this method
-        unimplemented!()
+        Ok(self.fs.rename(_src, _dest)?)
     }
 
     fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata, Box<dyn Error>> {
-        let metadata = self.fs.metadata(path)?;
-        Ok(metadata_from_rsfs(metadata))
+        let metadata = self.fs.metadata(&path)?;
+        let mut metadata = metadata_from_rsfs(metadata);
+        if metadata.is_file {
+            let mut file = self.fs.new_openopts().read(true).open(path)?;
+            metadata.len = file.seek(SeekFrom::End(0))?;
+        }
+        Ok(metadata)
     }
 
     fn stats<P: AsRef<Path>>(&self, _path: P) -> Result<Stats, Box<dyn Error>> {

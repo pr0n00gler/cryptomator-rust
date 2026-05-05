@@ -1,12 +1,15 @@
 use crate::cryptofs::{DirEntry, File, FileSystem, Metadata, OpenOptions, Stats};
 use reqwest::blocking::Client;
-use reqwest::header::{CONTENT_TYPE, HeaderValue};
+use reqwest::header::{CONTENT_TYPE, ETAG, HeaderMap, HeaderValue, IF_MATCH};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+const PENDING_WRITE_FLUSH_THRESHOLD: usize = 8 * 1024 * 1024;
 
 /// A [`FileSystem`] implementation backed by a WebDAV server.
 ///
@@ -21,7 +24,11 @@ pub struct WebDavFs {
 }
 
 impl WebDavFs {
-    pub fn new(base_url: &str, username: Option<&str>, password: Option<&str>) -> Self {
+    pub fn new(
+        base_url: &str,
+        username: Option<&str>,
+        password: Option<&str>,
+    ) -> Result<Self, Box<dyn Error>> {
         let base_url = base_url.trim_end_matches('/').to_string();
         let mut builder = Client::builder();
         builder = builder
@@ -38,13 +45,13 @@ impl WebDavFs {
                 );
                 headers.insert(
                     reqwest::header::AUTHORIZATION,
-                    HeaderValue::from_str(&format!("Basic {credentials}")).unwrap(),
+                    HeaderValue::from_str(&format!("Basic {credentials}"))?,
                 );
                 headers
             });
         }
-        let client = builder.build().expect("failed to build HTTP client");
-        WebDavFs { base_url, client }
+        let client = builder.build()?;
+        Ok(WebDavFs { base_url, client })
     }
 
     fn url_for<P: AsRef<Path>>(&self, path: P) -> String {
@@ -91,10 +98,10 @@ impl WebDavFs {
         Ok(resp.text()?)
     }
 
-    fn put_empty_checked(&self, url: &str) -> Result<(), Box<dyn Error>> {
+    fn put_empty_checked(&self, url: &str) -> Result<Option<String>, Box<dyn Error>> {
         let resp = self.client.put(url).body(Vec::new()).send()?;
         if resp.status().is_success() {
-            return Ok(());
+            return Ok(etag_from_headers(resp.headers()));
         }
 
         let status = resp.status();
@@ -104,6 +111,98 @@ impl WebDavFs {
 
     fn parse_multistatus(xml: &str) -> Vec<PropfindEntry> {
         parse_multistatus_xml(xml)
+    }
+}
+
+fn etag_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+fn head_etag(client: &Client, url: &str) -> Option<String> {
+    client
+        .head(url)
+        .send()
+        .ok()
+        .filter(|resp| resp.status().is_success())
+        .and_then(|resp| etag_from_headers(resp.headers()))
+}
+
+fn webdav_conflict_error(url: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        format!("WebDAV write conflict for {url}"),
+    )
+}
+
+struct TempUploadFile {
+    path: PathBuf,
+    file: fs::File,
+}
+
+impl TempUploadFile {
+    fn new() -> std::io::Result<Self> {
+        for _ in 0..16 {
+            let path = std::env::temp_dir()
+                .join(format!("cryptomator-webdav-{}.tmp", uuid::Uuid::new_v4()));
+            match fs::OpenOptions::new()
+                .create_new(true)
+                .read(true)
+                .write(true)
+                .open(&path)
+            {
+                Ok(file) => return Ok(Self { path, file }),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err),
+            }
+        }
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "failed to allocate a unique WebDAV temporary file",
+        ))
+    }
+
+    fn set_len(&mut self, len: u64) -> std::io::Result<()> {
+        self.file.set_len(len)
+    }
+}
+
+impl Read for TempUploadFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+impl Write for TempUploadFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl Seek for TempUploadFile {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(pos)
+    }
+}
+
+impl Drop for TempUploadFile {
+    fn drop(&mut self) {
+        if let Err(err) = fs::remove_file(&self.path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %err,
+                    "failed to remove WebDAV temporary file"
+                );
+            }
+        }
     }
 }
 
@@ -286,6 +385,7 @@ pub(crate) struct WebDavFile {
     content_length: u64,
     pending_writes: BTreeMap<u64, Vec<u8>>,
     meta: Metadata,
+    etag: Option<String>,
 }
 
 impl WebDavFile {
@@ -305,6 +405,106 @@ impl WebDavFile {
     /// Returns `true` if there are any unflushed writes.
     fn is_dirty(&self) -> bool {
         !self.pending_writes.is_empty()
+    }
+
+    fn pending_write_bytes(&self) -> usize {
+        self.pending_writes.values().map(Vec::len).sum()
+    }
+
+    fn new_spooled_file() -> std::io::Result<TempUploadFile> {
+        TempUploadFile::new()
+    }
+
+    fn download_existing_to_spool(&self) -> std::io::Result<TempUploadFile> {
+        let mut spool = Self::new_spooled_file()?;
+        if self.content_length == 0 {
+            return Ok(spool);
+        }
+
+        let mut resp = self
+            .client
+            .get(&self.url)
+            .send()
+            .map_err(std::io::Error::other)?;
+        if !resp.status().is_success() {
+            return Err(std::io::Error::other(format!(
+                "GET for flush failed with status {}",
+                resp.status()
+            )));
+        }
+
+        std::io::copy(&mut resp, &mut spool)?;
+        spool.rewind()?;
+        Ok(spool)
+    }
+
+    fn download_prefix_to_spool(&self, len: u64) -> std::io::Result<TempUploadFile> {
+        let mut spool = Self::new_spooled_file()?;
+        if len == 0 {
+            return Ok(spool);
+        }
+
+        let resp = self
+            .client
+            .get(&self.url)
+            .header("Range", format!("bytes=0-{}", len - 1))
+            .send()
+            .map_err(std::io::Error::other)?;
+        let status = resp.status().as_u16();
+        if status != 206 && status != 200 {
+            return Err(std::io::Error::other(format!(
+                "GET for truncate failed with status {}",
+                resp.status()
+            )));
+        }
+
+        let copied = std::io::copy(&mut resp.take(len), &mut spool)?;
+        if copied < len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("WebDAV server returned {copied} bytes while truncating to {len}"),
+            ));
+        }
+
+        spool.rewind()?;
+        Ok(spool)
+    }
+
+    fn upload_spool(&mut self, mut spool: TempUploadFile, new_len: u64) -> std::io::Result<()> {
+        spool.rewind()?;
+        let body = reqwest::blocking::Body::sized(spool, new_len);
+        let mut request = self.client.put(&self.url).body(body);
+        if let Some(etag) = &self.etag {
+            request = request.header(IF_MATCH, etag);
+        } else {
+            tracing::warn!(
+                url = %self.url,
+                "WebDAV server did not provide an ETag; flush is best-effort"
+            );
+        }
+
+        let resp = request.send().map_err(std::io::Error::other)?;
+        if resp.status().as_u16() == 412 {
+            return Err(webdav_conflict_error(&self.url));
+        }
+        if !resp.status().is_success() {
+            return Err(std::io::Error::other(format!(
+                "PUT failed with status {}",
+                resp.status()
+            )));
+        }
+
+        self.etag =
+            etag_from_headers(resp.headers()).or_else(|| head_etag(&self.client, &self.url));
+        if self.etag.is_none() {
+            tracing::warn!(
+                url = %self.url,
+                "WebDAV server did not provide a post-PUT ETag; subsequent flushes are best-effort"
+            );
+        }
+        self.content_length = new_len;
+        self.meta.len = new_len;
+        Ok(())
     }
 }
 
@@ -341,19 +541,37 @@ impl Read for WebDavFile {
                 .map_err(std::io::Error::other)?;
 
             let status = resp.status().as_u16();
-            if status == 206 || status == 200 {
+            if status == 206 {
                 let bytes = resp.bytes().map_err(std::io::Error::other)?;
                 let n = bytes.len().min(read_len);
                 buf[..n].copy_from_slice(&bytes[..n]);
-                // Zero-fill any portion beyond server content but within
-                // our read range (pending writes will overlay below).
+                if read_len > n {
+                    buf[n..read_len].fill(0);
+                }
+            } else if status == 200 {
+                let bytes = resp.bytes().map_err(std::io::Error::other)?;
+                let source_start = usize::try_from(start).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "read offset exceeds platform address space",
+                    )
+                })?;
+                if source_start > bytes.len() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "server ignored Range and returned a body shorter than the requested offset",
+                    ));
+                }
+                let n = (bytes.len() - source_start).min(read_len);
+                buf[..n].copy_from_slice(&bytes[source_start..source_start + n]);
                 if read_len > n {
                     buf[n..read_len].fill(0);
                 }
             } else {
-                // Server returned an error; fill with zeros and let
-                // pending writes overlay below.
-                buf[..read_len].fill(0);
+                return Err(std::io::Error::other(format!(
+                    "GET range failed with status {}",
+                    resp.status()
+                )));
             }
         } else {
             // Entirely beyond server content; fill with zeros first.
@@ -426,6 +644,9 @@ impl Write for WebDavFile {
 
         self.pending_writes.insert(new_start, buf.to_vec());
         self.current_pos += buf.len() as u64;
+        if self.pending_write_bytes() > PENDING_WRITE_FLUSH_THRESHOLD {
+            self.flush()?;
+        }
         Ok(buf.len())
     }
 
@@ -434,55 +655,17 @@ impl Write for WebDavFile {
             return Ok(());
         }
 
-        // Download current server content (if any).
-        let mut data = if self.content_length > 0 {
-            match self.client.get(&self.url).send() {
-                Ok(resp) if resp.status().is_success() => {
-                    resp.bytes().map_err(std::io::Error::other)?.to_vec()
-                }
-                Ok(resp) => {
-                    return Err(std::io::Error::other(format!(
-                        "GET for flush failed with status {}",
-                        resp.status()
-                    )));
-                }
-                Err(e) => return Err(std::io::Error::other(e)),
-            }
-        } else {
-            Vec::new()
-        };
+        let new_len = self.effective_length();
+        let mut spool = self.download_existing_to_spool()?;
+        spool.set_len(new_len)?;
 
         // Apply all pending writes.
         for (&offset, write_data) in &self.pending_writes {
-            let offset_usize = usize::try_from(offset).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "write offset exceeds platform address space",
-                )
-            })?;
-            let end = offset_usize + write_data.len();
-            if end > data.len() {
-                data.resize(end, 0);
-            }
-            data[offset_usize..end].copy_from_slice(write_data);
+            spool.seek(SeekFrom::Start(offset))?;
+            spool.write_all(write_data)?;
         }
 
-        // Upload the modified content.
-        let new_len = data.len() as u64;
-        let resp = self
-            .client
-            .put(&self.url)
-            .body(data)
-            .send()
-            .map_err(std::io::Error::other)?;
-        if !resp.status().is_success() {
-            return Err(std::io::Error::other(format!(
-                "PUT failed with status {}",
-                resp.status()
-            )));
-        }
-
-        self.content_length = new_len;
+        self.upload_spool(spool, new_len)?;
         self.pending_writes.clear();
         Ok(())
     }
@@ -523,6 +706,25 @@ impl File for WebDavFile {
         let mut meta = self.meta;
         meta.len = self.effective_length();
         Ok(meta)
+    }
+
+    fn fsync(&mut self) -> std::io::Result<()> {
+        self.flush()
+    }
+
+    fn set_len(&mut self, len: u64) -> std::io::Result<()> {
+        self.flush()?;
+        if len == self.content_length {
+            return Ok(());
+        }
+
+        let mut spool = if len < self.content_length {
+            self.download_prefix_to_spool(len)?
+        } else {
+            self.download_existing_to_spool()?
+        };
+        spool.set_len(len)?;
+        self.upload_spool(spool, len)
     }
 }
 
@@ -637,7 +839,9 @@ impl FileSystem for WebDavFs {
             if self.exists(&path) {
                 return Err("file already exists".into());
             }
-            self.put_empty_checked(&url)?;
+            let etag = self
+                .put_empty_checked(&url)?
+                .or_else(|| head_etag(&self.client, &url));
             return Ok(Box::new(WebDavFile {
                 url,
                 client: self.client.clone(),
@@ -645,6 +849,7 @@ impl FileSystem for WebDavFs {
                 content_length: 0,
                 pending_writes: BTreeMap::new(),
                 meta: empty_meta,
+                etag,
             }));
         }
 
@@ -652,6 +857,7 @@ impl FileSystem for WebDavFs {
         // downloading the file body.
         let resp = self.client.head(&url).send()?;
         let file_exists = resp.status().is_success();
+        let mut etag = etag_from_headers(resp.headers());
 
         if !file_exists && !options.create {
             return Err("file not found".into());
@@ -685,7 +891,7 @@ impl FileSystem for WebDavFs {
             (content_length, meta)
         } else {
             if !file_exists {
-                self.put_empty_checked(&url)?;
+                etag = self.put_empty_checked(&url)?;
             }
             (0, empty_meta)
         };
@@ -695,11 +901,14 @@ impl FileSystem for WebDavFs {
         // When truncating an existing file, upload an empty body immediately
         // so the server-side content is cleared.
         let content_length = if options.truncate && file_exists {
-            self.put_empty_checked(&url)?;
+            etag = self.put_empty_checked(&url)?;
             0
         } else {
             content_length
         };
+        if (options.truncate || !file_exists) && etag.is_none() {
+            etag = head_etag(&self.client, &url);
+        }
 
         Ok(Box::new(WebDavFile {
             url,
@@ -708,12 +917,15 @@ impl FileSystem for WebDavFs {
             content_length,
             pending_writes: BTreeMap::new(),
             meta,
+            etag,
         }))
     }
 
     fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Box<dyn File>, Box<dyn Error>> {
         let url = self.url_for(&path);
-        self.put_empty_checked(&url)?;
+        let etag = self
+            .put_empty_checked(&url)?
+            .or_else(|| head_etag(&self.client, &url));
 
         let now = SystemTime::now();
         let meta = Metadata {
@@ -736,6 +948,7 @@ impl FileSystem for WebDavFs {
             content_length: 0,
             pending_writes: BTreeMap::new(),
             meta,
+            etag,
         }))
     }
 
@@ -903,7 +1116,8 @@ mod tests {
 
     #[test]
     fn test_url_construction() {
-        let fs = WebDavFs::new("http://localhost:8080/dav", None, None);
+        let fs = WebDavFs::new("http://localhost:8080/dav", None, None)
+            .expect("failed to create WebDAV provider");
         assert_eq!(
             fs.url_for("/foo/bar.txt"),
             "http://localhost:8080/dav/foo/bar.txt"
@@ -917,7 +1131,8 @@ mod tests {
 
     #[test]
     fn test_url_construction_trailing_slash() {
-        let fs = WebDavFs::new("http://localhost:8080/dav/", None, None);
+        let fs = WebDavFs::new("http://localhost:8080/dav/", None, None)
+            .expect("failed to create WebDAV provider");
         assert_eq!(
             fs.url_for("/foo/bar.txt"),
             "http://localhost:8080/dav/foo/bar.txt"
@@ -926,7 +1141,8 @@ mod tests {
 
     #[test]
     fn test_url_construction_encodes_segments() {
-        let fs = WebDavFs::new("http://localhost:8080/dav", None, None);
+        let fs = WebDavFs::new("http://localhost:8080/dav", None, None)
+            .expect("failed to create WebDAV provider");
         assert_eq!(
             fs.url_for("/foo bar/baz qux.txt"),
             "http://localhost:8080/dav/foo%20bar/baz%20qux.txt"

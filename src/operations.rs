@@ -14,6 +14,14 @@ use zeroize::Zeroizing;
 
 pub const DEFAULT_STORAGE_SUB_FOLDER: &str = "d";
 
+fn temp_sibling(path: &Path, id: uuid::Uuid) -> std::path::PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("cryptomator");
+    path.with_file_name(format!("{file_name}.tmp-{id}"))
+}
+
 pub fn create_vault<FS, P>(
     fs: FS,
     vault_path: P,
@@ -33,11 +41,12 @@ where
 
     info!("Saving master key to a file...");
     let masterkey_path = parent_path(&vault_path).join(DEFAULT_MASTER_KEY_FILE);
-    let mk_file = fs
+    let mut mk_file = fs
         .clone()
         .create_file(masterkey_path)
         .map_err(|e| anyhow!("failed to create masterkey file: {e}"))?;
-    serde_json::to_writer(mk_file, &mk_json).context("failed to write master key file")?;
+    serde_json::to_writer(&mut mk_file, &mk_json).context("failed to write master key file")?;
+    mk_file.fsync().context("failed to fsync masterkey file")?;
     info!("Master key saved!");
 
     let masterkey =
@@ -62,6 +71,7 @@ where
     vault_file
         .write_all(vault.as_bytes())
         .context("failed to write data to vault file")?;
+    vault_file.fsync().context("failed to fsync vault file")?;
 
     fs.create_dir(&full_storage_path)
         .map_err(|e| anyhow!("failed to create storage directory: {e}"))?;
@@ -102,11 +112,6 @@ where
     let primary_master_key_enc = mk_json.primaryMasterKey.clone();
     let hmac_master_key_enc = mk_json.hmacMasterKey.clone();
 
-    info!("Removing old masterkey file...");
-    fs.clone()
-        .remove_file(&masterkey_path)
-        .map_err(|e| anyhow!("failed to delete old masterkey file: {e}"))?;
-
     // Consume mk_json — no clone.  The base64-encoded wrapped keys inside it
     // are moved into from_masterkey_json and dropped at the end of that call.
     let masterkey = MasterKey::from_masterkey_json(mk_json, password)
@@ -145,20 +150,44 @@ where
         versionMac: STANDARD.encode(version_mac_bytes),
     };
 
-    info!("Rewriting masterkey file...");
-    let mk_file = fs
-        .clone()
-        .create_file(&masterkey_path)
-        .map_err(|e| anyhow!("failed to create masterkey file: {e}"))?;
-    serde_json::to_writer(mk_file, &updated_mk_json).context("failed to write masterkey file")?;
+    let migration_id = uuid::Uuid::new_v4();
+    let tmp_masterkey_path = temp_sibling(&masterkey_path, migration_id);
+    let vault_target_path = vault_path.as_ref().to_path_buf();
+    let tmp_vault_path = temp_sibling(&vault_target_path, migration_id);
 
-    info!("Writing updated vault file...");
+    info!("Writing temporary masterkey file...");
+    let mut mk_file = fs
+        .clone()
+        .create_file(&tmp_masterkey_path)
+        .map_err(|e| anyhow!("failed to create temporary masterkey file: {e}"))?;
+    serde_json::to_writer(&mut mk_file, &updated_mk_json)
+        .context("failed to write temporary masterkey file")?;
+    mk_file
+        .fsync()
+        .context("failed to fsync temporary masterkey file")?;
+    drop(mk_file);
+
+    info!("Writing temporary vault file...");
     let mut vault_file = fs
-        .create_file(&vault_path)
-        .map_err(|e| anyhow!("failed to create vault file: {e}"))?;
+        .clone()
+        .create_file(&tmp_vault_path)
+        .map_err(|e| anyhow!("failed to create temporary vault file: {e}"))?;
     vault_file
         .write_all(vault.as_bytes())
-        .context("failed to write vault file")?;
+        .context("failed to write temporary vault file")?;
+    vault_file
+        .fsync()
+        .context("failed to fsync temporary vault file")?;
+    drop(vault_file);
+
+    info!("Replacing vault file...");
+    fs.clone()
+        .move_file(&tmp_vault_path, &vault_target_path)
+        .map_err(|e| anyhow!("failed to replace vault file: {e}"))?;
+
+    info!("Replacing masterkey file...");
+    fs.move_file(&tmp_masterkey_path, &masterkey_path)
+        .map_err(|e| anyhow!("failed to replace masterkey file: {e}"))?;
     info!("Vault migrated!");
 
     Ok(())

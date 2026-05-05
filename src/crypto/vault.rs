@@ -49,7 +49,6 @@ impl Default for Claims {
 /// derived impl would transitively call `MasterKey`'s field debug formatters,
 /// which — even with `Zeroizing` wrappers — would print raw key bytes via the
 /// `[u8; 32]` `Debug` impl.
-#[derive(Clone)]
 pub struct Vault {
     pub master_key: MasterKey,
     pub claims: Claims,
@@ -104,21 +103,20 @@ impl Vault {
 
         let unverified_token: Token<Header, Claims, _> = jwt::Token::parse_unverified(&jwt_string)?;
 
-        let master_key = if let Some(kid) = &unverified_token.header().key_id {
-            let masterkey_file_path = if kid == DEFAULT_KID {
-                let dir_path = parent_path(vault_path);
-                dir_path.join(DEFAULT_MASTER_KEY_FILE)
-            } else {
-                std::path::PathBuf::from(kid)
-            };
+        let kid = unverified_token
+            .header()
+            .key_id
+            .as_deref()
+            .ok_or(MasterKeyError::JWTError(jwt::Error::NoKeyId))?;
+        if kid != DEFAULT_KID {
+            return Err(MasterKeyError::UnexpectedKeyId(kid.to_owned()));
+        }
 
-            let mut masterkey_file = filesystem
-                .open_file(masterkey_file_path, OpenOptions::new())
-                .map_err(|e| MasterKeyError::IoError(std::io::Error::other(e.to_string())))?;
-            MasterKey::from_reader(&mut masterkey_file, password.as_ref())?
-        } else {
-            return Err(MasterKeyError::JWTError(jwt::Error::NoKeyId));
-        };
+        let masterkey_file_path = parent_path(vault_path).join(DEFAULT_MASTER_KEY_FILE);
+        let mut masterkey_file = filesystem
+            .open_file(masterkey_file_path, OpenOptions::new())
+            .map_err(|e| MasterKeyError::IoError(std::io::Error::other(e.to_string())))?;
+        let master_key = MasterKey::from_reader(&mut masterkey_file, password.as_ref())?;
 
         // Assemble the combined 64-byte key in a Zeroizing buffer so it is
         // wiped from the heap when this scope exits.
@@ -134,5 +132,55 @@ impl Vault {
             master_key,
             claims: *verified_token.claims(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cryptofs::FileSystem;
+    use crate::providers::MemoryFs;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use std::io::Write;
+
+    fn token_with_kid(kid: &str) -> String {
+        let header = serde_json::json!({
+            "alg": "HS256",
+            "kid": kid,
+            "typ": "JWT"
+        });
+        let claims = serde_json::json!({
+            "jti": uuid::Uuid::new_v4(),
+            "format": DEFAULT_FORMAT,
+            "cipherCombo": "SIV_CTRMAC",
+            "shorteningThreshold": DEFAULT_SHORTENING_THRESHOLD
+        });
+        format!(
+            "{}.{}.signature",
+            URL_SAFE_NO_PAD.encode(header.to_string()),
+            URL_SAFE_NO_PAD.encode(claims.to_string())
+        )
+    }
+
+    fn assert_unexpected_kid(kid: &str) {
+        let fs = MemoryFs::new();
+        let mut vault_file = fs.create_file("/vault.cryptomator").unwrap();
+        vault_file
+            .write_all(token_with_kid(kid).as_bytes())
+            .unwrap();
+        drop(vault_file);
+
+        let err = Vault::open(&fs, "/vault.cryptomator", "password").unwrap_err();
+        assert!(matches!(err, MasterKeyError::UnexpectedKeyId(found) if found == kid));
+    }
+
+    #[test]
+    fn reject_absolute_jwt_kid() {
+        assert_unexpected_kid("/tmp/attacker-masterkey.cryptomator");
+    }
+
+    #[test]
+    fn reject_parent_relative_jwt_kid() {
+        assert_unexpected_kid("../../attacker-masterkey.cryptomator");
     }
 }

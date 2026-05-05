@@ -83,7 +83,7 @@ where
 fn make_crypto_fs(base_url: &str) -> CryptoFs<WebDavFs> {
     let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
     let cryptor = Cryptor::new(vault);
-    let webdav_fs = WebDavFs::new(base_url, None, None);
+    let webdav_fs = WebDavFs::new(base_url, None, None).expect("failed to create WebDAV provider");
     CryptoFs::new(
         VFS_STORAGE_PATH,
         cryptor,
@@ -97,7 +97,7 @@ fn make_crypto_fs(base_url: &str) -> CryptoFs<WebDavFs> {
 fn make_crypto_fs_with_config(base_url: &str, config: CryptoFsConfig) -> CryptoFs<WebDavFs> {
     let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
     let cryptor = Cryptor::new(vault);
-    let webdav_fs = WebDavFs::new(base_url, None, None);
+    let webdav_fs = WebDavFs::new(base_url, None, None).expect("failed to create WebDAV provider");
     CryptoFs::new(VFS_STORAGE_PATH, cryptor, webdav_fs, config).unwrap()
 }
 

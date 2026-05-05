@@ -987,6 +987,16 @@ async fn test_nfs_remove_directory_invalidates_descendant_handles() {
         .unwrap();
     nfs.write(child_handle, 0, b"old data").await.unwrap();
 
+    let non_empty_remove = nfs.remove(root, &dirname).await;
+    assert!(
+        matches!(non_empty_remove, Err(nfsstat3::NFS3ERR_NOTEMPTY)),
+        "non-empty directory removal should be rejected, got {non_empty_remove:?}"
+    );
+
+    let (still_there, _) = nfs.read(child_handle, 0, 100).await.unwrap();
+    assert_eq!(still_there, b"old data");
+
+    nfs.remove(dir_handle, &child).await.unwrap();
     nfs.remove(root, &dirname).await.unwrap();
 
     let (recreated_dir_handle, _) = nfs.mkdir(root, &dirname).await.unwrap();
@@ -1004,6 +1014,22 @@ async fn test_nfs_remove_directory_invalidates_descendant_handles() {
         matches!(stale, Err(nfsstat3::NFS3ERR_STALE)),
         "removed child handle should be stale after directory recreation, got {stale:?}"
     );
+}
+
+#[tokio::test]
+async fn test_nfs_huge_read_is_capped() {
+    let nfs = setup_nfs_server();
+    let root = nfs.root_dir();
+
+    let name: nfsstring = b"huge_read_cap.dat".to_vec().into();
+    let (handle, _) = nfs.create(root, &name, sattr3::default()).await.unwrap();
+    let data = vec![0xAB; 2 * 1024 * 1024];
+    nfs.write(handle, 0, &data).await.unwrap();
+
+    let (read_data, eof) = nfs.read(handle, 0, u32::MAX).await.unwrap();
+    assert_eq!(read_data.len(), 1024 * 1024);
+    assert!(!eof);
+    assert!(read_data.iter().all(|&b| b == 0xAB));
 }
 
 #[tokio::test]

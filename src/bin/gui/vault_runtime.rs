@@ -234,16 +234,19 @@ impl VaultRuntime {
                 FsProviderConfig::WebDav { url, username } => {
                     let user = username.as_deref();
                     let pass = webdav_provider_password.as_deref().map(|z| z.as_str());
-                    do_mount(
-                        WebDavFs::new(url, user, pass),
-                        &vault_path,
-                        &full_storage_path,
-                        password.as_str(),
-                        mount_folder.as_deref(),
-                        &volume_type,
-                        &tx,
-                        shutdown_rx,
-                    )
+                    match WebDavFs::new(url, user, pass) {
+                        Ok(fs) => do_mount(
+                            fs,
+                            &vault_path,
+                            &full_storage_path,
+                            password.as_str(),
+                            mount_folder.as_deref(),
+                            &volume_type,
+                            &tx,
+                            shutdown_rx,
+                        ),
+                        Err(e) => Err(anyhow::anyhow!(e.to_string())),
+                    }
                 }
             };
 
@@ -576,7 +579,12 @@ fn do_nfs_mount<FS: FileSystem + 'static>(
         tokio::select! {
             result = nfs_handle => {
                 match result {
-                    Ok(()) => {}
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        let _ = tx_clone.send(LogMsg::Error(format!(
+                            "NFS server failed: {e}"
+                        )));
+                    }
                     Err(e) => {
                         let _ = tx_clone.send(LogMsg::Error(format!(
                             "NFS server task failed: {e}"
@@ -639,10 +647,13 @@ fn do_webdav_mount<FS: FileSystem + 'static>(
 
             if webdav_handle.is_finished() {
                 match webdav_handle.await {
-                    Ok(()) => {
+                    Ok(Ok(())) => {
                         return Err(anyhow::anyhow!(
                             "WebDAV server exited before accepting connections"
                         ));
+                    }
+                    Ok(Err(e)) => {
+                        return Err(anyhow::anyhow!("WebDAV server failed: {e}"));
                     }
                     Err(e) => {
                         return Err(anyhow::anyhow!("WebDAV server task failed: {e}"));
@@ -666,7 +677,8 @@ fn do_webdav_mount<FS: FileSystem + 'static>(
         tokio::select! {
             result = &mut webdav_handle => {
                 match result {
-                    Ok(()) => Err(anyhow::anyhow!("WebDAV server stopped unexpectedly")),
+                    Ok(Ok(())) => Err(anyhow::anyhow!("WebDAV server stopped unexpectedly")),
+                    Ok(Err(e)) => Err(anyhow::anyhow!("WebDAV server failed: {e}")),
                     Err(e) => Err(anyhow::anyhow!("WebDAV server task failed: {e}")),
                 }
             }

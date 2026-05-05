@@ -41,6 +41,15 @@ pub enum FileSystemError {
 
     #[error("Invalid configuration")]
     InvalidConfig(String),
+
+    #[error("Symlink rejected")]
+    SymlinkRejected(String),
+
+    #[error("WebDAV write conflict")]
+    WebDavConflict(String),
+
+    #[error("Unsupported truncate operation")]
+    UnsupportedTruncate,
 }
 
 impl From<std::io::Error> for FileSystemError {
@@ -129,6 +138,15 @@ impl From<FileSystemError> for std::io::Error {
             FileSystemError::TooManyOpenFiles => std::io::Error::from_raw_os_error(libc::EMFILE),
             FileSystemError::InvalidConfig(msg) => {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, msg)
+            }
+            FileSystemError::SymlinkRejected(path) => {
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, path)
+            }
+            FileSystemError::WebDavConflict(msg) => {
+                std::io::Error::new(std::io::ErrorKind::WouldBlock, msg)
+            }
+            FileSystemError::UnsupportedTruncate => {
+                std::io::Error::new(std::io::ErrorKind::Unsupported, "truncate is unsupported")
             }
             _ => std::io::Error::other(err.to_string()),
         }

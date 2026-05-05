@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tracing::{debug, error, info, instrument, warn};
 
+const MAX_WEBDAV_READ_BYTES: usize = 1024 * 1024;
+
 fn map_io_error(e: &std::io::Error) -> FsError {
     match e.kind() {
         ErrorKind::NotFound => FsError::NotFound,
@@ -107,7 +109,7 @@ impl Drop for DFile {
     fn drop(&mut self) {
         // Try to flush any pending data on drop to prevent data loss.
         // Errors during drop are logged but cannot be propagated.
-        if let Ok(guard) = self.crypto_fs_file.lock() {
+        if let Ok(mut guard) = self.crypto_fs_file.lock() {
             if let Err(e) = guard.fsync() {
                 error!("WebDAV DFile drop fsync error: {:?}", e);
             }
@@ -192,8 +194,9 @@ impl DavFile for DFile {
         let crypto_fs_file = self.crypto_fs_file.clone();
         async move {
             tokio::task::spawn_blocking(move || {
-                debug!("WebDAV read_bytes: {} bytes", count);
-                let mut buf = vec![0u8; count];
+                let read_count = count.min(MAX_WEBDAV_READ_BYTES);
+                debug!("WebDAV read_bytes: {} bytes", read_count);
+                let mut buf = vec![0u8; read_count];
                 let mut guard = crypto_fs_file.lock().map_err(|_| FsError::GeneralFailure)?;
                 let n = guard.read(buf.as_mut_slice()).map_err(|e| {
                     error!("WebDAV read_bytes error: {:?}", e);
@@ -238,7 +241,7 @@ impl DavFile for DFile {
         async move {
             tokio::task::spawn_blocking(move || {
                 debug!("WebDAV flush");
-                let guard = crypto_fs_file.lock().map_err(|_| FsError::GeneralFailure)?;
+                let mut guard = crypto_fs_file.lock().map_err(|_| FsError::GeneralFailure)?;
                 guard.fsync().map_err(|e| {
                     error!("WebDAV flush error: {:?}", e);
                     FsError::GeneralFailure

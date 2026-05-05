@@ -20,8 +20,19 @@ pub trait File: Seek + Read + Write + Sync + Send + Debug {
     /// The default implementation is a no-op, which is appropriate for
     /// in-memory filesystems. Real filesystem providers should override
     /// this to call `fsync` or equivalent.
-    fn fsync(&self) -> std::io::Result<()> {
-        Ok(())
+    fn fsync(&mut self) -> std::io::Result<()> {
+        self.flush()
+    }
+
+    /// Resize the file to the provided byte length.
+    ///
+    /// Providers that cannot support truncation safely should leave this
+    /// default in place and surface `Unsupported`.
+    fn set_len(&mut self, _len: u64) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "truncate is unsupported",
+        ))
     }
 }
 

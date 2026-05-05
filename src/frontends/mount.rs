@@ -1,6 +1,7 @@
 use crate::cryptofs::{CryptoFs, FileSystem};
 use crate::frontends::auth::WebDavAuth;
 use crate::frontends::webdav::WebDav;
+use anyhow::Context;
 use dav_server::DavHandler;
 use dav_server::fakels::FakeLs;
 use hyper::body::Incoming;
@@ -39,18 +40,20 @@ pub async fn mount_webdav<FS: 'static + FileSystem>(
     listen_address: String,
     crypto_fs: CryptoFs<FS>,
     auth: Option<WebDavAuth>,
-) {
+) -> anyhow::Result<()> {
     let webdav = WebDav::new(crypto_fs);
 
     let addr: SocketAddr = listen_address
         .parse()
-        .expect("Unable to parse webdav listen address");
+        .context("unable to parse WebDAV listen address")?;
     let dav_server = DavHandler::builder()
         .filesystem(Box::new(webdav))
         .locksystem(FakeLs::new())
         .build_handler();
 
-    let listener = TcpListener::bind(addr).await.expect("Failed to bind");
+    let listener = TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind WebDAV server on {addr}"))?;
     info!("WebDav server started on {:?}", addr);
 
     let conn_semaphore = Arc::new(Semaphore::new(MAX_WEBDAV_CONNECTIONS));
@@ -103,21 +106,24 @@ pub async fn mount_webdav<FS: 'static + FileSystem>(
                         if !authenticated {
                             warn!("Unauthorized WebDAV access attempt detected");
 
-                            let resp = Response::builder()
+                            let resp = match Response::builder()
                                 .status(StatusCode::UNAUTHORIZED)
                                 .header(header::WWW_AUTHENTICATE, "Basic realm=\"Cryptomator\"")
                                 .body(dav_server::body::Body::from("Unauthorized"))
-                                .unwrap_or_else(|e| {
+                            {
+                                Ok(resp) => resp,
+                                Err(e) => {
                                     error!(
                                         "Failed to build 401 response with WWW-Authenticate \
                                          header, falling back to header-less 401: {:?}",
                                         e
                                     );
-                                    Response::builder()
-                                        .status(StatusCode::UNAUTHORIZED)
-                                        .body(dav_server::body::Body::from("Unauthorized"))
-                                        .expect("hardcoded header-less 401 must always pass")
-                                });
+                                    let mut resp =
+                                        Response::new(dav_server::body::Body::from("Unauthorized"));
+                                    *resp.status_mut() = StatusCode::UNAUTHORIZED;
+                                    resp
+                                }
+                            };
 
                             return Ok::<_, std::convert::Infallible>(resp);
                         }
@@ -153,7 +159,10 @@ pub async fn mount_webdav<FS: 'static + FileSystem>(
 /// Instead, `NfsServer` carries an operation-level semaphore
 /// (`MAX_NFS_CONNECTIONS`) that bounds the number of concurrent NFS
 /// operations to prevent file-descriptor exhaustion.
-pub async fn mount_nfs<FS: 'static + FileSystem>(listen_address: String, crypto_fs: CryptoFs<FS>) {
+pub async fn mount_nfs<FS: 'static + FileSystem>(
+    listen_address: String,
+    crypto_fs: CryptoFs<FS>,
+) -> anyhow::Result<()> {
     let nfs_server = NfsServer::new(crypto_fs);
 
     info!(
@@ -164,11 +173,12 @@ pub async fn mount_nfs<FS: 'static + FileSystem>(listen_address: String, crypto_
 
     let listener = nfsserve::tcp::NFSTcpListener::bind(&listen_address, nfs_server)
         .await
-        .expect("Failed to bind NFS server");
+        .with_context(|| format!("failed to bind NFS server on {listen_address}"))?;
 
     use nfsserve::tcp::NFSTcp;
     listener
         .handle_forever()
         .await
-        .expect("Failed to start NFS server");
+        .context("failed to start NFS server")?;
+    Ok(())
 }

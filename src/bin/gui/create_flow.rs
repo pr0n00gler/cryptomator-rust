@@ -191,14 +191,17 @@ impl CreateVaultModal {
                     } else {
                         Some(webdav_pass.as_str())
                     };
-                    create_vault(
-                        WebDavFs::new(&webdav_url, user, pass),
-                        &vault_path,
-                        &full_storage_path,
-                        password.as_str(),
-                        DEFAULT_SCRYPT_COST,
-                        DEFAULT_SCRYPT_BLOCK_SIZE,
-                    )
+                    match WebDavFs::new(&webdav_url, user, pass) {
+                        Ok(fs) => create_vault(
+                            fs,
+                            &vault_path,
+                            &full_storage_path,
+                            password.as_str(),
+                            DEFAULT_SCRYPT_COST,
+                            DEFAULT_SCRYPT_BLOCK_SIZE,
+                        ),
+                        Err(e) => Err(anyhow::anyhow!(e.to_string())),
+                    }
                 }
             };
 

@@ -244,6 +244,32 @@ fn normalize_local_vault_file_path(file_path: &Path) -> std::path::PathBuf {
     }
 }
 
+fn vault_entry_from_path(file_path: &Path) -> VaultEntry {
+    let file_path = normalize_local_vault_file_path(file_path);
+    let parent = file_path.parent().unwrap_or(file_path.as_path());
+    let vault_root = path_to_string(parent);
+
+    let name = parent
+        .file_name()
+        .map(|n| {
+            n.to_str()
+                .map_or_else(|| n.to_string_lossy().into_owned(), str::to_owned)
+        })
+        .unwrap_or_else(|| "Vault".to_string());
+
+    VaultEntry {
+        id: Uuid::new_v4(),
+        name,
+        storage_path: vault_root.clone(),
+        vault_file_path: path_to_string(&file_path),
+        provider: FsProviderConfig::Local {
+            base_path: vault_root,
+        },
+        mounting: MountingConfig::default(),
+        idle_lock: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,31 +378,5 @@ mod tests {
         let normalized =
             normalize_local_vault_file_path(Path::new("/tmp/MyVault/vault.cryptomator"));
         assert_eq!(normalized, Path::new("/tmp/MyVault/vault.cryptomator"));
-    }
-}
-
-fn vault_entry_from_path(file_path: &Path) -> VaultEntry {
-    let file_path = normalize_local_vault_file_path(file_path);
-    let parent = file_path.parent().unwrap_or(file_path.as_path());
-    let vault_root = path_to_string(parent);
-
-    let name = parent
-        .file_name()
-        .map(|n| {
-            n.to_str()
-                .map_or_else(|| n.to_string_lossy().into_owned(), str::to_owned)
-        })
-        .unwrap_or_else(|| "Vault".to_string());
-
-    VaultEntry {
-        id: Uuid::new_v4(),
-        name,
-        storage_path: vault_root.clone(),
-        vault_file_path: path_to_string(&file_path),
-        provider: FsProviderConfig::Local {
-            base_path: vault_root,
-        },
-        mounting: MountingConfig::default(),
-        idle_lock: None,
     }
 }

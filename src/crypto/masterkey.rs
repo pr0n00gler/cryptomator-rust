@@ -49,7 +49,7 @@ impl MasterKeyJson {
 
         let mut kek = Zeroizing::new([0u8; 32]);
         let scrypt_params = Params::new(
-            (scrypt_cost_param as f64).log2() as u8,
+            scrypt_log_n(scrypt_cost_param)?,
             scrypt_block_size,
             P,
             kek.len(),
@@ -97,6 +97,13 @@ impl MasterKeyJson {
     }
 }
 
+fn scrypt_log_n(cost: u64) -> Result<u8, MasterKeyError> {
+    if cost == 0 || !cost.is_power_of_two() {
+        return Err(MasterKeyError::InvalidScryptCost(cost));
+    }
+    u8::try_from(cost.ilog2()).map_err(|_| MasterKeyError::InvalidScryptCost(cost))
+}
+
 /// Struct for MasterKey
 /// More info: https://docs.cryptomator.org/en/latest/security/architecture/#masterkey-derivation
 ///
@@ -111,7 +118,7 @@ impl MasterKeyJson {
 /// `tracing` or `log` crates format a containing struct in debug mode.
 /// `Zeroizing<[u8; 32]>` delegates its `Debug` impl to the inner array,
 /// which would print all 32 raw bytes — a direct key exfiltration path.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct MasterKey {
     pub primary_master_key: Zeroizing<[u8; 32]>,
     pub hmac_master_key: Zeroizing<[u8; 32]>,
@@ -140,7 +147,7 @@ impl MasterKey {
 
         let mut kek = Zeroizing::new([0u8; 32]);
         let scrypt_params = Params::new(
-            (mk_json.scryptCostParam as f64).log2() as u8,
+            scrypt_log_n(mk_json.scryptCostParam)?,
             mk_json.scryptBlockSize,
             P,
             kek.len(),
@@ -221,5 +228,36 @@ pub mod tests {
             .open_file(DEFAULT_MK_FILE, OpenOptions::new())
             .unwrap();
         MasterKey::from_reader(check_mk_file, DEFAULT_PASSWORD).unwrap();
+    }
+
+    #[test]
+    fn reject_zero_scrypt_cost() {
+        let err = match MasterKeyJson::create(DEFAULT_PASSWORD, 0, SCRYPT_BLOCK_SIZE) {
+            Ok(_) => panic!("zero scrypt cost should be rejected"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            crate::crypto::MasterKeyError::InvalidScryptCost(0)
+        ));
+    }
+
+    #[test]
+    fn reject_non_power_of_two_scrypt_cost() {
+        let err = match MasterKeyJson::create(DEFAULT_PASSWORD, 12_345, SCRYPT_BLOCK_SIZE) {
+            Ok(_) => panic!("non-power-of-two scrypt cost should be rejected"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            crate::crypto::MasterKeyError::InvalidScryptCost(12_345)
+        ));
+    }
+
+    #[test]
+    fn accept_valid_scrypt_cost() {
+        let mk_json =
+            MasterKeyJson::create(DEFAULT_PASSWORD, SCRYPT_COST, SCRYPT_BLOCK_SIZE).unwrap();
+        MasterKey::from_masterkey_json(mk_json, DEFAULT_PASSWORD).unwrap();
     }
 }

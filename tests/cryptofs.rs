@@ -123,6 +123,90 @@ fn test_crypto_fs_sparse_write_and_read() {
     assert_eq!(&data[offset as usize..], payload);
 }
 
+fn memory_crypto_fs() -> CryptoFs<MemoryFs> {
+    let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();
+    let cryptor = crypto::Cryptor::new(vault);
+    CryptoFs::new(
+        VFS_STORAGE_PATH,
+        cryptor,
+        MemoryFs::new(),
+        CryptoFsConfig::default(),
+    )
+    .unwrap()
+}
+
+fn write_pattern(fs: &CryptoFs<MemoryFs>, path: &str, len: usize) -> Vec<u8> {
+    let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+    let mut file = fs.create_file(path).unwrap();
+    file.write_all(&data).unwrap();
+    file.fsync().unwrap();
+    data
+}
+
+fn read_all(fs: &CryptoFs<MemoryFs>, path: &str) -> Vec<u8> {
+    let mut file = fs.open_file(path, OpenOptions::new()).unwrap();
+    let mut data = Vec::new();
+    file.read_to_end(&mut data).unwrap();
+    data
+}
+
+#[test]
+fn test_crypto_fs_truncate_file_to_zero() {
+    let fs = memory_crypto_fs();
+    write_pattern(
+        &fs,
+        "/truncate-zero.dat",
+        FILE_CHUNK_CONTENT_PAYLOAD_LENGTH + 17,
+    );
+    fs.truncate_file("/truncate-zero.dat", 0).unwrap();
+    assert!(read_all(&fs, "/truncate-zero.dat").is_empty());
+}
+
+#[test]
+fn test_crypto_fs_truncate_file_mid_chunk() {
+    let fs = memory_crypto_fs();
+    let original = write_pattern(
+        &fs,
+        "/truncate-mid.dat",
+        FILE_CHUNK_CONTENT_PAYLOAD_LENGTH * 2 + 123,
+    );
+    let new_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH + 77;
+    fs.truncate_file("/truncate-mid.dat", new_len as u64)
+        .unwrap();
+    assert_eq!(read_all(&fs, "/truncate-mid.dat"), original[..new_len]);
+}
+
+#[test]
+fn test_crypto_fs_truncate_file_on_chunk_boundary() {
+    let fs = memory_crypto_fs();
+    let original = write_pattern(
+        &fs,
+        "/truncate-boundary.dat",
+        FILE_CHUNK_CONTENT_PAYLOAD_LENGTH * 2 + 123,
+    );
+    fs.truncate_file(
+        "/truncate-boundary.dat",
+        FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64,
+    )
+    .unwrap();
+    assert_eq!(
+        read_all(&fs, "/truncate-boundary.dat"),
+        original[..FILE_CHUNK_CONTENT_PAYLOAD_LENGTH]
+    );
+}
+
+#[test]
+fn test_crypto_fs_truncate_file_extends_with_zeroes() {
+    let fs = memory_crypto_fs();
+    let original = write_pattern(&fs, "/truncate-extend.dat", 123);
+    let new_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH + 17;
+    fs.truncate_file("/truncate-extend.dat", new_len as u64)
+        .unwrap();
+    let data = read_all(&fs, "/truncate-extend.dat");
+    assert_eq!(&data[..original.len()], original.as_slice());
+    assert_eq!(&data[original.len()..], vec![0u8; new_len - original.len()]);
+}
+
 fn crypto_fs_write<P: AsRef<Path>>(filename: P) {
     let test_write_file: P = filename;
     let vault = Vault::open(&LocalFs::new(), PATH_TO_VAULT, DEFAULT_PASSWORD).unwrap();

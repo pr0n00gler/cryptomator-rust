@@ -140,7 +140,6 @@ impl fmt::Debug for FileHeader {
 /// `Debug` is intentionally implemented manually (not derived) because `Vault`
 /// embeds `MasterKey`, and a derived `Debug` would transitively print raw key
 /// bytes via `Zeroizing<[u8; 32]>`'s `Debug` impl.
-#[derive(Clone)]
 pub struct Cryptor {
     pub vault: Vault,
 }

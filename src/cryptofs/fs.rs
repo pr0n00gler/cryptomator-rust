@@ -801,37 +801,47 @@ impl<FS: 'static + FileSystem> CryptoFs<FS> {
         Ok(self.file_system_provider.remove_dir(real_dir_path)?)
     }
 
+    pub fn truncate_file<P: AsRef<Path>>(
+        &self,
+        path: P,
+        cleartext_len: u64,
+    ) -> Result<(), FileSystemError> {
+        if self.is_read_only() {
+            return Err(FileSystemError::ReadOnly);
+        }
+        let mut file = self.open_file(path, *OpenOptions::new().read(true).write(true))?;
+        file.set_cleartext_len(cleartext_len)?;
+        file.fsync()?;
+        Ok(())
+    }
+
     pub fn copy_file<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
         if self.is_read_only() {
             return Err(FileSystemError::ReadOnly);
         }
-        let mut src_real_path = self.filepath_to_real_path(_src)?;
-        let mut dst_real_path = self.filepath_to_real_path(&_dest)?;
-
-        if src_real_path.is_shorten {
-            src_real_path.full_path = src_real_path.full_path.join(CONTENTS_FILENAME);
+        let src_path = _src.as_ref().to_path_buf();
+        let dest_path = _dest.as_ref().to_path_buf();
+        if src_path == dest_path {
+            return Ok(());
         }
-        if dst_real_path.is_shorten {
-            let encrypted_name = {
-                let mut shard = self.lock_shard(&dst_real_path.full_path)?;
-                shard
-                    .shortened_names
-                    .get_mut(&dst_real_path.full_path)
-                    .cloned()
+
+        let mut src = self.open_file(&src_path, *OpenOptions::new().read(true))?;
+        if self.exists(&dest_path) {
+            self.remove_file(&dest_path)?;
+        }
+        let mut dest = self.create_file(&dest_path)?;
+
+        let mut buffer = vec![0u8; 1024 * 1024];
+        loop {
+            let n = src.read(&mut buffer)?;
+            if n == 0 {
+                break;
             }
-            .ok_or_else(|| {
-                FileSystemError::UnknownError(
-                    "shortened name not found in cache after path resolution".to_string(),
-                )
-            })?;
-            self.create_additional_shorten_entries(&dst_real_path.full_path, &encrypted_name)?;
-
-            dst_real_path.full_path = dst_real_path.full_path.join(CONTENTS_FILENAME);
+            dest.write_all(&buffer[..n])?;
         }
+        dest.fsync()?;
 
-        Ok(self
-            .file_system_provider
-            .copy_file(src_real_path, dst_real_path)?)
+        Ok(())
     }
 
     pub fn copy_dir<P: AsRef<Path>>(&self, _src: P, _dest: P) -> Result<(), FileSystemError> {
@@ -1138,6 +1148,77 @@ impl CryptoFsFile {
     pub fn fsync(&mut self) -> std::io::Result<()> {
         self.rfs_file.flush()?;
         self.rfs_file.fsync()
+    }
+
+    pub fn set_cleartext_len(&mut self, new_len: u64) -> Result<(), FileSystemError> {
+        if self.read_only {
+            return Err(FileSystemError::ReadOnly);
+        }
+
+        self.refresh_metadata()?;
+        let old_len = self.file_size();
+        if new_len == old_len {
+            return Ok(());
+        }
+
+        let old_pos = self.current_pos;
+        if new_len > old_len {
+            self.current_pos = old_len;
+            let mut remaining = new_len - old_len;
+            while remaining > 0 {
+                let n = remaining.min(ZEROS.len() as u64) as usize;
+                self.write_all(&ZEROS[..n])?;
+                remaining -= n as u64;
+            }
+            self.current_pos = old_pos;
+            self.update_metadata()?;
+            return Ok(());
+        }
+
+        let payload_len = FILE_CHUNK_CONTENT_PAYLOAD_LENGTH as u64;
+        let full_chunks = new_len / payload_len;
+        let remainder = (new_len % payload_len) as usize;
+
+        if remainder == 0 {
+            let new_real_len = FILE_HEADER_LENGTH as u64 + full_chunks * FILE_CHUNK_LENGTH as u64;
+            self.rfs_file.set_len(new_real_len)?;
+            self.chunk_cache.clear();
+            self.current_pos = old_pos.min(new_len);
+            self.update_metadata()?;
+            return Ok(());
+        }
+
+        let chunk_index = full_chunks;
+        self.load_chunk(chunk_index, old_len)?;
+        let mut chunk_data = self
+            .chunk_cache
+            .remove(&chunk_index)
+            .unwrap_or_else(|| Zeroizing::new(Vec::new()));
+        if chunk_data.len() < remainder {
+            return Err(FileSystemError::IoError(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "decrypted chunk shorter than requested truncate boundary",
+            )));
+        }
+        chunk_data.truncate(remainder);
+
+        self.write_buffer.resize(FILE_CHUNK_LENGTH, 0);
+        let encrypted_len = self.cryptor.encrypt_chunk(
+            &self.header.nonce,
+            self.header.payload.content_key.as_ref(),
+            chunk_index,
+            &chunk_data,
+            &mut self.write_buffer,
+        )?;
+        let chunk_offset = FILE_HEADER_LENGTH as u64 + chunk_index * FILE_CHUNK_LENGTH as u64;
+        self.rfs_file.seek(SeekFrom::Start(chunk_offset))?;
+        self.rfs_file
+            .write_all(&self.write_buffer[..encrypted_len])?;
+        self.rfs_file.set_len(chunk_offset + encrypted_len as u64)?;
+        self.chunk_cache.clear();
+        self.current_pos = old_pos.min(new_len);
+        self.update_metadata()?;
+        Ok(())
     }
 
     /// Updates metadata according to a real file.
@@ -1527,5 +1608,13 @@ impl Write for CryptoFsFile {
 impl File for CryptoFsFile {
     fn metadata(&self) -> Result<Metadata, Box<dyn Error>> {
         Ok(self.metadata)
+    }
+
+    fn fsync(&mut self) -> std::io::Result<()> {
+        CryptoFsFile::fsync(self)
+    }
+
+    fn set_len(&mut self, len: u64) -> std::io::Result<()> {
+        self.set_cleartext_len(len).map_err(std::io::Error::from)
     }
 }

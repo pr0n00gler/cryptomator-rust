@@ -29,6 +29,16 @@ evaluation purposes.
 * Unix support
 * Read-only mode for safe vault access
 
+## Security and behavior notes
+
+* `vault.cryptomator` must reference `masterkeyfile:masterkey.cryptomator`. Other JWT `kid` values are rejected so unverified vault metadata cannot select an attacker-controlled masterkey path.
+* Local storage access rejects symlink components under the vault storage path.
+* NFS and WebDAV read calls are capped at 1 MiB per request. Clients receive partial reads and can continue reading with subsequent requests.
+* NFS `remove` rejects non-empty directories with `NFS3ERR_NOTEMPTY`; remove child entries first before removing the directory.
+* NFS file resize uses chunk-aware truncation. Shrinking large files does not allocate the target size, while extension is capped to 64 MiB per request.
+* WebDAV writes are flushed durably on `fsync`. When a WebDAV server provides ETags, flush uses `If-Match`, refreshes validators after writes, and returns a conflict if the remote object changed concurrently. Servers without ETag support are handled best-effort and log the missing concurrency protection.
+* Vault v7-to-v8 migration verifies the password before writing, writes temporary masterkey and vault files, fsyncs them, then renames them into place. The old masterkey is not deleted before durable replacements exist.
+
 ## Work in progress
 
 * Dropbox, Google Drive, OneDrive, S3 compatible and other cloud storages to work with without synchronizing with a local directory.
